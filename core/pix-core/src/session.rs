@@ -346,10 +346,11 @@ impl SessionMetadataIndex {
         };
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         let size = metadata.len();
-        if let Some(cached) = self.files.get(path) {
-            if cached.modified == modified && cached.size == size {
-                return Ok(CacheHit::Reused(cached.session.clone()));
-            }
+        if let Some(cached) = self.files.get(path)
+            && cached.modified == modified
+            && cached.size == size
+        {
+            return Ok(CacheHit::Reused(cached.session.clone()));
         }
         let session = parse_session_file(path, workspace)?;
         self.files.insert(

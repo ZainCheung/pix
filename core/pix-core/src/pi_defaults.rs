@@ -87,14 +87,13 @@ fn agent_directory(environment: &HostEnvironment) -> PathBuf {
         .filter(|value| !value.to_string_lossy().trim().is_empty())
     {
         let directory = PathBuf::from(directory);
-        if directory == Path::new("~") || directory.starts_with("~/") {
-            if let Some(home) = environment
+        if (directory == Path::new("~") || directory.starts_with("~/"))
+            && let Some(home) = environment
                 .value("HOME")
                 .filter(|value| !value.to_string_lossy().trim().is_empty())
-            {
-                let suffix = directory.strip_prefix("~").expect("checked tilde prefix");
-                return PathBuf::from(home).join(suffix);
-            }
+        {
+            let suffix = directory.strip_prefix("~").expect("checked tilde prefix");
+            return PathBuf::from(home).join(suffix);
         }
         return directory;
     }

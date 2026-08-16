@@ -103,31 +103,31 @@ impl HostIdentityStore {
         let mut secret_service_command = None;
         let mut secret_service_unavailable = None;
         let mut secret_service_corrupt = None;
-        if let Some(host_id) = &self.secret_service_host_id {
-            if let Some(command) = self.secret_service_command() {
-                match load_secret_service_identity(host_id, &command) {
-                    Ok(Some(identity)) => {
-                        // Keep a local recovery copy for a temporary keyring
-                        // outage. It is never used as a second source of
-                        // truth while Secret Service is healthy.
-                        if let Err(error) = self.ensure_file_fallback(&identity) {
-                            eprintln!(
-                                "Pix: could not refresh the mode-0600 host identity fallback ({error})."
-                            );
-                        }
-                        return Ok(identity);
-                    }
-                    Ok(None) => secret_service_command = Some(command),
-                    Err(error) => {
+        if let Some(host_id) = &self.secret_service_host_id
+            && let Some(command) = self.secret_service_command()
+        {
+            match load_secret_service_identity(host_id, &command) {
+                Ok(Some(identity)) => {
+                    // Keep a local recovery copy for a temporary keyring
+                    // outage. It is never used as a second source of
+                    // truth while Secret Service is healthy.
+                    if let Err(error) = self.ensure_file_fallback(&identity) {
                         eprintln!(
-                            "Pix: Secret Service is unavailable for host identity; \
-                             using the mode-0600 key file if present ({error})."
+                            "Pix: could not refresh the mode-0600 host identity fallback ({error})."
                         );
-                        if error.is_secret_service_corruption() {
-                            secret_service_corrupt = Some(error);
-                        } else {
-                            secret_service_unavailable = Some(error);
-                        }
+                    }
+                    return Ok(identity);
+                }
+                Ok(None) => secret_service_command = Some(command),
+                Err(error) => {
+                    eprintln!(
+                        "Pix: Secret Service is unavailable for host identity; \
+                         using the mode-0600 key file if present ({error})."
+                    );
+                    if error.is_secret_service_corruption() {
+                        secret_service_corrupt = Some(error);
+                    } else {
+                        secret_service_unavailable = Some(error);
                     }
                 }
             }
