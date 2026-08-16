@@ -272,17 +272,23 @@ impl Relay {
         kill_port_listeners(port);
 
         let relay_dir = repo_root().join("relay");
-        let mut command = Command::new("npx");
+        let wrangler = relay_dir.join("node_modules/wrangler/wrangler-dist/cli.js");
+        let mut command = Command::new("node");
         command
-            .args(["wrangler", "dev", "--port", &port.to_string()])
+            .args([
+                wrangler.to_str().expect("wrangler path"),
+                "dev",
+                "--port",
+                &port.to_string(),
+            ])
             .current_dir(&relay_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        // npx spawns wrangler (node), which spawns and supervises workerd.
-        // The whole tree must live in its own process group so stopping the
-        // relay stops all of it; killing npx alone lets wrangler restart
-        // workerd behind our back.
+        // Wrangler spawns and supervises workerd. The whole tree must live
+        // in its own process group so stopping the relay stops all of it;
+        // invoking the local CLI directly avoids an extra npx launcher that
+        // can escape the process group on CI runners.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt as _;
