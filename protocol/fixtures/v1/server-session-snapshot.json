@@ -1,0 +1,1 @@
+{"protocol":1,"request_id":42,"snapshot":{"active_tools":[],"id":"session-fixture","messages":[{"content":"Hello from Pix","role":"user"}],"model":{"id":"fixture-model","name":"Fixture Model","provider":"fixture","reasoning":true},"name":"Fixture session","pending_prompts":[],"state":"idle","thinking_level":"medium"},"type":"session.snapshot"}

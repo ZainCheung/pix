@@ -1,0 +1,34 @@
+[package]
+name = "pix-wire"
+description = "Versioned Pix wire protocol and secure-channel boundary"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+base64.workspace = true
+blake2.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snow.workspace = true
+thiserror.workspace = true
+uniffi.workspace = true
+uuid.workspace = true
+x25519-dalek.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,1 @@
+{"protocol":1,"session_id":"session-fixture","tool":{"call_id":"call-fixture","name":"read","payload":{"path":"README.md"}},"type":"tool.update"}

@@ -1,0 +1,21 @@
+{
+  "name": "pix-relay",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Content-blind encrypted-frame relay for Pix (Cloudflare Worker + Durable Objects)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --max-workers=1 --no-isolate"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.21.2",
+    "@cloudflare/workers-types": "^5.20260812.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.122.0"
+  }
+}

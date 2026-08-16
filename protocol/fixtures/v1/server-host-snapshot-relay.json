@@ -1,0 +1,1 @@
+{"protocol":1,"request_id":42,"snapshot":{"host":{"display_name":"Fixture Mac","id":"4cc891bc-30b9-4b5f-9298-38471d9b27ea"},"relay":{"channel_secret":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","url":"wss://relay.example.invalid"},"workspaces":[{"availability":"available","id":"4cc891bc-30b9-4b5f-9298-38471d9b27ea","name":"Fixture workspace"}]},"type":"host.snapshot"}

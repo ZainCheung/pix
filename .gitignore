@@ -1,0 +1,32 @@
+# Rust
+/target/
+**/target/
+
+# macOS build output
+.DS_Store
+DerivedData/
+.build/
+/build/
+
+# Node / Cloudflare
+node_modules/
+.wrangler/
+.dev.vars
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.mobileprovision
+
+# Logs and runtime state
+*.log
+logs/
+tmp/
+
+# Editors
+.idea/
+.vscode/
+*.swp

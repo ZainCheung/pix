@@ -1,0 +1,34 @@
+[package]
+name = "pix-core"
+description = "Host control-plane primitives for Pix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono.workspace = true
+base64.workspace = true
+blake2.workspace = true
+directories.workspace = true
+fs2.workspace = true
+getrandom.workspace = true
+hostname.workspace = true
+mdns-sd.workspace = true
+pix-wire = { path = "../pix-wire" }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+security-framework-sys.workspace = true
+
+[lints]
+workspace = true

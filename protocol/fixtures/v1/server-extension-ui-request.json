@@ -1,0 +1,1 @@
+{"protocol":1,"request":{"id":"ext-fixture","method":"confirm","payload":{"text":"Allow write?"}},"session_id":"session-fixture","type":"extension_ui.request"}

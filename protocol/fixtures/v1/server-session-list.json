@@ -1,0 +1,1 @@
+{"protocol":1,"request_id":42,"sessions":[{"first_user_message":"Hello from Pix","id":"session-fixture","message_count":1,"modified_at":"2026-08-13T00:00:00Z","name":"Fixture session","state":"idle"}],"type":"session.list","workspace_id":"4cc891bc-30b9-4b5f-9298-38471d9b27ea"}

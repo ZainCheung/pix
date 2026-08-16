@@ -1,0 +1,18 @@
+[Unit]
+Description=Pix host service (secure Pi remote interface)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/pix serve --service
+ExecStop=/usr/bin/pix service stop
+Restart=on-failure
+RestartSec=3
+StandardInput=null
+StandardOutput=null
+StandardError=journal
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

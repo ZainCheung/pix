@@ -1,0 +1,4 @@
+[bindings.swift]
+module_name = "PixWire"
+ffi_module_name = "PixWireFFI"
+generate_immutable_records = true

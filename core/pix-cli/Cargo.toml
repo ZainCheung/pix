@@ -1,0 +1,32 @@
+[package]
+name = "pix-cli"
+description = "Diagnostic and host CLI for Pix"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pix"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hostname.workspace = true
+libc.workspace = true
+pix-core = { path = "../pix-core" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+pix-wire = { path = "../pix-wire" }
+tungstenite = "0.30.0"
