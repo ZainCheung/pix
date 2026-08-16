@@ -68,26 +68,27 @@ that contains unrelated files.
 
 For LAN pairing and access:
 
-1. Start `pix device pair` for the first pairing, or
-   `pix serve` for an already paired device.
+1. Start `pix setup` for first-use pairing, or `pix serve` for an already
+   paired device.
 2. Keep the host process running while the client searches.
 3. Confirm the client and host are on the same network and that local
    discovery is allowed.
-4. Approve the request ID printed by the host:
-   `approve <request-id>`.
+4. Confirm the six-digit code shown by `pix setup` on the phone, then accept
+   the pairing prompt.
 5. Check `pix status` for a live service and paired-device count.
 
-`pix device pair` starts its own foreground host and refuses to run
-while another Pix host owns the same configuration. If a service is already
-running, stop it before a new interactive pairing flow:
+The focused `pix device pair` command also starts its own foreground host and
+refuses to run while another Pix host owns the same configuration. If a
+service is already running, stop it before a new interactive pairing flow:
 
 ~~~bash
 pix service stop
 pix device pair
 ~~~
 
-After approval, stop the foreground process with `quit` and use
-`pix serve` or the Linux user service for normal operation.
+After pairing, `pix setup` installs and starts the Linux user service unless
+`--no-service` was supplied. `pix serve --json-events` remains the foreground
+diagnostic/native-UI bridge.
 
 ## Relay or remote pairing fails
 
@@ -109,10 +110,10 @@ For a local Worker, use the URL printed by your Wrangler dev server. The relay
 does not receive the channel secret, so a successful `pix relay show`
 does not prove that the endpoint is reachable.
 
-For remote pairing, run `pix device pair` or `pix serve` and
-enter `pair-remote`. The QR payload and join code are short-lived;
-start a new pairing offer if they expire. Treat them as credentials and do
-not paste them into issues or logs.
+For remote pairing, run `pix setup` or `pix device pair`. Pix starts the
+short-lived pairing channel and renders a QR automatically. If the code
+expires, start a new pairing flow. Treat the QR and join code as credentials
+and do not paste them into issues or logs.
 
 Inspect only payload-free relay lifecycle entries:
 

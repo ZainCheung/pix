@@ -1,4 +1,4 @@
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
@@ -10,6 +10,7 @@ use pix_core::{
     ConfigStore, HostEnvironment, HostIdentityStore, HostService, HostServiceEvent, HostState,
     PairingCoordinator, PiProbe, RuntimeManager, RuntimeManagerOptions, WorkspaceRegistry,
 };
+use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
 use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 
@@ -23,7 +24,7 @@ use crate::status::{HostServiceControl, HostServiceStatus, HostServiceStatusGuar
 const PI_CONTEXT_GUARD_SOURCE: &str = include_str!("../resources/pi-context-guard.mjs");
 
 #[derive(Debug, Parser)]
-#[command(name = "pix", version, about = "Pix host diagnostics")]
+#[command(name = "pix", version, about = "Pix remote access for Pi")]
 struct Cli {
     /// Override the platform Pix configuration path.
     #[arg(long, global = true, env = "PIX_CONFIG")]
@@ -34,6 +35,34 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Guide a new host through Pi checks, workspace authorization, pairing,
+    /// and background-service setup.
+    Setup {
+        /// Relay WebSocket endpoint. Omit it to use LAN pairing or to answer
+        /// the interactive relay prompt.
+        #[arg(long, visible_alias = "relay-url", env = "PIX_RELAY_URL")]
+        relay: Option<String>,
+        /// Workspace root to authorize. Omit it to answer the interactive
+        /// workspace prompt.
+        #[arg(long, value_name = "PATH", env = "PIX_WORKSPACE")]
+        workspace: Option<PathBuf>,
+        /// Friendly name for the workspace supplied with `--workspace`.
+        #[arg(long, visible_alias = "name")]
+        workspace_name: Option<String>,
+        /// Do not start a pairing flow. Useful for preparing a host in CI.
+        #[arg(long)]
+        no_pair: bool,
+        /// Do not install the Linux user service after setup.
+        #[arg(long)]
+        no_service: bool,
+        /// Accept setup prompts that have a safe default.
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Never prompt; all required values must come from flags or the
+        /// existing configuration.
+        #[arg(long)]
+        non_interactive: bool,
+    },
     /// Check local configuration and Pi RPC prerequisites.
     Doctor {
         /// Use a specific Pi executable instead of searching PATH.
@@ -114,8 +143,9 @@ enum WorkspaceCommand {
     },
     /// List authorized folders. Full paths are printed only on the host.
     List,
-    /// Remove an explicitly authorized folder by its stable ID.
-    Remove { id: uuid::Uuid },
+    /// Remove an explicitly authorized folder by ID, or choose one
+    /// interactively when the ID is omitted.
+    Remove { id: Option<uuid::Uuid> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -124,8 +154,8 @@ enum DeviceCommand {
     Pair,
     /// List paired phones. Public keys are never printed.
     List,
-    /// Revoke a paired phone by its durable device ID.
-    Revoke { id: String },
+    /// Revoke a paired phone by ID, or choose one interactively when omitted.
+    Revoke { id: Option<String> },
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,6 +186,26 @@ fn main() -> Result<()> {
     let store = ConfigStore::new(config_path);
 
     match cli.command {
+        Command::Setup {
+            relay,
+            workspace,
+            workspace_name,
+            no_pair,
+            no_service,
+            yes,
+            non_interactive,
+        } => setup(
+            &store,
+            &SetupOptions {
+                relay,
+                workspace,
+                workspace_name,
+                no_pair,
+                no_service,
+                yes,
+                non_interactive,
+            },
+        ),
         Command::Doctor { pi } => doctor(&store, pi),
         Command::Workspace { command } => workspace(&store, command),
         Command::Device { command } => device(&store, command),
@@ -450,23 +500,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
     let config = store
         .load_or_create(default_host_name())
         .context("loading Pix configuration")?;
-    let identity_path = store
-        .path()
-        .parent()
-        .context("locating host identity directory")?
-        .join("host-identity.key");
-    let identity_store = HostIdentityStore::new(identity_path);
-    #[cfg(target_os = "macos")]
-    let identity_store = if std::env::var("PIX_DISABLE_KEYCHAIN").is_ok_and(|value| value == "1") {
-        identity_store
-    } else {
-        identity_store.with_keychain_host_id(config.host.id.to_string())
-    };
-    #[cfg(target_os = "linux")]
-    let identity_store = identity_store.with_secret_service_host_id(config.host.id.to_string());
-    let identity = identity_store
-        .load_or_create()
-        .context("loading host identity")?;
+    let identity = load_host_identity(store, config.host.id).context("loading host identity")?;
     let config_directory = store
         .path()
         .parent()
@@ -717,6 +751,27 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
     }
     service.shutdown();
     Ok(())
+}
+
+fn load_host_identity(
+    store: &ConfigStore,
+    host_id: uuid::Uuid,
+) -> Result<pix_core::host_identity::HostIdentityKey> {
+    let identity_path = store
+        .path()
+        .parent()
+        .context("locating host identity directory")?
+        .join("host-identity.key");
+    let identity_store = HostIdentityStore::new(identity_path);
+    #[cfg(target_os = "macos")]
+    let identity_store = if std::env::var("PIX_DISABLE_KEYCHAIN").is_ok_and(|value| value == "1") {
+        identity_store
+    } else {
+        identity_store.with_keychain_host_id(host_id.to_string())
+    };
+    #[cfg(target_os = "linux")]
+    let identity_store = identity_store.with_secret_service_host_id(host_id.to_string());
+    identity_store.load_or_create().map_err(Into::into)
 }
 
 /// Materializes the small Pix context projection extension next to the host
@@ -970,13 +1025,122 @@ fn emit_event(event: &ServeEvent, output: ServeOutput, log: &HostLog) {
     }
 
     let line = if output.json_events {
-        serde_json::to_string(event).unwrap_or_else(|_| format!("{event:?}"))
+        serde_json::to_string(event).unwrap_or_else(|_| {
+            r#"{"type":"command_error","message":"event encoding failed"}"#.to_owned()
+        })
     } else {
-        format!("{event:?}")
+        human_event(event)
     };
     let mut stdout = std::io::stdout().lock();
-    let _ = writeln!(stdout, "{line}");
+    let _ = write!(stdout, "{line}");
+    if !line.ends_with('\n') {
+        let _ = writeln!(stdout);
+    }
     let _ = stdout.flush();
+}
+
+/// Stable, product-facing rendering for the foreground host. The JSON event
+/// stream remains the native UI/automation contract; this renderer deliberately
+/// does not expose Rust debug structs, UUIDs, fingerprints, or relay secrets.
+fn human_event(event: &ServeEvent) -> String {
+    match event {
+        ServeEvent::Ready { .. } => "✓ Pix host is ready\n".to_owned(),
+        ServeEvent::Environment { .. } => "✓ Pi environment ready\n".to_owned(),
+        ServeEvent::PairingRequested {
+            device_name,
+            confirmation_code,
+            ..
+        } => format!(
+            "\n{} wants to pair.\nVerify this code on your phone: {}\n\n",
+            terminal_label(device_name),
+            format_confirmation_code(confirmation_code)
+        ),
+        ServeEvent::ConnectionEstablished { device_name, .. } => {
+            format!("✓ {} paired and connected\n", terminal_label(device_name))
+        }
+        ServeEvent::ConnectionClosed { .. } => "○ Device disconnected\n".to_owned(),
+        ServeEvent::ConnectionFailed { .. } => "✗ Device connection failed\n".to_owned(),
+        ServeEvent::DeviceList { devices } => {
+            format!(
+                "✓ {} paired device{}\n",
+                devices.len(),
+                plural(devices.len())
+            )
+        }
+        ServeEvent::DeviceRevoked { device_name, .. } => {
+            format!("✓ Revoked {}\n", terminal_label(device_name))
+        }
+        ServeEvent::SessionList { sessions } => {
+            format!(
+                "✓ {} active session{}\n",
+                sessions.len(),
+                plural(sessions.len())
+            )
+        }
+        ServeEvent::SessionReleased { .. } => "✓ Session released\n".to_owned(),
+        ServeEvent::RelayConfigured { .. } => "✓ Relay configured\n".to_owned(),
+        ServeEvent::RelayChannel { label, state, .. } => match (label.as_str(), state.as_str()) {
+            ("pairing", "waiting") => "◐ Waiting for a device…\n".to_owned(),
+            ("pairing", "peer_joined") => "✓ Device connected to relay\n".to_owned(),
+            (_, "peer_joined") => "✓ Remote connection established\n".to_owned(),
+            (_, "peer_left") => "○ Remote device disconnected\n".to_owned(),
+            (_, state) if state.starts_with("failed") => {
+                "✗ Relay connection failed; LAN remains available\n".to_owned()
+            }
+            (_, "stopped") => "○ Relay connection stopped\n".to_owned(),
+            _ => "○ Relay status changed\n".to_owned(),
+        },
+        ServeEvent::RemotePairingReady {
+            qr_payload,
+            join_code,
+            expires_at,
+        } => render_remote_pairing(qr_payload, join_code, *expires_at),
+        ServeEvent::CommandError { message } => format!("✗ {message}\n"),
+    }
+}
+
+fn format_confirmation_code(code: &str) -> String {
+    if code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        format!("{} {}", &code[..3], &code[3..])
+    } else {
+        code.to_owned()
+    }
+}
+
+fn terminal_label(value: &str) -> String {
+    let mut label = value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(80)
+        .collect::<String>();
+    if label.is_empty() {
+        label.push_str("device");
+    }
+    label
+}
+
+fn render_remote_pairing(qr_payload: &str, join_code: &str, expires_at: u64) -> String {
+    use std::fmt::Write as _;
+
+    let mut output = String::from("\nScan this QR code with Pix:\n\n");
+    match QrCode::new(qr_payload.as_bytes()) {
+        Ok(code) => {
+            let image = code.render::<unicode::Dense1x2>().quiet_zone(true).build();
+            output.push_str(&image);
+            output.push('\n');
+        }
+        Err(_) => {
+            // A QR renderer failure must not expose the encoded secret. The
+            // machine-readable interface still contains the full payload.
+            output.push_str("(QR rendering is unavailable in this terminal)\n");
+        }
+    }
+    let _ = writeln!(output, "Code: {join_code}");
+    if expires_at > 0 {
+        output.push_str("Expires in about 2 minutes\n");
+    }
+    output.push('\n');
+    output
 }
 
 fn loggable_event(event: &ServeEvent) -> serde_json::Value {
@@ -1024,6 +1188,364 @@ fn loggable_event(event: &ServeEvent) -> serde_json::Value {
         }),
         ServeEvent::CommandError { .. } => serde_json::json!({"type": "command_error"}),
     }
+}
+
+#[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
+struct SetupOptions {
+    relay: Option<String>,
+    workspace: Option<PathBuf>,
+    workspace_name: Option<String>,
+    no_pair: bool,
+    no_service: bool,
+    yes: bool,
+    non_interactive: bool,
+}
+
+/// Runs the product-facing first-use flow while keeping the existing
+/// subsystem commands available for diagnostics and automation.
+fn setup(store: &ConfigStore, options: &SetupOptions) -> Result<()> {
+    let interactive = !options.non_interactive
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal();
+    if !interactive && !options.non_interactive {
+        eprintln!(
+            "Pix setup needs a terminal for prompts; pass --non-interactive with \
+             --workspace and --no-pair, or run it from a terminal."
+        );
+    }
+    if !interactive && !options.no_pair && !options.yes {
+        bail!("non-interactive setup cannot approve a phone; pass --no-pair or --yes");
+    }
+
+    println!("\nPix\nRemote access for Pi\n");
+    println!("Checking this computer…");
+    let mut config = store
+        .load_or_create(default_host_name())
+        .context("loading Pix configuration")?;
+    let environment = HostEnvironment::resolve_for("pi");
+    let installation = PiProbe::new(config.preferences.pi_executable.clone())
+        .with_environment(environment)
+        .inspect()
+        .context("checking Pi (run `pix doctor` for details)")?;
+    if !installation.supported {
+        bail!(
+            "Pi {} is outside the currently verified range {}",
+            installation.version,
+            pix_core::pi::SUPPORTED_PI_VERSION
+        );
+    }
+    println!("✓ Pi {}", installation.version);
+    let _identity = load_host_identity(store, config.host.id).context("preparing host identity")?;
+    println!("✓ Host identity ready");
+
+    let relay_url = configure_setup_relay(&mut config, options, interactive)?;
+    if relay_url.is_some() {
+        println!("✓ Relay configured");
+    } else {
+        println!("✓ Local network pairing available");
+    }
+
+    configure_setup_workspace(&mut config, options, interactive)?;
+    store.save(&config).context("saving setup configuration")?;
+
+    if config.devices.is_empty() && !options.no_pair {
+        run_setup_pairing(store, relay_url.is_some(), options.yes, interactive)?;
+    } else if config.devices.is_empty() {
+        println!("○ Device pairing skipped");
+    } else {
+        println!(
+            "✓ {} paired device{} already configured",
+            config.devices.len(),
+            plural(config.devices.len())
+        );
+    }
+
+    install_setup_service(store, options.no_service)?;
+    println!("\nYou're ready.\nOpen Pix on your phone.\n");
+    Ok(())
+}
+
+fn configure_setup_relay(
+    config: &mut pix_core::HostConfig,
+    options: &SetupOptions,
+    interactive: bool,
+) -> Result<Option<String>> {
+    let relay = match options.relay.as_deref() {
+        Some(url) => Some(validate_relay_url(url)?),
+        None => match config.preferences.active_relay_url() {
+            Some(url) => Some(url.to_owned()),
+            None if interactive => {
+                let value = prompt_line("Relay URL (optional for local network)", "")?;
+                let value = value.trim();
+                if value.is_empty() {
+                    None
+                } else {
+                    Some(validate_relay_url(value)?)
+                }
+            }
+            None => None,
+        },
+    };
+    if let Some(url) = &relay {
+        config.preferences.relay_url = Some(url.clone());
+        config.preferences.relay_enabled = true;
+    }
+    Ok(relay)
+}
+
+fn validate_relay_url(url: &str) -> Result<String> {
+    let value = url.trim();
+    if value.is_empty() || !(value.starts_with("ws://") || value.starts_with("wss://")) {
+        bail!("relay URL must start with ws:// or wss://");
+    }
+    if value.chars().any(char::is_whitespace) {
+        bail!("relay URL cannot contain whitespace");
+    }
+    Ok(value.to_owned())
+}
+
+fn configure_setup_workspace(
+    config: &mut pix_core::HostConfig,
+    options: &SetupOptions,
+    interactive: bool,
+) -> Result<()> {
+    let needs_workspace = options.workspace.is_some() || config.workspaces.is_empty();
+    if !needs_workspace {
+        println!(
+            "✓ {} authorized workspace{}",
+            config.workspaces.len(),
+            plural(config.workspaces.len())
+        );
+        return Ok(());
+    }
+
+    let path = match options.workspace.clone() {
+        Some(path) => path,
+        None if interactive => {
+            let current = std::env::current_dir().context("locating current directory")?;
+            let default = current.display().to_string();
+            let value = prompt_line(&format!("Workspace path [{default}]"), &default)?;
+            PathBuf::from(value)
+        }
+        None => bail!("setup needs --workspace when no authorized workspace exists"),
+    };
+    let canonical = std::fs::canonicalize(&path)
+        .with_context(|| format!("resolving workspace {}", path.display()))?;
+    if let Some(existing) = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.path == canonical)
+    {
+        println!("✓ Workspace {} already authorized", existing.name);
+        return Ok(());
+    }
+    let name = options.workspace_name.clone();
+    let mut registry = WorkspaceRegistry::new(config);
+    let added = registry
+        .add(&canonical, name)
+        .with_context(|| format!("authorizing workspace {}", path.display()))?
+        .clone();
+    println!("✓ Added workspace {}", added.name);
+    Ok(())
+}
+
+fn prompt_line(label: &str, default: &str) -> Result<String> {
+    print!("› {label}: ");
+    std::io::stdout().flush().context("flushing setup prompt")?;
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("reading setup input")?;
+    if read == 0 {
+        if default.is_empty() {
+            bail!("setup input ended before completing the prompt");
+        }
+        return Ok(default.to_owned());
+    }
+    let value = line.trim();
+    if value.is_empty() {
+        Ok(default.to_owned())
+    } else {
+        Ok(value.to_owned())
+    }
+}
+
+fn prompt_yes_no(label: &str, default_yes: bool) -> Result<bool> {
+    let suffix = if default_yes { "Y/n" } else { "y/N" };
+    print!("? {label} [{suffix}] ");
+    std::io::stdout().flush().context("flushing setup prompt")?;
+    let mut line = String::new();
+    let read = std::io::stdin()
+        .read_line(&mut line)
+        .context("reading setup confirmation")?;
+    if read == 0 {
+        return Ok(default_yes);
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Ok(true),
+        "n" | "no" => Ok(false),
+        "" => Ok(default_yes),
+        _ => bail!("please answer yes or no"),
+    }
+}
+
+/// Runs a short-lived JSON event host for the first device. This keeps pairing
+/// approvals in the setup command while the long-lived service remains an
+/// implementation detail after setup completes.
+#[allow(clippy::too_many_lines)]
+fn run_setup_pairing(
+    store: &ConfigStore,
+    remote: bool,
+    yes: bool,
+    interactive: bool,
+) -> Result<()> {
+    if HostServiceStatus::current(store.path()).is_some() {
+        bail!("Pix is already running; stop the existing host service before pairing a new device");
+    }
+    let executable = std::env::current_exe().context("locating current pix executable")?;
+    let mut child = std::process::Command::new(executable)
+        .arg("--config")
+        .arg(store.path())
+        .args(["serve", "--json-events"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .context("starting Pix host for setup pairing")?;
+    let mut command_input = child.stdin.take().context("opening setup host control")?;
+    let stdout = child.stdout.take().context("opening setup host events")?;
+    let mut events = std::io::BufReader::new(stdout);
+    let mut paired = false;
+    let mut remote_requested = false;
+    let mut line = String::new();
+
+    println!();
+    if remote {
+        println!("Pair your phone");
+        println!("Pix will show a QR code as soon as the relay is ready.");
+    } else {
+        println!("Pair your phone");
+        println!("Waiting for a device on the local network…");
+    }
+
+    loop {
+        line.clear();
+        let bytes = events
+            .read_line(&mut line)
+            .context("reading setup host events")?;
+        if bytes == 0 {
+            break;
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(line.trim()).context("decoding setup host event")?;
+        match event.get("type").and_then(serde_json::Value::as_str) {
+            Some("ready") if remote && !remote_requested => {
+                write_setup_command(&mut command_input, "pair-remote")?;
+                remote_requested = true;
+            }
+            Some("remote_pairing_ready") => {
+                let payload = event
+                    .get("qr_payload")
+                    .and_then(serde_json::Value::as_str)
+                    .context("setup host omitted QR payload")?;
+                let join_code = event
+                    .get("join_code")
+                    .and_then(serde_json::Value::as_str)
+                    .context("setup host omitted pairing code")?;
+                let expires_at = event
+                    .get("expires_at")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default();
+                print!("{}", render_remote_pairing(payload, join_code, expires_at));
+                std::io::stdout().flush().ok();
+            }
+            Some("pairing_requested") => {
+                let id = event
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .context("setup host omitted pairing request ID")?;
+                let name = event
+                    .get("device_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("Your phone");
+                let name = terminal_label(name);
+                let code = event
+                    .get("confirmation_code")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                println!(
+                    "\n{name} wants to pair. Verify code {} on your phone.",
+                    format_confirmation_code(code)
+                );
+                let approve = if yes {
+                    true
+                } else if interactive {
+                    prompt_yes_no(&format!("Pair {name}"), true)?
+                } else {
+                    bail!("pairing requires --yes when setup is non-interactive")
+                };
+                write_setup_command(
+                    &mut command_input,
+                    &format!("{} {id}", if approve { "approve" } else { "reject" }),
+                )?;
+            }
+            Some("connection_established") => {
+                paired = true;
+                write_setup_command(&mut command_input, "quit")?;
+                break;
+            }
+            Some("command_error") => {
+                let message = event
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("setup host command failed");
+                bail!("{message}");
+            }
+            Some("connection_failed") => {
+                println!("✗ Device connection failed; waiting for another attempt…");
+            }
+            _ => {}
+        }
+    }
+
+    if !paired {
+        let status = child.wait().context("waiting for setup host")?;
+        if !status.success() {
+            bail!("Pix host exited before pairing a device ({status})");
+        }
+        bail!("Pix host stopped before pairing a device");
+    }
+    let _ = child.wait();
+    println!("✓ Phone paired");
+    Ok(())
+}
+
+fn write_setup_command(input: &mut impl Write, command: &str) -> Result<()> {
+    writeln!(input, "{command}").context("writing setup host command")?;
+    input.flush().context("flushing setup host command")?;
+    Ok(())
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn install_setup_service(store: &ConfigStore, no_service: bool) -> Result<()> {
+    if no_service {
+        println!("○ Background service skipped (--no-service)");
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        println!("Installing Pix background service…");
+        service::run(store, &ServiceCommand::Install { no_start: false })
+            .context("installing Pix background service")?;
+        println!("✓ Pix is running in the background");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = store;
+        println!("○ Background service installation is available on Linux");
+    }
+    Ok(())
 }
 
 fn doctor(store: &ConfigStore, pi: Option<PathBuf>) -> Result<()> {
@@ -1191,28 +1713,15 @@ fn configured_pi_executable(
 fn device(store: &ConfigStore, command: DeviceCommand) -> Result<()> {
     match command {
         DeviceCommand::Pair => {
-            if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
-                bail!(
-                    "Pix host service is already running (pid {}, port {}); use its existing host controls",
-                    current.pid,
-                    current.port
-                );
+            let config = store
+                .load_or_create(default_host_name())
+                .context("loading Pix configuration")?;
+            let remote = config.preferences.active_relay_url().is_some();
+            let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            if !interactive {
+                bail!("`pix device pair` requires an interactive terminal");
             }
-            println!("Starting Pix in pairing mode. Use the Pix iOS app to discover");
-            println!("this host, then type `approve <id>` at the prompt below.");
-            println!("Type `pair-remote` after configuring a relay to show a QR payload,");
-            println!("or `quit` to stop.");
-            let executable = std::env::current_exe().context("locating current pix executable")?;
-            let status = std::process::Command::new(executable)
-                .arg("--config")
-                .arg(store.path())
-                .arg("serve")
-                .status()
-                .context("running pix serve for device pairing")?;
-            if !status.success() {
-                bail!("pix serve exited with {status}");
-            }
-            Ok(())
+            run_setup_pairing(store, remote, false, true)
         }
         DeviceCommand::List => {
             let config = store.load().context("loading Pix configuration")?;
@@ -1228,6 +1737,7 @@ fn device(store: &ConfigStore, command: DeviceCommand) -> Result<()> {
         }
         DeviceCommand::Revoke { id } => {
             let mut config = store.load().context("loading Pix configuration")?;
+            let id = select_device_id(&config, id)?;
             let index = config
                 .devices
                 .iter()
@@ -1314,6 +1824,7 @@ fn workspace(store: &ConfigStore, command: WorkspaceCommand) -> Result<()> {
         }
         WorkspaceCommand::Remove { id } => {
             let mut config = store.load().context("loading Pix configuration")?;
+            let id = select_workspace_id(&config, id)?;
             let index = config
                 .workspaces
                 .iter()
@@ -1325,6 +1836,74 @@ fn workspace(store: &ConfigStore, command: WorkspaceCommand) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn select_device_id(config: &pix_core::HostConfig, id: Option<String>) -> Result<String> {
+    if let Some(id) = id {
+        return Ok(id);
+    }
+    if config.devices.is_empty() {
+        bail!("no paired devices");
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        bail!("device ID is required outside an interactive terminal");
+    }
+    println!("Select a device:");
+    for (index, device) in config.devices.iter().enumerate() {
+        println!("  {}. {}", index + 1, device.name);
+    }
+    let answer = prompt_line("Device number", "1")?;
+    if let Ok(index) = answer.parse::<usize>()
+        && let Some(device) = config.devices.get(index.saturating_sub(1))
+    {
+        return Ok(device.id.clone());
+    }
+    if let Some(device) = config
+        .devices
+        .iter()
+        .find(|device| device.name.eq_ignore_ascii_case(&answer))
+    {
+        return Ok(device.id.clone());
+    }
+    bail!("unknown device selection: {answer}")
+}
+
+fn select_workspace_id(
+    config: &pix_core::HostConfig,
+    id: Option<uuid::Uuid>,
+) -> Result<uuid::Uuid> {
+    if let Some(id) = id {
+        return Ok(id);
+    }
+    if config.workspaces.is_empty() {
+        bail!("no authorized workspaces");
+    }
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        bail!("workspace ID is required outside an interactive terminal");
+    }
+    println!("Select a workspace:");
+    for (index, workspace) in config.workspaces.iter().enumerate() {
+        println!(
+            "  {}. {}  {}",
+            index + 1,
+            workspace.name,
+            workspace.path.display()
+        );
+    }
+    let answer = prompt_line("Workspace number", "1")?;
+    if let Ok(index) = answer.parse::<usize>()
+        && let Some(workspace) = config.workspaces.get(index.saturating_sub(1))
+    {
+        return Ok(workspace.id);
+    }
+    if let Some(workspace) = config
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.name.eq_ignore_ascii_case(&answer))
+    {
+        return Ok(workspace.id);
+    }
+    bail!("unknown workspace selection: {answer}")
 }
 
 fn default_host_name() -> String {
@@ -1345,7 +1924,10 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{ServeEvent, loggable_event};
+    use super::{
+        ServeEvent, format_confirmation_code, human_event, loggable_event, render_remote_pairing,
+        validate_relay_url,
+    };
 
     #[test]
     fn loggable_events_omit_paths_names_and_secrets() {
@@ -1371,6 +1953,44 @@ mod tests {
         assert!(rendered.contains("[redacted]"));
         assert!(!rendered.contains("top-secret"));
         assert!(!rendered.contains("ABCD-EFGH"));
+    }
+
+    #[test]
+    fn human_events_do_not_fall_back_to_debug_structs() {
+        let rendered = human_event(&ServeEvent::Ready {
+            port: 1234,
+            fingerprint: "fingerprint".to_owned(),
+        });
+        assert_eq!(rendered, "✓ Pix host is ready\n");
+        assert!(!rendered.contains("Ready {"));
+    }
+
+    #[test]
+    fn confirmation_codes_are_grouped_for_humans() {
+        assert_eq!(format_confirmation_code("877437"), "877 437");
+        assert_eq!(format_confirmation_code("12345"), "12345");
+    }
+
+    #[test]
+    fn terminal_qr_renderer_keeps_raw_payload_out_of_human_text() {
+        let rendered = render_remote_pairing(
+            "pix://pair?v=1&relay=wss%3A%2F%2Fexample.test&secret=top-secret",
+            "KR9M-PBYA",
+            123,
+        );
+        assert!(rendered.contains("Scan this QR code with Pix"));
+        assert!(rendered.contains("Code: KR9M-PBYA"));
+        assert!(!rendered.contains("top-secret"));
+    }
+
+    #[test]
+    fn setup_relay_validation_accepts_only_websocket_endpoints() {
+        assert_eq!(
+            validate_relay_url(" wss://relay.example.com ").expect("valid relay"),
+            "wss://relay.example.com"
+        );
+        assert!(validate_relay_url("https://relay.example.com").is_err());
+        assert!(validate_relay_url("wss://relay.example.com/with space").is_err());
     }
 
     #[cfg(unix)]

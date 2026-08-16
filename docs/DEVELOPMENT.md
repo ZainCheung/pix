@@ -72,24 +72,23 @@ context guard are all derived from the selected configuration path.
 
 ### Pairing during development
 
-`pix device pair` starts a foreground `pix serve` process
-for pairing. It must not be started while another host process owns the same
-configuration:
+For the product-facing flow, use `pix setup`; it starts a short-lived JSON
+event host internally, renders a QR when relay transport is configured, and
+maps the confirmation prompt to the pairing request ID internally:
+
+~~~bash
+cargo run -p pix-cli -- --config /tmp/pix.json setup
+~~~
+
+The focused pairing command follows the same flow:
 
 ~~~bash
 cargo run -p pix-cli -- --config /tmp/pix.json device pair
 ~~~
 
-When a client sends a request, approve it at the interactive prompt:
-
-~~~text
-approve <request-id>
-~~~
-
-Use `devices`, `sessions`, and
-`release <session-id>` to inspect the running host. Type
-`quit` to stop it. With a configured relay, `pair-remote`
-starts a short-lived remote pairing channel and prints the client payload.
+Use `pix serve --json-events` when testing a native UI bridge. Its JSONL
+events retain request IDs for automation; the normal `pix serve` presenter
+never prints Rust debug structs or raw relay payloads.
 
 ## Relay development
 
