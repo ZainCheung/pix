@@ -13,9 +13,9 @@ the documented wire protocol.
 ## Repository layout
 
 ```text
-core/pix-wire/       Shared protocol, Noise channel, and UniFFI boundary
-core/pix-core/       Rust host control plane and Pi RPC lifecycle
-core/pix-cli/        `pix` command-line host entry point
+crates/pix-wire/     Shared protocol, Noise channel, and UniFFI boundary
+crates/pix-core/     Rust host control plane and Pi RPC lifecycle
+crates/pix-cli/      `pix` command-line host entry point
 protocol/            Versioned schema and cross-language fixtures
 relay/               Content-blind Cloudflare Worker relay
 packaging/linux/     Linux service and package scripts
@@ -26,10 +26,14 @@ docs/                Host architecture and compatibility contract
 ## Development
 
 ```bash
+cargo fmt --all -- --check
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cd relay && npm ci && npm test && npm run typecheck
 ```
+
+Release automation and local packaging conventions are documented in
+[docs/RELEASE.md](docs/RELEASE.md).
 
 The Apple repository can point `PIX_HOST_CHECKOUT` at a local checkout while
 developing the client against an unreleased host commit.

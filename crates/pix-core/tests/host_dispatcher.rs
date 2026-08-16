@@ -310,9 +310,11 @@ fn snapshot_marks_a_missing_workspace_unavailable() {
     let snapshot = dispatcher.dispatch(request(1, ClientRequest::HostSnapshot));
     match &snapshot[0].event {
         ServerEvent::HostSnapshot { snapshot } => {
-            assert!(snapshot.workspaces.iter().all(|item| {
-                item.availability == pix_wire::WorkspaceAvailability::Unavailable
-            }));
+            assert!(
+                snapshot.workspaces.iter().all(|item| {
+                    item.availability == pix_wire::WorkspaceAvailability::Unavailable
+                })
+            );
         }
         event => panic!("expected host snapshot, got {event:?}"),
     }
@@ -327,9 +329,11 @@ fn availability_cache_does_not_bypass_session_list_authorization() {
     let first = dispatcher.dispatch(request(1, ClientRequest::HostSnapshot));
     match &first[0].event {
         ServerEvent::HostSnapshot { snapshot } => {
-            assert!(snapshot.workspaces.iter().all(|item| {
-                item.availability == pix_wire::WorkspaceAvailability::Available
-            }));
+            assert!(
+                snapshot.workspaces.iter().all(|item| {
+                    item.availability == pix_wire::WorkspaceAvailability::Available
+                })
+            );
         }
         event => panic!("expected host snapshot, got {event:?}"),
     }

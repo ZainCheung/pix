@@ -495,9 +495,10 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
     let device_channel_secret = relay_access.channel_secret;
     assert_ne!(device_channel_secret, pairing_offer.channel_secret);
     phone.close();
-    wait_for_relay_event(&relay_events, |event| {
-        matches!(event, RelayServiceEvent::PeerLeft { label } if label == "pairing")
-    });
+    wait_for_relay_event(
+        &relay_events,
+        |event| matches!(event, RelayServiceEvent::PeerLeft { label } if label == "pairing"),
+    );
 
     // A phone whose route dropped during approval rejoins the same pairing
     // channel within the window and probes with IK. IK completing is the
@@ -512,7 +513,9 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
     .expect("probe IK handshake");
     probe.send_record(&probe_ik.write_message(b"").expect("probe IK message 1"));
     let message_2 = probe.read_record();
-    probe_ik.read_message(&message_2).expect("probe IK message 2");
+    probe_ik
+        .read_message(&message_2)
+        .expect("probe IK message 2");
     let mut probe_secure = SecureClient {
         transport: probe_ik.into_transport().expect("probe transport"),
         request_id: 0,

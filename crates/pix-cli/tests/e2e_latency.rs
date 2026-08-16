@@ -24,7 +24,11 @@ fn records_payload_free_lan_host_snapshot_latency() {
     let _ = phone.finish_pairing(pending);
     serve.wait_event("connection_established", |_| true);
 
-    let samples = sample_snapshots(&mut phone, || Link::connect_lan(serve.lan_addr()), LAN_SAMPLES);
+    let samples = sample_snapshots(
+        &mut phone,
+        || Link::connect_lan(serve.lan_addr()),
+        LAN_SAMPLES,
+    );
     report("lan", &samples);
     assert!(
         percentile(&samples, 0.95) < 10_000,
@@ -69,11 +73,7 @@ fn records_payload_free_relay_host_snapshot_latency() {
     );
 }
 
-fn sample_snapshots(
-    phone: &mut Phone,
-    connect: impl Fn() -> Link,
-    count: usize,
-) -> Vec<u64> {
+fn sample_snapshots(phone: &mut Phone, connect: impl Fn() -> Link, count: usize) -> Vec<u64> {
     let mut samples = Vec::with_capacity(count);
     for _ in 0..count {
         let started = Instant::now();

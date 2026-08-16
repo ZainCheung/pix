@@ -1,0 +1,271 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate tag and workspace version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+      - id: release
+        name: Check release invariants
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.ref_name }}
+        run: |
+          set -eu
+
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          python3 - "$tag" <<'PY'
+          import re
+          import sys
+
+          tag = sys.argv[1]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", tag):
+              raise SystemExit(f"invalid release tag: {tag}")
+          PY
+
+          version="$(scripts/version.sh)"
+          tag_version="${tag#v}"
+          [ "$tag_version" = "$version" ] || {
+            printf '%s\n' "Tag $tag does not match workspace version $version" >&2
+            exit 1
+          }
+          [ -f Cargo.lock ] || {
+            printf '%s\n' "Cargo.lock is required for releases" >&2
+            exit 1
+          }
+
+          commit="$(git rev-parse HEAD)"
+          tag_commit="$(git rev-parse "$tag^{commit}")"
+          [ "$commit" = "$tag_commit" ] || {
+            printf '%s\n' "Checked out commit is not the commit pointed to by $tag" >&2
+            exit 1
+          }
+
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            git fetch origin main:refs/remotes/origin/main
+          fi
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main || {
+            printf '%s\n' "Release commit must be contained in origin/main" >&2
+            exit 1
+          }
+
+          source_date_epoch="$(git show -s --format=%ct "$commit")"
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'version=%s\n' "$version"
+            printf 'commit=%s\n' "$commit"
+            printf 'source_date_epoch=%s\n' "$source_date_epoch"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify release commit
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+        working-directory: relay
+      - run: cargo fmt --all -- --check
+      - run: cargo test --workspace --all-features --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: npm test
+        working-directory: relay
+      - run: npm run typecheck
+        working-directory: relay
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: [validate, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+      - run: rustup target add ${{ matrix.target }}
+      - name: Install native package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y rpm
+      - name: Build and package Linux artifacts
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.validate.outputs.source_date_epoch }}
+          PIX_RELEASE_DIR: ${{ runner.temp }}/pix-release
+          PIX_PACKAGE_DEB: "1"
+          PIX_PACKAGE_RPM: "1"
+        run: |
+          mkdir -p "$PIX_RELEASE_DIR"
+          packaging/linux/build-release.sh "${{ matrix.target }}" "$PIX_RELEASE_DIR"
+          packaging/linux/package.sh "${{ matrix.target }}" "$PIX_RELEASE_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pix-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pix-release/*
+          if-no-files-found: error
+
+  apple:
+    name: Apple XCFramework
+    needs: [validate, verify]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+      - name: Install Apple Rust targets
+        run: >-
+          rustup target add
+          aarch64-apple-ios
+          aarch64-apple-ios-sim
+          x86_64-apple-ios
+          aarch64-apple-darwin
+          x86_64-apple-darwin
+      - name: Build XCFramework and Swift bindings
+        env:
+          BUILD_ROOT: ${{ runner.temp }}/pix-wire-build
+        run: packaging/apple/build-pix-wire-xcframework.sh "$BUILD_ROOT"
+      - name: Package Apple artifact
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          BUILD_ROOT: ${{ runner.temp }}/pix-wire-build
+        run: |
+          set -eu
+          package_root="$RUNNER_TEMP/pix-wire-$VERSION"
+          dist="$RUNNER_TEMP/pix-release"
+          mkdir -p "$package_root" "$dist"
+          cp -R "$BUILD_ROOT/PixWireFFI.xcframework" "$package_root/"
+          cp "$BUILD_ROOT/bindings/PixWire.swift" "$package_root/"
+          printf '%s\n' "$VERSION" > "$package_root/VERSION"
+          git rev-parse HEAD > "$package_root/COMMIT"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$package_root" "$dist/pix-wire-$VERSION-apple.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pix-apple
+          path: ${{ runner.temp }}/pix-release/*
+          if-no-files-found: error
+
+  finalize:
+    name: Finalize release metadata
+    needs: [validate, linux, apple]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pix-linux-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pix-apple
+          merge-multiple: true
+          path: dist
+      - name: Generate SBOM, licenses, and checksums
+        env:
+          SOURCE_DATE_EPOCH: ${{ needs.validate.outputs.source_date_epoch }}
+          PIX_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        run: packaging/release/finalize.sh dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pix-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  attest:
+    name: Attest release artifacts
+    needs: [validate, finalize]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pix-release-assets
+          path: dist
+      - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: dist/*
+
+  publish:
+    name: Publish GitHub Release
+    needs: [validate, attest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pix-release-assets
+          path: dist
+      - name: Create draft and publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -eu
+          gh release create "$TAG" dist/* \
+            --verify-tag \
+            --draft \
+            --title "Pix $VERSION" \
+            --generate-notes
+          gh release edit "$TAG" --draft=false
