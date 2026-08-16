@@ -4,6 +4,7 @@
 mod e2e_support;
 
 use std::io::Write as _;
+use std::net::TcpListener;
 use std::time::{Duration, Instant};
 
 use e2e_support::{EVENT_TIMEOUT, Link, Phone, Relay, Serve};
@@ -11,7 +12,11 @@ use tempfile::tempdir;
 
 #[test]
 fn host_and_relay_survive_restarts_and_stalled_readers() {
-    let relay_port = 8792;
+    let relay_port = TcpListener::bind(("127.0.0.1", 0))
+        .expect("reserve relay port")
+        .local_addr()
+        .expect("relay address")
+        .port();
     let mut relay = Relay::start(relay_port);
     let directory = tempdir().expect("config dir");
     let mut serve = Serve::start(directory.path(), Some(&relay.url));
