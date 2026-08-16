@@ -144,7 +144,9 @@ fn remote_pairing_end_to_end_over_a_real_relay() {
     drop(pending); // The route drops while the user approves on the Mac.
     serve.approve_next_pairing();
     serve.wait_event("device_list", |event| {
-        event["devices"].as_array().is_some_and(|list| list.len() == 4)
+        event["devices"]
+            .as_array()
+            .is_some_and(|list| list.len() == 4)
     });
 
     // The phone rejoins the same pairing channel and probes with IK.
@@ -161,7 +163,10 @@ fn remote_pairing_end_to_end_over_a_real_relay() {
         }
     }
     let (_, info) = probed.expect("IK probe through the pairing channel succeeds");
-    assert!(info.relay.is_some(), "probe snapshot hands out the device channel");
+    assert!(
+        info.relay.is_some(),
+        "probe snapshot hands out the device channel"
+    );
 
     // --- Scenario: the paired phone reaches the host through its durable
     // channel (the away-from-home path) -----------------------------------
@@ -169,8 +174,7 @@ fn remote_pairing_end_to_end_over_a_real_relay() {
     serve.wait_event("relay_channel", |event| {
         event["label"] != "pairing" && event["state"] == "waiting"
     });
-    let link = Link::connect_relay(&relay_url, &device_secret)
-        .expect("device channel reachable");
+    let link = Link::connect_relay(&relay_url, &device_secret).expect("device channel reachable");
     let (mut session, _) = phone.reconnect(link).expect("IK over the device channel");
     session
         .request(pix_wire::ClientRequest::HostSnapshot)
@@ -179,8 +183,8 @@ fn remote_pairing_end_to_end_over_a_real_relay() {
     // A dropped route must come back with IK on the same durable channel.
     eprintln!("=== scenario: device channel drop then IK reconnect ===");
     drop(session);
-    let link = Link::connect_relay(&relay_url, &device_secret)
-        .expect("device channel still joinable");
+    let link =
+        Link::connect_relay(&relay_url, &device_secret).expect("device channel still joinable");
     let (_session, info) = phone
         .reconnect(link)
         .expect("IK after the previous relay session closed");

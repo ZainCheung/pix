@@ -30,7 +30,7 @@ export SOURCE_DATE_EPOCH="$source_date_epoch"
 
 cd "$repository_root"
 
-version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+version=$("$repository_root/scripts/version.sh")
 case "$version" in
     ''|*[!0-9A-Za-z.+-]*)
         printf '%s\n' "Invalid workspace version for a Linux package: $version" >&2

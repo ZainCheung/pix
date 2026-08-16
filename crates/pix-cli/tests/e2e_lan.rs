@@ -26,7 +26,9 @@ fn lan_pairing_lifecycle_end_to_end() {
     assert!(!snapshot.display_name.is_empty());
     serve.wait_event("connection_established", |_| true);
     serve.wait_event("device_list", |event| {
-        event["devices"].as_array().is_some_and(|list| list.len() == 1)
+        event["devices"]
+            .as_array()
+            .is_some_and(|list| list.len() == 1)
     });
 
     // --- Scenario: IK reconnect and an authenticated round trip -----------
@@ -45,7 +47,9 @@ fn lan_pairing_lifecycle_end_to_end() {
     std::thread::sleep(Duration::from_millis(300));
     serve.approve_next_pairing();
     serve.wait_event("device_list", |event| {
-        event["devices"].as_array().is_some_and(|list| list.len() == 2)
+        event["devices"]
+            .as_array()
+            .is_some_and(|list| list.len() == 2)
     });
     // The phone probes with IK once it returns, exactly like the iOS app.
     sleepy.host_public_key = Some(host_key);
@@ -56,10 +60,8 @@ fn lan_pairing_lifecycle_end_to_end() {
     // --- Scenario: a foreign pairing token never becomes a request --------
     eprintln!("=== scenario: foreign pairing token ===");
     let impostor = Phone::new();
-    impostor.attempt_pairing_with_foreign_token(
-        Link::connect_lan(serve.lan_addr()),
-        "Impostor iPhone",
-    );
+    impostor
+        .attempt_pairing_with_foreign_token(Link::connect_lan(serve.lan_addr()), "Impostor iPhone");
     serve.wait_event("connection_failed", |_| true);
     let after_forge = serve.drain_events();
     assert!(

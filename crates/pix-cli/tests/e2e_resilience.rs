@@ -34,7 +34,9 @@ fn host_and_relay_survive_restarts_and_stalled_readers() {
     eprintln!("=== scenario: relay restart recovery ===");
     relay.stop();
     serve.wait_event("relay_channel", |event| {
-        event["state"].as_str().is_some_and(|state| state.starts_with("failed"))
+        event["state"]
+            .as_str()
+            .is_some_and(|state| state.starts_with("failed"))
     });
     assert!(serve.is_running(), "serve must survive a relay outage");
     // Held until the end of the test so the relay stays up for later scenarios.
@@ -62,8 +64,8 @@ fn host_and_relay_survive_restarts_and_stalled_readers() {
     serve.kill();
     let mut serve = Serve::start(directory.path(), None); // relay URL persists in config
     serve.wait_event("relay_channel", |event| event["state"] == "waiting");
-    let link = Link::connect_relay(&relay_url, &device_secret)
-        .expect("device channel after host restart");
+    let link =
+        Link::connect_relay(&relay_url, &device_secret).expect("device channel after host restart");
     let (_session, _) = phone.reconnect(link).expect("IK after host restart");
 
     // --- Scenario: stalled stdout reader must not kill or wedge serve ------

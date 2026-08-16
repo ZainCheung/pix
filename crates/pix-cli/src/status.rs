@@ -430,7 +430,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
         let port = listener.local_addr().expect("listener address").port();
         let status = HostServiceStatus::write(&config_path, port).expect("write status");
-        assert_eq!(HostServiceStatus::current(&config_path), Some(status.clone()));
+        assert_eq!(
+            HostServiceStatus::current(&config_path),
+            Some(status.clone())
+        );
         let mut mismatched = status;
         mismatched.process_start_identity = "different-process".to_owned();
         fs::write(

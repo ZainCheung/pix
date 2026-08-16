@@ -128,14 +128,9 @@ pub fn normalize_join_code(input: &str) -> Result<String, WireError> {
         let mapped = match character.to_ascii_uppercase() {
             'I' | 'L' => '1',
             'O' => '0',
-            candidate @ ('0'..='9'
-            | 'A'..='H'
-            | 'J'
-            | 'K'
-            | 'M'
-            | 'N'
-            | 'P'..='T'
-            | 'V'..='Z') => candidate,
+            candidate @ ('0'..='9' | 'A'..='H' | 'J' | 'K' | 'M' | 'N' | 'P'..='T' | 'V'..='Z') => {
+                candidate
+            }
             _ => return Err(WireError::InvalidJoinCode),
         };
         characters.push(mapped);
@@ -260,8 +255,7 @@ mod tests {
                 .expect("same secret")
         );
         assert_ne!(
-            relay_channel_secret_from_join_code("AB10-1123", "wss://relay.example")
-                .expect("a"),
+            relay_channel_secret_from_join_code("AB10-1123", "wss://relay.example").expect("a"),
             relay_channel_secret_from_join_code("AB10-1123", "ws://127.0.0.1:8791").expect("b")
         );
         assert!(matches!(

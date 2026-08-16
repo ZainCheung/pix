@@ -100,10 +100,7 @@ impl RuntimeManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = SessionId::new();
-        self.start(
-            workspace.as_ref(),
-            SessionLaunch::Create { id, name },
-        )?;
+        self.start(workspace.as_ref(), SessionLaunch::Create { id, name })?;
         Ok(id)
     }
 

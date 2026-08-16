@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "core/pix-cli",
-    "core/pix-core",
-    "core/pix-wire",
+    "crates/pix-cli",
+    "crates/pix-core",
+    "crates/pix-wire",
 ]
 resolver = "2"
 

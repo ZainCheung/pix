@@ -326,7 +326,9 @@ pub fn apple_relay_channel_secret_from_join_code(
     code: String,
     relay_url: String,
 ) -> Result<String, AppleWireError> {
-    Ok(crate::relay_channel_secret_from_join_code(&code, &relay_url)?)
+    Ok(crate::relay_channel_secret_from_join_code(
+        &code, &relay_url,
+    )?)
 }
 
 /// Decodes the token delivered inside the authenticated XX message 2 payload.

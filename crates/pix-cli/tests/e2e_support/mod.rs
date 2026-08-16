@@ -29,8 +29,8 @@ use base64::Engine as _;
 use pix_wire::{
     ClientEnvelope, ClientRequest, EncryptedFrameDecoder, NoiseHandshake, NoisePattern,
     NoiseTransport, PROTOCOL_MAJOR, RelayRole, ServerEnvelope, ServerEvent, StaticKeyPair,
-    decode_pairing_offer, encode_encrypted_frame, generate_static_keypair,
-    pairing_introduction, relay_channel_id, relay_join_proof,
+    decode_pairing_offer, encode_encrypted_frame, generate_static_keypair, pairing_introduction,
+    relay_channel_id, relay_join_proof,
 };
 use serde_json::Value;
 use tungstenite::client::IntoClientRequest;
@@ -71,14 +71,22 @@ impl Serve {
         if !config_path.exists() {
             let workspace = config_dir.join("workspace");
             std::fs::create_dir_all(&workspace).expect("workspace dir");
-            run_pix(&config_path, &["workspace", "add", workspace.to_str().unwrap()]);
+            run_pix(
+                &config_path,
+                &["workspace", "add", workspace.to_str().unwrap()],
+            );
             if let Some(url) = relay_url {
                 run_pix(&config_path, &["relay", "set", url]);
             }
         }
 
         let mut child = Command::new(pix)
-            .args(["--config", config_path.to_str().unwrap(), "serve", "--json-events"])
+            .args([
+                "--config",
+                config_path.to_str().unwrap(),
+                "serve",
+                "--json-events",
+            ])
             .env("PIX_DISABLE_KEYCHAIN", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -117,12 +125,17 @@ impl Serve {
         };
         let ready = serve.wait_event("ready", |_| true);
         serve.port = u16::try_from(ready["port"].as_u64().expect("port")).expect("port range");
-        serve.fingerprint = ready["fingerprint"].as_str().expect("fingerprint").to_owned();
+        serve.fingerprint = ready["fingerprint"]
+            .as_str()
+            .expect("fingerprint")
+            .to_owned();
         serve
     }
 
     pub fn lan_addr(&self) -> SocketAddr {
-        format!("127.0.0.1:{}", self.port).parse().expect("lan addr")
+        format!("127.0.0.1:{}", self.port)
+            .parse()
+            .expect("lan addr")
     }
 
     pub fn command(&mut self, command: &str) {
@@ -189,7 +202,9 @@ impl Serve {
     pub fn wait_devices(&mut self, count: usize) -> Vec<Value> {
         self.command("devices");
         let event = self.wait_event("device_list", |event| {
-            event["devices"].as_array().is_some_and(|list| list.len() == count)
+            event["devices"]
+                .as_array()
+                .is_some_and(|list| list.len() == count)
         });
         event["devices"].as_array().expect("device array").clone()
     }
@@ -678,10 +693,7 @@ impl Phone {
                 .expect("XX message 2 payload"),
         )
         .expect("pairing token");
-        let host_public_key = handshake
-            .remote_static()
-            .expect("host static key")
-            .to_vec();
+        let host_public_key = handshake.remote_static().expect("host static key").to_vec();
         link.send_record(
             &handshake
                 .write_message(&pairing_introduction(&token, device_name).expect("introduction"))
@@ -777,7 +789,10 @@ impl Session {
     }
 }
 
-fn read_envelope(link: &mut Link, transport: &mut NoiseTransport) -> Result<ServerEnvelope, String> {
+fn read_envelope(
+    link: &mut Link,
+    transport: &mut NoiseTransport,
+) -> Result<ServerEnvelope, String> {
     loop {
         let record = link.read_record(FRAME_TIMEOUT)?;
         if let Some(plaintext) = transport
