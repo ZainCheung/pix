@@ -300,10 +300,16 @@ fn capture_login_environment(
             }
         }
     };
-    let output = reader.join().ok()?;
     if !succeeded {
+        // A shell startup file can leave descendants holding stdout open even
+        // after the shell process group is terminated. Do not let a blocked
+        // reader turn the bounded shell timeout into an unbounded startup
+        // delay; the detached reader exits when those descendants close the
+        // inherited pipe.
+        drop(reader);
         return None;
     }
+    let output = reader.join().ok()?;
     parse_marked_environment(&output, marker.as_bytes())
 }
 
