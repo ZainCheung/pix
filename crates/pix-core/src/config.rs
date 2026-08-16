@@ -3,7 +3,6 @@ use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 use thiserror::Error;
@@ -197,16 +196,23 @@ impl ConfigStore {
         Self { path: path.into() }
     }
 
-    /// Returns the platform-appropriate Pix configuration file location.
+    /// Returns Pix's unified per-user configuration file location.
+    ///
+    /// Pix deliberately uses the same `.config/pix` layout on macOS and
+    /// Linux so host setup, service units, and diagnostics refer to one
+    /// predictable location. Windows uses `USERPROFILE` as a fallback when
+    /// the POSIX-style `HOME` variable is not present.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError::NoConfigDirectory`] when the operating system
     /// does not expose a per-user configuration directory.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        ProjectDirs::from("", "", "Pix")
-            .map(|dirs| dirs.config_dir().join("config.json"))
-            .ok_or(ConfigError::NoConfigDirectory)
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .ok_or(ConfigError::NoConfigDirectory)?;
+        Ok(home.join(".config").join("pix").join("config.json"))
     }
 
     #[must_use]
@@ -385,10 +391,24 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
 
     use tempfile::tempdir;
 
     use super::{ConfigError, ConfigStore, HostConfig};
+
+    #[test]
+    fn default_path_uses_the_unified_dot_config_location() {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .expect("test environment home directory");
+
+        assert_eq!(
+            ConfigStore::default_path().expect("default config path"),
+            home.join(".config").join("pix").join("config.json")
+        );
+    }
 
     #[test]
     fn round_trips_config() {

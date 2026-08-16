@@ -5,6 +5,7 @@
 //! macOS migration/development; the macOS CLI prefers Keychain without
 //! changing the secure-channel API.
 
+use std::fmt::Display;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,13 @@ use thiserror::Error;
 pub struct HostIdentityKey {
     pub private_key: Vec<u8>,
     pub public_key: Vec<u8>,
+}
+
+fn warn_identity_fallback(message: &str, error: &impl Display) {
+    eprintln!("⚠ {message}");
+    if std::env::var("PIX_VERBOSE").is_ok_and(|value| value == "1") {
+        eprintln!("  details: {error}");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,9 +97,9 @@ impl HostIdentityStore {
                 Ok(Some(identity)) => return Ok(identity),
                 Ok(None) => None,
                 Err(error) => {
-                    eprintln!(
-                        "Pix: macOS Keychain is unavailable for host identity; \
-                         using the existing mode-0600 key file if present ({error})."
+                    warn_identity_fallback(
+                        "System keyring unavailable; using a protected local key file instead.",
+                        &error,
                     );
                     Some(error)
                 }
@@ -112,17 +120,18 @@ impl HostIdentityStore {
                     // outage. It is never used as a second source of
                     // truth while Secret Service is healthy.
                     if let Err(error) = self.ensure_file_fallback(&identity) {
-                        eprintln!(
-                            "Pix: could not refresh the mode-0600 host identity fallback ({error})."
+                        warn_identity_fallback(
+                            "Protected local key file could not be refreshed.",
+                            &error,
                         );
                     }
                     return Ok(identity);
                 }
                 Ok(None) => secret_service_command = Some(command),
                 Err(error) => {
-                    eprintln!(
-                        "Pix: Secret Service is unavailable for host identity; \
-                         using the mode-0600 key file if present ({error})."
+                    warn_identity_fallback(
+                        "System keyring unavailable; using a protected local key file instead.",
+                        &error,
                     );
                     if error.is_secret_service_corruption() {
                         secret_service_corrupt = Some(error);
@@ -150,9 +159,9 @@ impl HostIdentityStore {
                                 }
                                 return Ok(identity);
                             }
-                            Err(error) => eprintln!(
-                                "Pix: could not migrate host identity into macOS Keychain; \
-                                 keeping the mode-0600 key file ({error})."
+                            Err(error) => warn_identity_fallback(
+                                "Could not migrate host identity into the system keyring; keeping the protected local key file.",
+                                &error,
                             ),
                         }
                     }
@@ -164,9 +173,9 @@ impl HostIdentityStore {
                     // Migrate an existing file-backed identity into Secret
                     // Service once so later loads prefer the system keyring.
                     if let Err(error) = store_secret_service_identity(host_id, command, &identity) {
-                        eprintln!(
-                            "Pix: could not migrate host identity into Secret Service; \
-                             keeping the mode-0600 key file ({error})."
+                        warn_identity_fallback(
+                            "Could not migrate host identity into the system keyring; keeping the protected local key file.",
+                            &error,
                         );
                     }
                 }
@@ -194,9 +203,9 @@ impl HostIdentityStore {
                     match store_secret_service_identity(host_id, command, &identity) {
                         Ok(()) => {}
                         Err(error) => {
-                            eprintln!(
-                                "Pix: could not store host identity in Secret Service; \
-                                 falling back to the mode-0600 key file ({error})."
+                            warn_identity_fallback(
+                                "System keyring unavailable; using a protected local key file instead.",
+                                &error,
                             );
                         }
                     }
@@ -205,9 +214,9 @@ impl HostIdentityStore {
                 if let Some(host_id) = &self.keychain_host_id {
                     match store_keychain_identity(host_id, &identity) {
                         Ok(()) => return Ok(identity),
-                        Err(error) => eprintln!(
-                            "Pix: could not store host identity in macOS Keychain; \
-                             falling back to the mode-0600 key file ({error})."
+                        Err(error) => warn_identity_fallback(
+                            "System keyring unavailable; using a protected local key file instead.",
+                            &error,
                         ),
                     }
                 }

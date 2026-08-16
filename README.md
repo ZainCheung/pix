@@ -171,38 +171,25 @@ cargo run -p pix-cli -- doctor
 
 ## Quick Start
 
-The following flow takes a fresh host from environment checks to a running
-Pix host. Replace the workspace path with a directory you intend to expose
-to Pi.
+The recommended first-use flow is one command. It checks Pi, authorizes a
+workspace, guides phone pairing (including a terminal QR code when a relay is
+configured), and installs the Linux user service:
 
 ~~~bash
-# 1. Check the host environment and Pi RPC compatibility.
-pix doctor
-
-# 2. Optional: pin Pi when it is not the executable you want from PATH.
-pix pi set /path/to/pi
-
-# 3. Authorize a workspace root explicitly.
-pix workspace add "$HOME/Projects/my-project"
-pix workspace list
-
-# 4. Pair the first client. This starts a foreground host.
-pix device pair
+pix setup
 ~~~
 
-When a client sends a pairing request, enter `approve <request-id>`
-in the `pix device pair` process. Type `quit` when pairing
-is complete, then start the host normally:
+For scripts or a host that should be prepared before pairing, provide the
+workspace explicitly and disable the interactive portions:
 
 ~~~bash
-pix serve
-pix status
+pix setup --workspace "$HOME/Projects/my-project" --no-pair --no-service \
+  --non-interactive
 ~~~
 
-`pix device pair` starts its own foreground host and must not be run
-while another `pix serve` process is already running. After a device
-is paired, use `pix serve` directly or
-[install the Linux user service](#running-as-a-service).
+The lower-level commands remain available for diagnostics and advanced
+automation. `pix serve --json-events` is the machine-readable foreground
+bridge; normal `pix serve` output is intended for humans.
 
 ## Usage
 
@@ -211,13 +198,14 @@ complete CLI reference.
 
 | Task | Command |
 | --- | --- |
+| Initialize a host | `pix setup` |
 | Check environment | `pix doctor` |
 | Check host status | `pix status` |
 | Start the host | `pix serve` |
 | Authorize a workspace | `pix workspace add <path>` |
 | List workspaces | `pix workspace list` |
 | Remove a workspace | `pix workspace remove <id>` |
-| Pair a device | `pix device pair` |
+| Pair a device (advanced) | `pix device pair` |
 | List paired devices | `pix device list` |
 | Revoke a device | `pix device revoke <id>` |
 | Inspect Pi selection | `pix pi show` |
@@ -274,10 +262,9 @@ pix relay enable
 pix relay clear
 ~~~
 
-For remote pairing, run `pix device pair` (or `pix serve`)
-after configuring a relay and enter `pair-remote` at its interactive
-prompt. Pix prints a short-lived QR payload and join code for the client.
-Treat both as secrets while they are valid.
+For remote pairing, `pix setup` and `pix device pair` automatically start the
+short-lived relay channel and render a QR code. The raw `pix://` payload is
+available only from `pix serve --json-events` for native UI/automation use.
 
 ### Running as a service
 
@@ -525,8 +512,8 @@ separately.
 
 ### Where does Pix store its configuration?
 
-Pix uses a platform configuration directory and prints the resolved path in
-`pix status` and `pix doctor`. Use the global
+Pix stores its configuration at `$HOME/.config/pix/config.json` on macOS and
+Linux, and prints the resolved path in `pix status` and `pix doctor`. Use the global
 `--config <path>` option to select an explicit configuration file.
 
 ### Does Pix replace Pi?
