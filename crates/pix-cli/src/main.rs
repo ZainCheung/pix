@@ -2495,7 +2495,7 @@ fn install_setup_service(store: &ConfigStore, no_service: bool, ui: SetupUi) -> 
                         "Show details".to_owned(),
                     ];
                     match ui.select("", &choices, 0)? {
-                        1 => continue,
+                        1 => {}
                         2 => {
                             ui.hint(&format!("{error:#}"));
                             return Ok(false);
