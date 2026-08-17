@@ -15,6 +15,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 hostname.workspace = true
 libc.workspace = true
 pix-core = { path = "../pix-core" }
