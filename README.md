@@ -179,6 +179,10 @@ configured), and installs the Linux user service:
 pix setup
 ~~~
 
+In a terminal, setup opens a small Quick/Advanced wizard, keeps routine
+checks and pairing status in place, and shows implementation details only when
+requested with `pix setup --verbose` (or `pix doctor --verbose`).
+
 For scripts or a host that should be prepared before pairing, provide the
 workspace explicitly and disable the interactive portions:
 
