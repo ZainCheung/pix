@@ -25,6 +25,19 @@ pub fn run(store: &pix_core::ConfigStore, command: &ServiceCommand) -> Result<()
 }
 
 fn install(store: &pix_core::ConfigStore, no_start: bool) -> Result<()> {
+    install_impl(store, no_start, true)
+}
+
+/// Installs the user service without printing implementation details. The
+/// setup wizard owns the product-facing status copy and may reveal the unit
+/// path only in verbose mode.
+#[allow(dead_code)]
+pub fn install_for_setup(store: &pix_core::ConfigStore) -> Result<PathBuf> {
+    install_impl(store, false, false)?;
+    unit_file_path()
+}
+
+fn install_impl(store: &pix_core::ConfigStore, no_start: bool, announce: bool) -> Result<()> {
     require_linux()?;
     require_systemctl()?;
 
@@ -38,11 +51,13 @@ fn install(store: &pix_core::ConfigStore, no_start: bool) -> Result<()> {
     } else {
         run_systemctl(&["enable", "--now", UNIT_NAME])?;
     }
-    println!("Installed Pix user service ({}).", unit_path.display());
-    if no_start {
-        println!("Run `systemctl --user start pix.service` to start it.");
-    } else {
-        println!("Pix service is enabled and running.");
+    if announce {
+        println!("Installed Pix user service ({}).", unit_path.display());
+        if no_start {
+            println!("Run `systemctl --user start pix.service` to start it.");
+        } else {
+            println!("Pix service is enabled and running.");
+        }
     }
     Ok(())
 }
