@@ -1,4 +1,4 @@
-//! macOS per-user LaunchAgent integration for the persistent Pix host service.
+//! macOS per-user `LaunchAgent` integration for the persistent Pix host service.
 
 use std::fs;
 use std::io::Write;

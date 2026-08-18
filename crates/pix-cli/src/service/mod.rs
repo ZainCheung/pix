@@ -3,7 +3,7 @@
 //! The CLI and the macOS menu app attach to the same long-lived `pix serve
 //! --service` process through the private sockets in the Pix run directory.
 //! Platform modules only own service-manager details: systemd user units on
-//! Linux and LaunchAgents on macOS.
+//! Linux and `LaunchAgents` on macOS.
 
 use std::fs;
 use std::path::{Path, PathBuf};

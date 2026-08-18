@@ -238,8 +238,19 @@ pub struct HostServiceControl {
 }
 
 impl HostServiceControl {
-    #[allow(clippy::needless_return)]
     pub fn bind(config_path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        return Self::bind_unix(config_path);
+
+        #[cfg(not(unix))]
+        {
+            let _ = config_path;
+            bail!("Pix service control is unavailable on this platform")
+        }
+    }
+
+    #[cfg(unix)]
+    fn bind_unix(config_path: &Path) -> Result<Self> {
         let path = HostServiceStatus::control_socket_path_for(config_path);
         let parent = path
             .parent()
@@ -250,103 +261,16 @@ impl HostServiceControl {
                 parent.display()
             )
         })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt;
-            use std::os::unix::fs::PermissionsExt;
-
-            if let Ok(metadata) = fs::symlink_metadata(&path) {
-                if !metadata.file_type().is_socket() {
-                    bail!(
-                        "refusing to replace non-socket control path {}",
-                        path.display()
-                    );
-                }
-                match UnixStream::connect(&path) {
-                    Ok(_) => {
-                        bail!("a Pix host service already owns {}", path.display());
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                        ) =>
-                    {
-                        fs::remove_file(&path).with_context(|| {
-                            format!("removing stale control socket {}", path.display())
-                        })?;
-                    }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!("checking existing control socket {}", path.display())
-                        });
-                    }
-                }
-            }
-            let listener = UnixListener::bind(&path).with_context(|| {
-                format!("binding host service control socket {}", path.display())
-            })?;
-            listener
-                .set_nonblocking(true)
-                .context("configuring host service control socket")?;
-            // The socket is a local command surface and must not be writable
-            // or readable by another user.
-            let mut permissions = fs::metadata(&path)?.permissions();
-            permissions.set_mode(0o600);
-            fs::set_permissions(&path, permissions)?;
-
-            let event_path = HostServiceStatus::event_socket_path_for(config_path);
-            if let Ok(metadata) = fs::symlink_metadata(&event_path) {
-                if !metadata.file_type().is_socket() {
-                    bail!(
-                        "refusing to replace non-socket event path {}",
-                        event_path.display()
-                    );
-                }
-                match UnixStream::connect(&event_path) {
-                    Ok(_) => {
-                        bail!("a Pix host service already owns {}", event_path.display());
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                        ) =>
-                    {
-                        fs::remove_file(&event_path).with_context(|| {
-                            format!("removing stale event socket {}", event_path.display())
-                        })?;
-                    }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!("checking existing event socket {}", event_path.display())
-                        });
-                    }
-                }
-            }
-            let event_listener = UnixListener::bind(&event_path)
-                .with_context(|| format!("binding host event socket {}", event_path.display()))?;
-            event_listener
-                .set_nonblocking(true)
-                .context("configuring host event socket")?;
-            let mut event_permissions = fs::metadata(&event_path)?.permissions();
-            event_permissions.set_mode(0o600);
-            fs::set_permissions(&event_path, event_permissions)?;
-            return Ok(Self {
-                listener,
-                path,
-                event_listener,
-                event_path,
-                event_subscribers: Vec::new(),
-            });
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            bail!("Pix service control is unavailable on this platform")
-        }
+        let listener = bind_socket(&path, "control")?;
+        let event_path = HostServiceStatus::event_socket_path_for(config_path);
+        let event_listener = bind_socket(&event_path, "event")?;
+        Ok(Self {
+            listener,
+            path,
+            event_listener,
+            event_path,
+            event_subscribers: Vec::new(),
+        })
     }
 
     /// Polls one local command without blocking the host event loop.
@@ -423,6 +347,50 @@ impl HostServiceControl {
         }
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn bind_socket(path: &Path, kind: &str) -> Result<UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            bail!(
+                "refusing to replace non-socket {kind} path {}",
+                path.display()
+            );
+        }
+        match UnixStream::connect(path) {
+            Ok(_) => bail!("a Pix host service already owns {}", path.display()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                fs::remove_file(path)
+                    .with_context(|| format!("removing stale {kind} socket {}", path.display()))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("checking existing {kind} socket {}", path.display())
+                });
+            }
+        }
+    }
+
+    let listener = UnixListener::bind(path)
+        .with_context(|| format!("binding host {kind} socket {}", path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("configuring host service {kind} socket"))?;
+    // The socket is a local command surface and must not be writable or
+    // readable by another user.
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)?;
+    Ok(listener)
 }
 
 impl Drop for HostServiceControl {

@@ -397,23 +397,20 @@ fn status_command(store: &ConfigStore) -> Result<()> {
         Err(error) => bail!("host config: {error}"),
     }
 
-    match crate::status::HostServiceStatus::current(store.path()) {
-        Some(current) => {
-            println!(
-                "  service: running (pid {}, port {}, started_at {})",
-                current.pid, current.port, current.started_at
-            );
-        }
-        None => {
-            let installed = service::managed_service_installed(store).unwrap_or(false);
-            let active = service::managed_service_active(store).unwrap_or(false);
-            if active {
-                println!("  service: manager active (host status is not ready yet)");
-            } else if installed {
-                println!("  service: installed but not running");
-            } else {
-                println!("  service: not running");
-            }
+    if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
+        println!(
+            "  service: running (pid {}, port {}, started_at {})",
+            current.pid, current.port, current.started_at
+        );
+    } else {
+        let installed = service::managed_service_installed(store).unwrap_or(false);
+        let active = service::managed_service_active(store).unwrap_or(false);
+        if active {
+            println!("  service: manager active (host status is not ready yet)");
+        } else if installed {
+            println!("  service: installed but not running");
+        } else {
+            println!("  service: not running");
         }
     }
     Ok(())
@@ -1289,6 +1286,16 @@ struct SetupOptions {
     yes: bool,
     non_interactive: bool,
     verbose: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+struct SetupPairingOptions {
+    remote: bool,
+    yes: bool,
+    interactive: bool,
+    ui: SetupUi,
+    keep_service: bool,
 }
 
 /// Runs the product-facing first-use flow while keeping the existing
@@ -2285,14 +2292,14 @@ fn prompt_line(label: &str, default: &str) -> Result<String> {
 /// clients throughout pairing; approving a request only updates durable host
 /// state and does not restart Bonjour or the encrypted transport.
 #[allow(clippy::too_many_lines)]
-fn run_setup_pairing(
-    store: &ConfigStore,
-    remote: bool,
-    yes: bool,
-    interactive: bool,
-    ui: SetupUi,
-    keep_service: bool,
-) -> Result<()> {
+fn run_setup_pairing(store: &ConfigStore, pairing: SetupPairingOptions) -> Result<()> {
+    let SetupPairingOptions {
+        remote,
+        yes,
+        interactive,
+        ui,
+        keep_service,
+    } = pairing;
     #[cfg(not(unix))]
     {
         let _ = (store, remote, yes, interactive, ui, keep_service);
@@ -2481,7 +2488,16 @@ fn run_setup_pairing_with_recovery(
     keep_service: bool,
 ) -> Result<Option<String>> {
     loop {
-        match run_setup_pairing(store, relay.is_some(), yes, interactive, ui, keep_service) {
+        match run_setup_pairing(
+            store,
+            SetupPairingOptions {
+                remote: relay.is_some(),
+                yes,
+                interactive,
+                ui,
+                keep_service,
+            },
+        ) {
             Ok(()) => return Ok(relay),
             Err(_error) if relay.is_some() && interactive => {
                 let relay_label = relay
@@ -2794,7 +2810,16 @@ fn device(store: &ConfigStore, command: DeviceCommand) -> Result<()> {
             if !interactive {
                 bail!("`pix device pair` requires an interactive terminal");
             }
-            run_setup_pairing(store, remote, false, true, SetupUi::new(true, false), true)
+            run_setup_pairing(
+                store,
+                SetupPairingOptions {
+                    remote,
+                    yes: false,
+                    interactive: true,
+                    ui: SetupUi::new(true, false),
+                    keep_service: true,
+                },
+            )
         }
         DeviceCommand::List => {
             let config = store.load().context("loading Pix configuration")?;
