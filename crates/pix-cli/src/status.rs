@@ -50,6 +50,14 @@ impl HostServiceStatus {
             .join("host-service.sock")
     }
 
+    pub fn event_socket_path_for(config_path: &Path) -> PathBuf {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("run")
+            .join("host-events.sock")
+    }
+
     /// Writes a new status file atomically.
     ///
     /// # Errors
@@ -213,18 +221,36 @@ fn process_identity(_pid: u32) -> Option<String> {
     None
 }
 
-/// A private local control socket used by the systemd service. It lets the
-/// daemon stop cleanly without treating systemd's stdin (normally `/dev/null`)
-/// as a lifecycle signal.
+/// Private local control/event sockets used by the platform-managed service.
+/// They let the daemon stop cleanly without treating a manager's stdin
+/// (normally `/dev/null`) as a lifecycle signal and give native clients a
+/// transient JSONL event bridge.
 pub struct HostServiceControl {
     #[cfg(unix)]
     listener: UnixListener,
     path: PathBuf,
+    #[cfg(unix)]
+    event_listener: UnixListener,
+    #[cfg(unix)]
+    event_path: PathBuf,
+    #[cfg(unix)]
+    event_subscribers: Vec<UnixStream>,
 }
 
 impl HostServiceControl {
-    #[allow(clippy::needless_return)]
     pub fn bind(config_path: &Path) -> Result<Self> {
+        #[cfg(unix)]
+        return Self::bind_unix(config_path);
+
+        #[cfg(not(unix))]
+        {
+            let _ = config_path;
+            bail!("Pix service control is unavailable on this platform")
+        }
+    }
+
+    #[cfg(unix)]
+    fn bind_unix(config_path: &Path) -> Result<Self> {
         let path = HostServiceStatus::control_socket_path_for(config_path);
         let parent = path
             .parent()
@@ -235,59 +261,16 @@ impl HostServiceControl {
                 parent.display()
             )
         })?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::FileTypeExt;
-            use std::os::unix::fs::PermissionsExt;
-
-            if let Ok(metadata) = fs::symlink_metadata(&path) {
-                if !metadata.file_type().is_socket() {
-                    bail!(
-                        "refusing to replace non-socket control path {}",
-                        path.display()
-                    );
-                }
-                match UnixStream::connect(&path) {
-                    Ok(_) => {
-                        bail!("a Pix host service already owns {}", path.display());
-                    }
-                    Err(error)
-                        if matches!(
-                            error.kind(),
-                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                        ) =>
-                    {
-                        fs::remove_file(&path).with_context(|| {
-                            format!("removing stale control socket {}", path.display())
-                        })?;
-                    }
-                    Err(error) => {
-                        return Err(error).with_context(|| {
-                            format!("checking existing control socket {}", path.display())
-                        });
-                    }
-                }
-            }
-            let listener = UnixListener::bind(&path).with_context(|| {
-                format!("binding host service control socket {}", path.display())
-            })?;
-            listener
-                .set_nonblocking(true)
-                .context("configuring host service control socket")?;
-            // The socket is a local command surface and must not be writable
-            // or readable by another user.
-            let mut permissions = fs::metadata(&path)?.permissions();
-            permissions.set_mode(0o600);
-            fs::set_permissions(&path, permissions)?;
-            return Ok(Self { listener, path });
-        }
-
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            bail!("Pix service control is unavailable on this platform")
-        }
+        let listener = bind_socket(&path, "control")?;
+        let event_path = HostServiceStatus::event_socket_path_for(config_path);
+        let event_listener = bind_socket(&event_path, "event")?;
+        Ok(Self {
+            listener,
+            path,
+            event_listener,
+            event_path,
+            event_subscribers: Vec::new(),
+        })
     }
 
     /// Polls one local command without blocking the host event loop.
@@ -313,10 +296,8 @@ impl HostServiceControl {
                         .context("reading host service control command")?;
                     let mut stream = reader.into_inner();
                     let command = line.trim().to_owned();
-                    if command == "quit" || command == "exit" {
+                    if !command.is_empty() {
                         stream.write_all(b"ok\n")?;
-                    } else {
-                        stream.write_all(b"error\n")?;
                     }
                     stream.flush()?;
                     Ok(Some(command))
@@ -330,6 +311,86 @@ impl HostServiceControl {
             Ok(None)
         }
     }
+
+    /// Accepts local UI event subscribers without blocking the host loop.
+    pub fn poll_event_subscribers(&mut self) -> Result<()> {
+        #[cfg(unix)]
+        {
+            loop {
+                match self.event_listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_nonblocking(true)
+                            .context("configuring host event subscriber")?;
+                        self.event_subscribers.push(stream);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(error) => return Err(error).context("accepting host event subscriber"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Publishes one JSONL event to each connected local UI subscriber.
+    ///
+    /// The socket is mode 0600 and never persists events. A stalled subscriber
+    /// is dropped so a menu app cannot block the host or its secure channels.
+    pub fn publish_event(&mut self, line: &str) -> Result<()> {
+        self.poll_event_subscribers()?;
+        #[cfg(unix)]
+        {
+            let mut bytes = line.as_bytes().to_vec();
+            bytes.push(b'\n');
+            self.event_subscribers
+                .retain_mut(|stream| stream.write_all(&bytes).is_ok());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn bind_socket(path: &Path, kind: &str) -> Result<UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if !metadata.file_type().is_socket() {
+            bail!(
+                "refusing to replace non-socket {kind} path {}",
+                path.display()
+            );
+        }
+        match UnixStream::connect(path) {
+            Ok(_) => bail!("a Pix host service already owns {}", path.display()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                fs::remove_file(path)
+                    .with_context(|| format!("removing stale {kind} socket {}", path.display()))?;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("checking existing {kind} socket {}", path.display())
+                });
+            }
+        }
+    }
+
+    let listener = UnixListener::bind(path)
+        .with_context(|| format!("binding host {kind} socket {}", path.display()))?;
+    listener
+        .set_nonblocking(true)
+        .with_context(|| format!("configuring host service {kind} socket"))?;
+    // The socket is a local command surface and must not be writable or
+    // readable by another user.
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o600);
+    fs::set_permissions(path, permissions)?;
+    Ok(listener)
 }
 
 impl Drop for HostServiceControl {
@@ -341,6 +402,11 @@ impl Drop for HostServiceControl {
                 .is_ok_and(|metadata| metadata.file_type().is_socket())
             {
                 let _ = fs::remove_file(&self.path);
+            }
+            if fs::symlink_metadata(&self.event_path)
+                .is_ok_and(|metadata| metadata.file_type().is_socket())
+            {
+                let _ = fs::remove_file(&self.event_path);
             }
         }
     }
@@ -400,9 +466,24 @@ pub fn request_control_command(config_path: &Path, command: &str) -> Result<bool
     }
 }
 
+/// Connects to the ephemeral JSONL event stream of a running host service.
+/// Events are never persisted by this socket; subscribers receive only events
+/// emitted after their connection is accepted.
+#[cfg(unix)]
+pub fn connect_event_stream(config_path: &Path) -> Result<UnixStream> {
+    let path = HostServiceStatus::event_socket_path_for(config_path);
+    UnixStream::connect(&path).with_context(|| {
+        format!(
+            "connecting to host service event socket {}; run `pix service start` first",
+            path.display()
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::BufRead;
 
     use tempfile::tempdir;
 
@@ -443,5 +524,36 @@ mod tests {
         .expect("write mismatched status");
         assert!(HostServiceStatus::current(&config_path).is_none());
         drop(listener);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn event_socket_publishes_jsonl_without_persisting_events() {
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let directory = tempdir().expect("temp dir");
+        let config_path = directory.path().join("config.json");
+        let mut control =
+            super::HostServiceControl::bind(&config_path).expect("bind host service sockets");
+        let mut client =
+            UnixStream::connect(HostServiceStatus::event_socket_path_for(&config_path))
+                .expect("connect event socket");
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("set read timeout");
+        control
+            .poll_event_subscribers()
+            .expect("accept event subscriber");
+        control
+            .publish_event(r#"{"type":"ready"}"#)
+            .expect("publish event");
+        let mut line = String::new();
+        std::io::BufReader::new(&mut client)
+            .read_line(&mut line)
+            .expect("read event");
+        assert_eq!(line.trim(), r#"{"type":"ready"}"#);
+        assert!(!HostServiceStatus::event_socket_path_for(&config_path).is_file());
+        assert!(HostServiceStatus::event_socket_path_for(&config_path).exists());
     }
 }

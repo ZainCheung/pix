@@ -138,6 +138,12 @@ impl HostServiceHandle {
             .ok_or(PairingError::UnknownOrExpiredApproval)?;
         let now = SystemTime::now();
         let authenticated = pending.connection.approve(&self.shared.coordinator, now)?;
+        // Revocation is fail-closed for reconnects racing with a trust
+        // mutation. An explicit re-pair of the same static device identity is
+        // the user-authenticated repair operation, so clear that in-memory
+        // barrier before registering the newly approved connection.
+        let device_id = authenticated.device().id.clone();
+        self.shared.registry.allow_repaired_device(&device_id);
         self.shared.refresh_host_state();
         spawn_authenticated(authenticated, &self.shared);
         Ok(())

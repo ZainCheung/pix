@@ -77,18 +77,18 @@ For LAN pairing and access:
    the pairing prompt.
 5. Check `pix status` for a live service and paired-device count.
 
-The focused `pix device pair` command also starts its own foreground host and
-refuses to run while another Pix host owns the same configuration. If a
-service is already running, stop it before a new interactive pairing flow:
+The focused `pix device pair` command attaches to the running service and keeps
+the Bonjour listener and encrypted transport alive while you approve the
+request:
 
 ~~~bash
-pix service stop
 pix device pair
 ~~~
 
-After pairing, `pix setup` installs and starts the Linux user service unless
+After pairing, `pix setup` installs and starts the platform user service unless
 `--no-service` was supplied. `pix serve --json-events` remains the foreground
-diagnostic/native-UI bridge.
+diagnostic bridge; native menu apps should use the local event socket instead
+of starting a second `serve` process.
 
 ## Relay or remote pairing fails
 
@@ -126,19 +126,20 @@ loss changes remote reachability only; it does not stop Pi's local process.
 
 ## The background service is not running
 
-The built-in service manager is a Linux systemd user unit:
+The built-in service manager is a per-user systemd unit on Linux or a
+LaunchAgent on macOS:
 
 ~~~bash
 pix status
 pix service install
-systemctl --user status pix.service
+pix service status
 ~~~
 
-To enable the unit without starting it immediately:
+To install/enable the manager entry without starting it immediately:
 
 ~~~bash
 pix service install --no-start
-systemctl --user start pix.service
+pix service start
 ~~~
 
 To stop or remove it:
@@ -148,9 +149,10 @@ pix service stop
 pix service uninstall
 ~~~
 
-No root privileges are required. If `systemctl` is unavailable, run
-`pix serve` under the process manager provided by your platform.
-There is no public macOS Pix host installer in this repository.
+No root privileges are required. On Linux, the underlying unit is
+`systemctl --user status pix.service`; on macOS, inspect
+`~/Library/LaunchAgents/com.deepoke.pix.host.plist` and
+`launchctl print gui/$(id -u)/com.deepoke.pix.host`.
 
 ## A service starts but the client cannot connect
 
@@ -192,8 +194,8 @@ pix --config /tmp/pix.json logs
 ~~~
 
 If a service was installed with a custom configuration path, use that same
-path for status, logs, and service commands. The Linux systemd unit stores the
-absolute path it was installed with.
+path for status, logs, and service commands. The systemd unit or macOS
+LaunchAgent stores the absolute path it was installed with.
 
 ## Reporting a problem
 

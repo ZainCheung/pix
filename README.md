@@ -49,7 +49,7 @@ from this repository.
 - Run Pi sessions through the native Pi RPC interface.
 - Authorize, list, and revoke workspace roots.
 - Pair and revoke trusted client devices.
-- Run in the foreground or as a Linux user service.
+- Run in the foreground or as a per-user Linux systemd/macOS LaunchAgent service.
 
 ### Connectivity
 
@@ -173,7 +173,7 @@ cargo run -p pix-cli -- doctor
 
 The recommended first-use flow is one command. It checks Pi, authorizes a
 workspace, guides phone pairing (including a terminal QR code when a relay is
-configured), and installs the Linux user service:
+configured), and installs the platform user service:
 
 ~~~bash
 pix setup
@@ -272,20 +272,24 @@ available only from `pix serve --json-events` for native UI/automation use.
 
 ### Running as a service
 
-On Linux, Pix can install a user-level systemd unit. It does not require root
-privileges:
+Pix installs a per-user background service: a systemd user unit on Linux and a
+LaunchAgent on macOS. Neither requires root privileges:
 
 ~~~bash
-pix service install       # enable and start pix.service
+pix service install       # install, enable, and start the host service
 pix status
+pix service status
+pix service restart
 pix service stop
+pix service logs --tail 100
 pix service uninstall
 ~~~
 
-Use `pix service install --no-start` when you want to enable the unit
-without starting it immediately. The service stores its lifecycle state under
-the Pix configuration directory, so `pix status` remains the first
-place to check.
+Use `pix service install --no-start` when you want to install/enable the
+manager entry without starting it immediately. The service stores its lifecycle state and
+private control/event sockets under the Pix configuration directory, so
+`pix status` and `pix service status` remain the first places to check.
+`pix device pair` attaches to this service; it does not stop or replace it.
 
 ### Diagnostics
 
@@ -480,7 +484,7 @@ installer is published here.
 | A workspace cannot be opened | Run `pix workspace list`; authorize the canonical project root with `pix workspace add <path>`. |
 | A device cannot discover the host | Keep `pix device pair` or `pix serve` running, verify the client and host share a LAN, then inspect `pix status`. |
 | Remote pairing or relay fails | Run `pix relay show`, confirm a `ws://`/`wss://` endpoint, and inspect `pix logs --tail 100`. |
-| The background service is not running | Run `pix status`; on Linux inspect `systemctl --user status pix.service` and use `pix service install` if needed. |
+| The background service is not running | Run `pix status` and `pix service status`; use `pix service install` if needed. |
 | You need to share diagnostics | Run `pix diagnostics export ./diagnostics` and share the resulting archive, not raw config or logs. |
 
 For the longer checklist, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).

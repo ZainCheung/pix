@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
@@ -8,8 +9,9 @@ use pix_core::{
     HostState, PairingCoordinator, RuntimeManager, RuntimeManagerOptions,
 };
 use pix_wire::{
-    ClientEnvelope, ClientRequest, NoiseHandshake, NoisePattern, PROTOCOL_MAJOR, ServerEnvelope,
-    ServerEvent, decode_pairing_offer, generate_static_keypair, pairing_introduction,
+    ClientEnvelope, ClientRequest, NoiseHandshake, NoisePattern, NoiseTransport, PROTOCOL_MAJOR,
+    ServerEnvelope, ServerEvent, decode_pairing_offer, generate_static_keypair,
+    pairing_introduction,
 };
 use tempfile::tempdir;
 
@@ -72,6 +74,55 @@ fn read_server_envelope(
             return ServerEnvelope::decode(&plaintext).expect("decode server event");
         }
     }
+}
+
+fn pair_and_approve(
+    service: &pix_core::HostServiceHandle,
+    address: SocketAddr,
+    phone_private_key: &[u8],
+    device_name: &str,
+) -> (pix_core::EncryptedConnection, NoiseTransport) {
+    let mut connection = pix_core::EncryptedConnection::connect(address).expect("connect phone");
+    connection
+        .set_timeout(Some(Duration::from_secs(3)))
+        .expect("phone timeout");
+    let mut handshake = NoiseHandshake::initiator(NoisePattern::PairingXx, phone_private_key, None)
+        .expect("phone pairing handshake");
+    connection
+        .write_frame(&handshake.write_message(b"").expect("XX message 1"))
+        .expect("write XX message 1");
+    let message_2 = connection.read_frame().expect("read XX message 2");
+    let token = decode_pairing_offer(
+        &handshake
+            .read_message(&message_2)
+            .expect("read XX message 2 payload"),
+    )
+    .expect("decode pairing token");
+    let introduction = pairing_introduction(&token, device_name).expect("pairing introduction");
+    connection
+        .write_frame(
+            &handshake
+                .write_message(&introduction)
+                .expect("XX message 3"),
+        )
+        .expect("write XX message 3");
+
+    let request = match next_matching_event(service, |event| {
+        matches!(event, HostServiceEvent::PairingRequested(_))
+    }) {
+        HostServiceEvent::PairingRequested(request) => request,
+        event => panic!("unexpected event: {event:?}"),
+    };
+    assert_eq!(request.device_name, device_name);
+    service.approve(request.id).expect("approve phone");
+    assert!(matches!(
+        next_matching_event(service, |event| {
+            matches!(event, HostServiceEvent::ConnectionEstablished { .. })
+        }),
+        HostServiceEvent::ConnectionEstablished { .. }
+    ));
+    let transport = handshake.into_transport().expect("phone transport");
+    (connection, transport)
 }
 
 #[test]
@@ -213,6 +264,86 @@ fn service_routes_pairing_through_approval_then_dispatches_snapshot() {
     assert_eq!(response.request_id, Some(2));
     assert!(matches!(response.event, ServerEvent::HostSnapshot { .. }));
     drop(reconnect);
+    service.shutdown();
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn explicit_repair_after_revoke_allows_ik_reconnect() {
+    let directory = tempdir().expect("temporary service directory");
+    let store = ConfigStore::new(directory.path().join("config.json"));
+    let config = HostConfig::new("Test Mac");
+    store.save(&config).expect("initial config");
+    let coordinator = Arc::new(PairingCoordinator::new(store));
+    let host = generate_static_keypair().expect("host key");
+    let phone = generate_static_keypair().expect("phone key");
+    let listener = DirectTcpListener::bind(0).expect("direct listener");
+    let address = listener.local_addr().expect("listener address");
+    let host_state = Arc::new(HostState::new(config));
+    let mut service = HostService::start_direct(
+        listener,
+        host.private_key.clone(),
+        Arc::clone(&coordinator),
+        Arc::clone(&host_state),
+        runtime_manager(directory.path()),
+    )
+    .expect("start host service");
+
+    let (first_connection, _first_transport) =
+        pair_and_approve(&service, address, &phone.private_key, "Test iPhone");
+    drop(first_connection);
+    let _ = next_matching_event(&service, |event| {
+        matches!(event, HostServiceEvent::ConnectionClosed { .. })
+    });
+    let device_id = service
+        .paired_devices()
+        .expect("list paired devices")
+        .into_iter()
+        .next()
+        .expect("paired device")
+        .id;
+    service
+        .revoke_device(&device_id)
+        .expect("revoke paired device");
+    assert!(
+        service
+            .paired_devices()
+            .expect("list after revoke")
+            .is_empty()
+    );
+
+    // Re-pair with the same static identity. Approval is idempotent in the
+    // durable store, but must also clear the live registry's revocation mark.
+    let (mut connection, mut transport) =
+        pair_and_approve(&service, address, &phone.private_key, "Test iPhone");
+    let request = ClientEnvelope {
+        protocol: PROTOCOL_MAJOR,
+        request_id: 1,
+        request: ClientRequest::HostSnapshot,
+    }
+    .encode()
+    .expect("encode snapshot request");
+    for ciphertext in transport
+        .encrypt_message(&request)
+        .expect("encrypt snapshot request")
+    {
+        connection
+            .write_frame(&ciphertext)
+            .expect("write snapshot request");
+    }
+    let response = loop {
+        let ciphertext = connection.read_frame().expect("read snapshot response");
+        if let Some(plaintext) = transport
+            .decrypt_record(&ciphertext)
+            .expect("decrypt snapshot response")
+        {
+            break plaintext;
+        }
+    };
+    let response = ServerEnvelope::decode(&response).expect("decode snapshot response");
+    assert_eq!(response.request_id, Some(1));
+    assert!(matches!(response.event, ServerEvent::HostSnapshot { .. }));
+    drop(connection);
     service.shutdown();
 }
 
