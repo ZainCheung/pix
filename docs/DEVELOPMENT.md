@@ -72,15 +72,17 @@ context guard are all derived from the selected configuration path.
 
 ### Pairing during development
 
-For the product-facing flow, use `pix setup`; it starts a short-lived JSON
-event host internally, renders a QR when relay transport is configured, and
-maps the confirmation prompt to the pairing request ID internally:
+For the product-facing flow, use `pix setup`; it installs/starts the
+platform user service, attaches to its local JSON event socket, renders a QR
+when relay transport is configured, and maps the confirmation prompt to the
+pairing request ID internally:
 
 ~~~bash
 cargo run -p pix-cli -- --config /tmp/pix.json setup
 ~~~
 
-The focused pairing command follows the same flow:
+The focused pairing command attaches to the same persistent service; it does
+not stop or replace an existing `serve` process:
 
 ~~~bash
 cargo run -p pix-cli -- --config /tmp/pix.json device pair

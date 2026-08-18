@@ -55,7 +55,7 @@ enum Command {
         /// Do not start a pairing flow. Useful for preparing a host in CI.
         #[arg(long)]
         no_pair: bool,
-        /// Do not install the Linux user service after setup.
+        /// Do not install the platform user service after setup.
         #[arg(long)]
         no_service: bool,
         /// Accept setup prompts that have a safe default.
@@ -106,7 +106,7 @@ enum Command {
     },
     /// Show configuration and host-service runtime status.
     Status,
-    /// Install or remove the Linux user service.
+    /// Install, control, and inspect the platform user service.
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -116,7 +116,7 @@ enum Command {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
-    /// Run the Bonjour-advertised host core until stdin receives `quit`.
+    /// Run the Bonjour-advertised host core until a quit command is received.
     Serve {
         /// Emit machine-readable JSONL events for a native UI bridge.
         #[arg(long)]
@@ -405,22 +405,13 @@ fn status_command(store: &ConfigStore) -> Result<()> {
             );
         }
         None => {
-            #[cfg(target_os = "linux")]
-            {
-                let active = std::process::Command::new("systemctl")
-                    .args(["--user", "is-active", "pix.service"])
-                    .output()
-                    .ok()
-                    .and_then(|output| String::from_utf8(output.stdout).ok())
-                    .is_some_and(|state| state.trim() == "active");
-                if active {
-                    println!("  service: running (systemd user service)");
-                } else {
-                    println!("  service: not running");
-                }
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
+            let installed = service::managed_service_installed(store).unwrap_or(false);
+            let active = service::managed_service_active(store).unwrap_or(false);
+            if active {
+                println!("  service: manager active (host status is not ready yet)");
+            } else if installed {
+                println!("  service: installed but not running");
+            } else {
                 println!("  service: not running");
             }
         }
@@ -529,7 +520,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
         .local_addr()
         .context("inspecting host endpoint")?
         .port();
-    let control =
+    let mut control =
         HostServiceControl::bind(store.path()).context("starting host service control")?;
     // Published after the listener is bound and removed when this process
     // exits; `pix status` and the diagnostic bundle use it for liveness.
@@ -574,6 +565,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
                 &ServeEvent::RelayConfigured { url: url.clone() },
                 output,
                 &log,
+                &mut control,
             );
             Some(manager)
         }
@@ -586,6 +578,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
         },
         output,
         &log,
+        &mut control,
     );
     emit_event(
         &ServeEvent::Environment {
@@ -595,9 +588,10 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
         },
         output,
         &log,
+        &mut control,
     );
-    emit_devices(&service, output, &log);
-    emit_sessions(&service, output, &log);
+    emit_devices(&service, output, &log, &mut control);
+    emit_sessions(&service, output, &log, &mut control);
 
     let (command_tx, command_rx) = mpsc::channel::<String>();
     if !service_mode {
@@ -622,13 +616,16 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
     // never sees a pairing request.
     let mut pending_remote_pairing: Option<PendingRemotePairing> = None;
     loop {
+        control
+            .poll_event_subscribers()
+            .context("accepting host event subscribers")?;
         while let Some(event) = service.try_next_event().context("reading host event")? {
             let resync_relay = matches!(
                 &event,
                 HostServiceEvent::ConnectionEstablished { .. }
                     | HostServiceEvent::ConnectionClosed { .. }
             );
-            emit_event(&ServeEvent::from(event), output, &log);
+            emit_event(&ServeEvent::from(event), output, &log, &mut control);
             // Pairing approval and revocation both surface as connection
             // events; reconcile standing relay channels with durable trust.
             if resync_relay && let Some(manager) = &relay {
@@ -647,7 +644,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
                 ServeEvent::RelayChannel { label, state, .. }
                     if label == "pairing" && state.starts_with("failed")
             );
-            emit_event(&serve_event, output, &log);
+            emit_event(&serve_event, output, &log, &mut control);
             if pairing_waiting && let Some(pending) = pending_remote_pairing.take() {
                 emit_event(
                     &ServeEvent::RemotePairingReady {
@@ -657,89 +654,111 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
                     },
                     output,
                     &log,
+                    &mut control,
                 );
             } else if pairing_failed && pending_remote_pairing.take().is_some() {
                 emit_command_error(
                     &anyhow::anyhow!("remote pairing channel failed to join the relay"),
                     output,
                     &log,
+                    &mut control,
                 );
             }
         }
+        // Commands from the local control socket and foreground stdin share
+        // exactly the same dispatcher. This is what lets the menu app and
+        // `pix device pair` operate while the one persistent service remains
+        // alive.
+        let mut incoming_commands = Vec::new();
         while let Some(command) = control
             .try_next_command()
             .context("reading host service control")?
         {
-            if matches!(command.as_str(), "quit" | "exit") {
-                should_stop = true;
-                break;
-            }
-        }
-        if should_stop {
-            break;
+            incoming_commands.push(command);
         }
         loop {
             match command_rx.try_recv() {
-                Ok(line) => {
-                    let mut words = line.split_whitespace();
-                    match words.next() {
-                        Some("approve") => {
-                            if let Err(error) =
-                                approve_pairing(&service, words.next(), output, &log)
-                            {
-                                emit_command_error(&error, output, &log);
-                            } else if let Some(manager) = &relay {
-                                sync_relay_devices(manager, store);
-                            }
-                        }
-                        Some("reject") => {
-                            if let Err(error) = reject_pairing(&service, words.next()) {
-                                emit_command_error(&error, output, &log);
-                            }
-                        }
-                        Some("revoke") => {
-                            if let Err(error) = revoke_device(&service, words.next(), output, &log)
-                            {
-                                emit_command_error(&error, output, &log);
-                            } else if let Some(manager) = &relay {
-                                sync_relay_devices(manager, store);
-                            }
-                        }
-                        Some("devices") => {
-                            emit_devices(&service, output, &log);
-                        }
-                        Some("sessions") => {
-                            emit_sessions(&service, output, &log);
-                        }
-                        Some("release") => {
-                            if let Err(error) =
-                                release_session(&service, words.next(), output, &log)
-                            {
-                                emit_command_error(&error, output, &log);
-                            }
-                        }
-                        Some("pair-remote") => {
-                            match prepare_remote_pairing(
-                                relay.as_ref(),
-                                relay_url.as_deref(),
-                                &host_fingerprint,
-                            ) {
-                                Ok(pending) => pending_remote_pairing = Some(pending),
-                                Err(error) => emit_command_error(&error, output, &log),
-                            }
-                        }
-                        Some("quit" | "exit") => {
-                            should_stop = true;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
+                Ok(line) => incoming_commands.push(line),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     commands_disconnected = true;
                     break;
                 }
+            }
+        }
+        for line in incoming_commands {
+            let mut words = line.split_whitespace();
+            match words.next() {
+                Some("approve") => {
+                    if let Err(error) =
+                        approve_pairing(&service, words.next(), output, &log, &mut control)
+                    {
+                        emit_command_error(&error, output, &log, &mut control);
+                    } else if let Some(manager) = &relay {
+                        sync_relay_devices(manager, store);
+                    }
+                }
+                Some("reject") => {
+                    if let Err(error) = reject_pairing(&service, words.next()) {
+                        emit_command_error(&error, output, &log, &mut control);
+                    }
+                }
+                Some("revoke") => {
+                    if let Err(error) =
+                        revoke_device(&service, words.next(), output, &log, &mut control)
+                    {
+                        emit_command_error(&error, output, &log, &mut control);
+                    } else if let Some(manager) = &relay {
+                        sync_relay_devices(manager, store);
+                    }
+                }
+                Some("devices") => {
+                    emit_devices(&service, output, &log, &mut control);
+                }
+                Some("sessions") => {
+                    emit_sessions(&service, output, &log, &mut control);
+                }
+                Some("release") => {
+                    if let Err(error) =
+                        release_session(&service, words.next(), output, &log, &mut control)
+                    {
+                        emit_command_error(&error, output, &log, &mut control);
+                    }
+                }
+                Some("pair-remote") => {
+                    match prepare_remote_pairing(
+                        relay.as_ref(),
+                        relay_url.as_deref(),
+                        &host_fingerprint,
+                    ) {
+                        Ok(pending) => pending_remote_pairing = Some(pending),
+                        Err(error) => emit_command_error(&error, output, &log, &mut control),
+                    }
+                }
+                Some("pending") => {
+                    for request in service.pending_requests() {
+                        emit_event(
+                            &ServeEvent::PairingRequested {
+                                id: request.id,
+                                device_name: request.device_name,
+                                confirmation_code: request.confirmation_code,
+                                expires_at: request
+                                    .expires_at
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs(),
+                            },
+                            output,
+                            &log,
+                            &mut control,
+                        );
+                    }
+                }
+                Some("quit" | "exit") => {
+                    should_stop = true;
+                    break;
+                }
+                _ => {}
             }
         }
         if should_stop || commands_disconnected {
@@ -1027,9 +1046,21 @@ impl From<pix_core::RelayServiceEvent> for ServeEvent {
 /// or gone entirely — must never terminate or panic the host service. The
 /// service exits through stdin EOF or `quit`, and the log file keeps the
 /// record either way.
-fn emit_event(event: &ServeEvent, output: ServeOutput, log: &HostLog) {
+fn emit_event(
+    event: &ServeEvent,
+    output: ServeOutput,
+    log: &HostLog,
+    control: &mut HostServiceControl,
+) {
     let logged = loggable_event(event);
     log.append("event", &logged);
+
+    // The local event socket is the durable service bridge for the CLI and
+    // native menu app. It always receives JSON, including when launchd or
+    // systemd intentionally suppresses stdout.
+    if let Ok(line) = serde_json::to_string(event) {
+        let _ = control.publish_event(&line);
+    }
 
     if !output.stdout {
         return;
@@ -1115,6 +1146,14 @@ fn format_confirmation_code(code: &str) -> String {
         format!("{} {}", &code[..3], &code[3..])
     } else {
         code.to_owned()
+    }
+}
+
+fn pairing_instructions(remote: bool) -> &'static str {
+    if remote {
+        "Open Pix on your iPhone and scan this QR code."
+    } else {
+        "Open Pix on your iPhone and choose this Mac from nearby hosts."
     }
 }
 
@@ -1393,8 +1432,15 @@ fn setup_existing(
         1 => {
             let mut config = config;
             let relay = config.preferences.active_relay_url().map(str::to_owned);
-            let _relay =
-                run_setup_pairing_with_recovery(store, &mut config, relay, options.yes, true, ui)?;
+            let _relay = run_setup_pairing_with_recovery(
+                store,
+                &mut config,
+                relay,
+                options.yes,
+                true,
+                ui,
+                !options.no_service,
+            )?;
             let service = install_setup_service(store, options.no_service, ui)?;
             let final_config = store.load().context("reloading setup configuration")?;
             verify_setup(
@@ -1488,6 +1534,7 @@ fn setup_quick(
             options.yes,
             ui.interactive(),
             ui,
+            !options.no_service,
         )?
     } else if config.devices.is_empty() {
         if ui.interactive() {
@@ -1799,7 +1846,15 @@ fn setup_advanced(
     let pi_version = prepare_setup_environment(store, &mut config, options, ui)?;
     store.save(&config).context("saving setup configuration")?;
     let relay = if config.devices.is_empty() && !options.no_pair {
-        run_setup_pairing_with_recovery(store, &mut config, relay.clone(), options.yes, true, ui)?
+        run_setup_pairing_with_recovery(
+            store,
+            &mut config,
+            relay.clone(),
+            options.yes,
+            true,
+            ui,
+            install_service,
+        )?
     } else {
         relay
     };
@@ -2225,9 +2280,10 @@ fn prompt_line(label: &str, default: &str) -> Result<String> {
     }
 }
 
-/// Runs a short-lived JSON event host for the first device. This keeps pairing
-/// approvals in the setup command while the long-lived service remains an
-/// implementation detail after setup completes.
+/// Attaches the interactive pairing flow to the already-running persistent
+/// host service. The service remains available to the macOS menu app and other
+/// clients throughout pairing; approving a request only updates durable host
+/// state and does not restart Bonjour or the encrypted transport.
 #[allow(clippy::too_many_lines)]
 fn run_setup_pairing(
     store: &ConfigStore,
@@ -2235,42 +2291,46 @@ fn run_setup_pairing(
     yes: bool,
     interactive: bool,
     ui: SetupUi,
+    keep_service: bool,
 ) -> Result<()> {
-    if HostServiceStatus::current(store.path()).is_some() {
-        status::request_control_command(store.path(), "quit")?;
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while HostServiceStatus::current(store.path()).is_some()
-            && std::time::Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(50));
-        }
-        if HostServiceStatus::current(store.path()).is_some() {
-            bail!(
-                "Pix is already running; stop the existing host service before pairing a new device"
-            );
-        }
+    #[cfg(not(unix))]
+    {
+        let _ = (store, remote, yes, interactive, ui, keep_service);
+        bail!("interactive pairing is currently supported on Unix hosts");
     }
-    let executable = std::env::current_exe().context("locating current pix executable")?;
-    let mut child = std::process::Command::new(executable)
-        .arg("--config")
-        .arg(store.path())
-        .args(["serve", "--json-events"])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .context("starting Pix host for setup pairing")?;
-    let mut command_input = child.stdin.take().context("opening setup host control")?;
-    let stdout = child.stdout.take().context("opening setup host events")?;
-    let mut events = std::io::BufReader::new(stdout);
-    let mut paired = false;
-    let mut remote_requested = false;
+    #[cfg(unix)]
+    let service_was_running = HostServiceStatus::current(store.path()).is_some();
+    #[cfg(unix)]
+    let event_stream = {
+        service::ensure_running(store)?;
+        let stream = service::connect_events(store)
+            .context("connecting to the running Pix host event stream")?;
+        // Ask the persistent service to replay current state after this
+        // subscriber is attached. This also covers a request created just
+        // before the CLI connected.
+        service::send_command(store, "pending")?;
+        if remote {
+            service::send_command(store, "pair-remote")?;
+        }
+        stream
+    };
+    #[cfg(unix)]
+    let mut events = std::io::BufReader::new(event_stream);
+    #[cfg(unix)]
     let mut line = String::new();
+    #[cfg(unix)]
+    let mut approved_device: Option<String> = None;
+    #[cfg(unix)]
+    let mut approved_connection: Option<String> = None;
 
     if interactive {
         ui.crumb_header("Setup");
         ui.section("Pair your phone");
-        ui.body("Open Pix on your iPhone and scan this QR code.");
+        ui.body(pairing_instructions(remote));
+        if !remote {
+            ui.hint("Keep your iPhone and Mac on the same network and allow local discovery.");
+            ui.hint("To pair by QR code instead, configure Pix Relay first.");
+        }
     }
     let mut waiting_task = true;
     if remote {
@@ -2279,6 +2339,7 @@ fn run_setup_pairing(
         ui.task("Waiting for your phone...");
     }
 
+    #[cfg(unix)]
     loop {
         line.clear();
         let bytes = events
@@ -2290,10 +2351,6 @@ fn run_setup_pairing(
         let event: serde_json::Value =
             serde_json::from_str(line.trim()).context("decoding setup host event")?;
         match event.get("type").and_then(serde_json::Value::as_str) {
-            Some("ready") if remote && !remote_requested => {
-                write_setup_command(&mut command_input, "pair-remote")?;
-                remote_requested = true;
-            }
             Some("remote_pairing_ready") => {
                 let payload = event
                     .get("qr_payload")
@@ -2308,7 +2365,6 @@ fn run_setup_pairing(
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or_default();
                 ui.task_done("Secure pairing ready");
-                waiting_task = false;
                 print!(
                     "{}",
                     render_remote_pairing_for_ui(ui, payload, join_code, expires_at)
@@ -2320,18 +2376,18 @@ fn run_setup_pairing(
                     .get("id")
                     .and_then(serde_json::Value::as_str)
                     .context("setup host omitted pairing request ID")?;
-                let name = event
+                let device_name = event
                     .get("device_name")
                     .and_then(serde_json::Value::as_str)
-                    .unwrap_or("Your phone");
-                let name = terminal_label(name);
+                    .unwrap_or("Your phone")
+                    .to_owned();
+                let name = terminal_label(&device_name);
                 let code = event
                     .get("confirmation_code")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("");
-                if waiting_task {
+                if std::mem::replace(&mut waiting_task, false) {
                     ui.task_done(&format!("{name} found"));
-                    waiting_task = false;
                 }
                 ui.section(&format!("{name} wants to pair"));
                 ui.body("Confirm that this code matches the one on your phone:");
@@ -2347,28 +2403,54 @@ fn run_setup_pairing(
                 } else {
                     bail!("pairing requires --yes when setup is non-interactive")
                 };
-                write_setup_command(
-                    &mut command_input,
+                service::send_command(
+                    store,
                     &format!("{} {id}", if approve { "approve" } else { "reject" }),
                 )?;
-                if !approve {
+                if approve {
+                    // The service stays alive after approval. The phone can
+                    // finish its authenticated snapshot/IK exchange without
+                    // racing a parent process shutdown.
+                    if keep_service {
+                        ui.success("iPhone pairing approved", None);
+                        return Ok(());
+                    }
+                    approved_device = Some(device_name);
+                    ui.task("Finishing secure pairing...");
+                } else {
                     ui.warning("Pairing rejected", Some("Waiting for another device."));
                     waiting_task = true;
                     ui.task("Waiting for your phone...");
                 }
             }
-            Some("connection_established") => {
-                paired = true;
-                write_setup_command(&mut command_input, "quit")?;
-                break;
+            Some("connection_established") if !keep_service => {
+                if approved_device.as_deref()
+                    == event.get("device_name").and_then(serde_json::Value::as_str)
+                {
+                    approved_connection = event
+                        .get("connection_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned);
+                }
+            }
+            Some("connection_closed") if !keep_service => {
+                if approved_connection.as_deref()
+                    == event
+                        .get("connection_id")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    if !service_was_running {
+                        service::stop(store).context("stopping the temporary setup service")?;
+                    }
+                    ui.success("iPhone paired", None);
+                    return Ok(());
+                }
             }
             Some("command_error") => {
                 let message = event
                     .get("message")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("setup host command failed");
-                let _ = write_setup_command(&mut command_input, "quit");
-                let _ = child.wait();
                 bail!("{message}");
             }
             Some("connection_failed") => {
@@ -2381,16 +2463,8 @@ fn run_setup_pairing(
         }
     }
 
-    if !paired {
-        let status = child.wait().context("waiting for setup host")?;
-        if !status.success() {
-            bail!("Pix host exited before pairing a device ({status})");
-        }
-        bail!("Pix host stopped before pairing a device");
-    }
-    let _ = child.wait();
-    ui.success("iPhone paired", None);
-    Ok(())
+    #[cfg(unix)]
+    bail!("Pix host event stream closed before pairing a device")
 }
 
 /// Relay setup is recoverable. A failed remote channel can be retried, moved
@@ -2404,9 +2478,10 @@ fn run_setup_pairing_with_recovery(
     yes: bool,
     interactive: bool,
     ui: SetupUi,
+    keep_service: bool,
 ) -> Result<Option<String>> {
     loop {
-        match run_setup_pairing(store, relay.is_some(), yes, interactive, ui) {
+        match run_setup_pairing(store, relay.is_some(), yes, interactive, ui, keep_service) {
             Ok(()) => return Ok(relay),
             Err(_error) if relay.is_some() && interactive => {
                 let relay_label = relay
@@ -2452,12 +2527,6 @@ fn run_setup_pairing_with_recovery(
     }
 }
 
-fn write_setup_command(input: &mut impl Write, command: &str) -> Result<()> {
-    writeln!(input, "{command}").context("writing setup host command")?;
-    input.flush().context("flushing setup host command")?;
-    Ok(())
-}
-
 #[allow(clippy::unnecessary_wraps)]
 fn install_setup_service(store: &ConfigStore, no_service: bool, ui: SetupUi) -> Result<bool> {
     let _ = ui.verbose();
@@ -2469,7 +2538,7 @@ fn install_setup_service(store: &ConfigStore, no_service: bool, ui: SetupUi) -> 
         }
         return Ok(false);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         loop {
             ui.task("Installing background service...");
@@ -2513,11 +2582,11 @@ fn install_setup_service(store: &ConfigStore, no_service: bool, ui: SetupUi) -> 
             }
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = store;
         if ui.interactive() {
-            ui.muted("○ Background service installation is available on Linux");
+            ui.muted("○ Background service installation is available on Linux and macOS");
         } else {
             println!("Background service... unavailable on this platform");
         }
@@ -2576,12 +2645,13 @@ fn approve_pairing(
     request: Option<&str>,
     output: ServeOutput,
     log: &HostLog,
+    control: &mut HostServiceControl,
 ) -> Result<()> {
     let request = request.context("approve requires request ID")?;
     service
         .approve(uuid::Uuid::parse_str(request).context("invalid request ID")?)
         .context("approving pairing request")?;
-    emit_devices(service, output, log);
+    emit_devices(service, output, log, control);
     Ok(())
 }
 
@@ -2598,6 +2668,7 @@ fn revoke_device(
     device_id: Option<&str>,
     output: ServeOutput,
     log: &HostLog,
+    control: &mut HostServiceControl,
 ) -> Result<()> {
     let device_id = device_id.context("revoke requires device ID")?;
     let revoked = service
@@ -2610,8 +2681,9 @@ fn revoke_device(
         },
         output,
         log,
+        control,
     );
-    emit_devices(service, output, log);
+    emit_devices(service, output, log, control);
     Ok(())
 }
 
@@ -2620,6 +2692,7 @@ fn release_session(
     session_id: Option<&str>,
     output: ServeOutput,
     log: &HostLog,
+    control: &mut HostServiceControl,
 ) -> Result<()> {
     let session_id = session_id.context("release requires session ID")?;
     service
@@ -2631,22 +2704,34 @@ fn release_session(
         },
         output,
         log,
+        control,
     );
-    emit_sessions(service, output, log);
+    emit_sessions(service, output, log, control);
     Ok(())
 }
 
-fn emit_command_error(error: &anyhow::Error, output: ServeOutput, log: &HostLog) {
+fn emit_command_error(
+    error: &anyhow::Error,
+    output: ServeOutput,
+    log: &HostLog,
+    control: &mut HostServiceControl,
+) {
     emit_event(
         &ServeEvent::CommandError {
             message: format!("{error:#}"),
         },
         output,
         log,
+        control,
     );
 }
 
-fn emit_devices(service: &pix_core::HostServiceHandle, output: ServeOutput, log: &HostLog) {
+fn emit_devices(
+    service: &pix_core::HostServiceHandle,
+    output: ServeOutput,
+    log: &HostLog,
+    control: &mut HostServiceControl,
+) {
     let devices = match service.paired_devices() {
         Ok(devices) => devices
             .into_iter()
@@ -2657,14 +2742,19 @@ fn emit_devices(service: &pix_core::HostServiceHandle, output: ServeOutput, log:
             })
             .collect(),
         Err(error) => {
-            emit_command_error(&anyhow::Error::new(error), output, log);
+            emit_command_error(&anyhow::Error::new(error), output, log, control);
             return;
         }
     };
-    emit_event(&ServeEvent::DeviceList { devices }, output, log);
+    emit_event(&ServeEvent::DeviceList { devices }, output, log, control);
 }
 
-fn emit_sessions(service: &pix_core::HostServiceHandle, output: ServeOutput, log: &HostLog) {
+fn emit_sessions(
+    service: &pix_core::HostServiceHandle,
+    output: ServeOutput,
+    log: &HostLog,
+    control: &mut HostServiceControl,
+) {
     let sessions = service
         .active_sessions()
         .into_iter()
@@ -2675,7 +2765,7 @@ fn emit_sessions(service: &pix_core::HostServiceHandle, output: ServeOutput, log
             state: if session.completed { "idle" } else { "running" },
         })
         .collect();
-    emit_event(&ServeEvent::SessionList { sessions }, output, log);
+    emit_event(&ServeEvent::SessionList { sessions }, output, log, control);
 }
 
 fn configured_pi_executable(
@@ -2704,7 +2794,7 @@ fn device(store: &ConfigStore, command: DeviceCommand) -> Result<()> {
             if !interactive {
                 bail!("`pix device pair` requires an interactive terminal");
             }
-            run_setup_pairing(store, remote, false, true, SetupUi::new(true, false))
+            run_setup_pairing(store, remote, false, true, SetupUi::new(true, false), true)
         }
         DeviceCommand::List => {
             let config = store.load().context("loading Pix configuration")?;
@@ -2908,8 +2998,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ServeEvent, format_confirmation_code, human_event, loggable_event, render_remote_pairing,
-        validate_relay_url,
+        ServeEvent, format_confirmation_code, human_event, loggable_event, pairing_instructions,
+        render_remote_pairing, validate_relay_url,
     };
 
     #[test]
@@ -2952,6 +3042,13 @@ mod tests {
     fn confirmation_codes_are_grouped_for_humans() {
         assert_eq!(format_confirmation_code("877437"), "877 437");
         assert_eq!(format_confirmation_code("12345"), "12345");
+    }
+
+    #[test]
+    fn pairing_instructions_match_the_selected_transport() {
+        assert!(pairing_instructions(true).contains("scan this QR code"));
+        assert!(!pairing_instructions(false).contains("QR"));
+        assert!(pairing_instructions(false).contains("nearby hosts"));
     }
 
     #[test]

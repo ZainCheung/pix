@@ -16,6 +16,35 @@ truth; Host does not maintain a message database.
 - `pix-cli` exposes `serve`, diagnostics, workspace management, pairing, and
   service operations on supported hosts.
 
+## Host service lifecycle
+
+`pix-cli/src/service/` is the platform boundary for the persistent host:
+
+```text
+service/
+├── mod.rs       shared CLI contract and lifecycle dispatch
+├── linux.rs     systemd --user unit
+└── macos.rs     per-user launchd LaunchAgent
+```
+
+Windows service integration is intentionally not included yet; the shared
+contract leaves room for a future `windows.rs` adapter.
+
+Both managers launch the same `pix serve --service` process. The CLI and the
+macOS menu app never start a competing foreground daemon; they attach through
+the mode-0600 sockets derived from the selected configuration path:
+
+- `run/host-service.sock` accepts one-line commands (`approve`, `reject`,
+  `devices`, `sessions`, `pair-remote`, and lifecycle commands).
+- `run/host-events.sock` streams transient JSONL service events and retains no
+  history.
+- `run/host-service.json` is a liveness record containing only process and
+  listener supervision fields.
+
+This shared service instance keeps Bonjour ownership, pairing state, and
+encrypted transport stable while `pix device pair` or the menu app performs
+approval.
+
 ## Transport
 
 LAN direct TCP and the outbound WebSocket relay carry the same encrypted wire
