@@ -26,6 +26,9 @@ node_modules/
 logs/
 tmp/
 
+# AI development implementation documents (local planning artifacts)
+/docs/ai-development/
+
 # Editors
 .idea/
 .vscode/

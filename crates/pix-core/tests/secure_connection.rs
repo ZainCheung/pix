@@ -199,6 +199,7 @@ fn tcp_noise_xx_approval_then_ik_application_round_trip() {
                 executable: PathBuf::from("unused-for-host-snapshot"),
                 lock_directory: locks.path().to_path_buf(),
                 max_active_sessions: 4,
+                max_concurrent_turns: 4,
                 idle_timeout: Duration::from_secs(300),
                 request_timeout: Duration::from_secs(2),
                 extra_arguments: Vec::new(),

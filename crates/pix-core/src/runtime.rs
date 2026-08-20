@@ -94,9 +94,21 @@ impl PiRuntime {
             .stderr(Stdio::null());
 
         let mut child = command.spawn().map_err(RuntimeError::Spawn)?;
-        let input = child.stdin.take().ok_or(RuntimeError::MissingStdin)?;
-        let output = child.stdout.take().ok_or(RuntimeError::MissingStdout)?;
-        let rpc = RpcClient::new(input, output)?;
+        let Some(input) = child.stdin.take() else {
+            cleanup_spawned_child(&mut child);
+            return Err(RuntimeError::MissingStdin);
+        };
+        let Some(output) = child.stdout.take() else {
+            cleanup_spawned_child(&mut child);
+            return Err(RuntimeError::MissingStdout);
+        };
+        let rpc = match RpcClient::new(input, output) {
+            Ok(rpc) => rpc,
+            Err(error) => {
+                cleanup_spawned_child(&mut child);
+                return Err(error.into());
+            }
+        };
         Ok(Self {
             child: Mutex::new(child),
             rpc,
@@ -189,6 +201,24 @@ fn runnable_executable(path: &std::path::Path) -> Result<PathBuf, RuntimeError> 
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Best-effort cleanup for a child that was spawned before `PiRuntime` finished
+/// initializing its RPC and lease state. Startup errors must not orphan Pi.
+fn cleanup_spawned_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() {
+        return;
+    }
+    let _ = terminate(child.id());
+    let deadline = Instant::now() + GRACEFUL_SHUTDOWN_TIMEOUT;
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[cfg(unix)]

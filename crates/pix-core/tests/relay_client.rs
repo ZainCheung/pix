@@ -338,6 +338,7 @@ fn runtime_manager(directory: &std::path::Path) -> Arc<RuntimeManager> {
             executable: std::path::PathBuf::from("unused-for-relay-tests"),
             lock_directory: directory.join("locks"),
             max_active_sessions: 4,
+            max_concurrent_turns: 4,
             idle_timeout: Duration::from_secs(300),
             request_timeout: Duration::from_secs(2),
             extra_arguments: Vec::new(),
