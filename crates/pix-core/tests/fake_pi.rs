@@ -29,6 +29,9 @@ while IFS= read -r line; do
     get_messages)
       printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_messages\",\"success\":true,\"data\":{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}}"
       ;;
+    prompt)
+      printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"prompt\",\"success\":true}"
+      ;;
     abort)
       printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"abort\",\"success\":false,\"error\":\"nothing to abort\"}"
       ;;
@@ -40,6 +43,21 @@ done
     let mut permissions = fs::metadata(&path).expect("fake Pi metadata").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&path, permissions).expect("make fake Pi executable");
+    (directory, path)
+}
+
+#[cfg(unix)]
+fn exiting_pi_script() -> (tempfile::TempDir, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().expect("temporary fake Pi directory");
+    let path = directory.path().join("exiting-pi.sh");
+    fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write exiting Pi");
+    let mut permissions = fs::metadata(&path)
+        .expect("exiting Pi metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).expect("make exiting Pi executable");
     (directory, path)
 }
 
@@ -151,6 +169,7 @@ fn runtime_manager_snapshots_and_sweeps_completed_idle_sessions() {
         executable,
         lock_directory: locks.path().to_path_buf(),
         max_active_sessions: 1,
+        max_concurrent_turns: 4,
         idle_timeout: Duration::ZERO,
         request_timeout: Duration::from_secs(2),
         extra_arguments: Vec::new(),
@@ -160,11 +179,19 @@ fn runtime_manager_snapshots_and_sweeps_completed_idle_sessions() {
     let session_id = manager
         .create(workspace.path(), Some("Managed session".to_owned()))
         .expect("create managed session");
+    assert_eq!(
+        manager.session_state(session_id),
+        Some(pix_wire::SessionState::Starting)
+    );
 
     let snapshot = manager.snapshot(session_id).expect("session snapshot");
     assert_eq!(snapshot.session_id, "fake-session");
     assert_eq!(snapshot.session_name.as_deref(), Some("Fake session"));
     assert_eq!(snapshot.messages.len(), 1);
+    assert_eq!(
+        manager.session_state(session_id),
+        Some(pix_wire::SessionState::Idle)
+    );
     manager.detach(session_id).expect("detach client");
     assert_eq!(manager.sweep_idle().expect("sweep idle"), vec![session_id]);
     assert_eq!(manager.active_count(), 0);
@@ -182,6 +209,7 @@ fn runtime_manager_never_evicts_an_attached_session_for_capacity() {
         executable,
         lock_directory: locks.path().to_path_buf(),
         max_active_sessions: 1,
+        max_concurrent_turns: 4,
         idle_timeout: Duration::ZERO,
         request_timeout: Duration::from_secs(2),
         extra_arguments: Vec::new(),
@@ -212,6 +240,7 @@ fn runtime_manager_evicts_the_completed_unattached_runtime_at_capacity() {
         executable,
         lock_directory: locks.path().to_path_buf(),
         max_active_sessions: 1,
+        max_concurrent_turns: 4,
         idle_timeout: Duration::from_secs(300),
         request_timeout: Duration::from_secs(2),
         extra_arguments: Vec::new(),
@@ -230,6 +259,137 @@ fn runtime_manager_evicts_the_completed_unattached_runtime_at_capacity() {
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.client_count(first), None);
     assert_eq!(manager.client_count(second), Some(1));
+    manager.release(second).expect("release second session");
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_manager_rechecks_an_unattached_runtime_even_when_cache_says_running() {
+    use pix_core::{RuntimeManager, RuntimeManagerOptions};
+
+    let (_script_directory, executable) = fake_pi_script();
+    let workspace = tempdir().expect("temporary workspace");
+    let locks = tempdir().expect("temporary lock directory");
+    let manager = RuntimeManager::new(RuntimeManagerOptions {
+        executable,
+        lock_directory: locks.path().to_path_buf(),
+        max_active_sessions: 1,
+        max_concurrent_turns: 4,
+        idle_timeout: Duration::from_secs(300),
+        request_timeout: Duration::from_secs(2),
+        extra_arguments: Vec::new(),
+        environment: HostEnvironment::from_process(),
+    })
+    .expect("runtime manager");
+    let first = manager
+        .create(workspace.path(), Some("First".to_owned()))
+        .expect("first session");
+    manager.mark_completed(first, false);
+    manager.detach(first).expect("detach first session");
+
+    let second = manager
+        .create(workspace.path(), Some("Second".to_owned()))
+        .expect("second session replaces stale cached state");
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.client_count(first), None);
+    assert_eq!(manager.client_count(second), Some(1));
+    manager.release(second).expect("release second session");
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_manager_reaps_an_exited_pi_child() {
+    use pix_core::{RuntimeManager, RuntimeManagerOptions};
+
+    let (_script_directory, executable) = exiting_pi_script();
+    let workspace = tempdir().expect("temporary workspace");
+    let locks = tempdir().expect("temporary lock directory");
+    let manager = RuntimeManager::new(RuntimeManagerOptions {
+        executable,
+        lock_directory: locks.path().to_path_buf(),
+        max_active_sessions: 1,
+        max_concurrent_turns: 4,
+        idle_timeout: Duration::from_secs(300),
+        request_timeout: Duration::from_secs(2),
+        extra_arguments: Vec::new(),
+        environment: HostEnvironment::from_process(),
+    })
+    .expect("runtime manager");
+    let session_id = manager
+        .create(workspace.path(), Some("Exiting".to_owned()))
+        .expect("create session");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let mut reaped = Vec::new();
+    while std::time::Instant::now() < deadline {
+        reaped = manager.reap_exited().expect("reap exited");
+        if !reaped.is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(reaped, vec![session_id]);
+    assert_eq!(manager.active_count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn runtime_manager_limits_turns_separately_from_resident_runtimes() {
+    use pix_core::{RuntimeManager, RuntimeManagerOptions};
+
+    let (_script_directory, executable) = fake_pi_script();
+    let workspace = tempdir().expect("temporary workspace");
+    let locks = tempdir().expect("temporary lock directory");
+    let manager = RuntimeManager::new(RuntimeManagerOptions {
+        executable,
+        lock_directory: locks.path().to_path_buf(),
+        max_active_sessions: 2,
+        max_concurrent_turns: 1,
+        idle_timeout: Duration::from_secs(300),
+        request_timeout: Duration::from_secs(2),
+        extra_arguments: Vec::new(),
+        environment: HostEnvironment::from_process(),
+    })
+    .expect("runtime manager");
+    let first = manager
+        .create(workspace.path(), Some("First".to_owned()))
+        .expect("first session");
+    let second = manager
+        .create(workspace.path(), Some("Second".to_owned()))
+        .expect("second session");
+
+    manager
+        .request(
+            first,
+            &PiCommand::Prompt {
+                message: "first".to_owned(),
+                streaming_behavior: None,
+            },
+        )
+        .expect("first turn admission");
+    let error = manager
+        .request(
+            second,
+            &PiCommand::Prompt {
+                message: "second".to_owned(),
+                streaming_behavior: None,
+            },
+        )
+        .expect_err("second turn exceeds the independent limit");
+    assert!(error.to_string().contains("concurrent Pi turn limit 1"));
+    assert_eq!(manager.active_count(), 2);
+
+    manager.mark_state(first, pix_wire::SessionState::Idle);
+    manager
+        .request(
+            second,
+            &PiCommand::Prompt {
+                message: "second".to_owned(),
+                streaming_behavior: None,
+            },
+        )
+        .expect("second turn after first settles");
+    manager.release(first).expect("release first session");
     manager.release(second).expect("release second session");
 }
 
@@ -261,6 +421,7 @@ fn runtime_manager_reuses_an_open_session() {
         executable,
         lock_directory: locks.path().to_path_buf(),
         max_active_sessions: 4,
+        max_concurrent_turns: 4,
         idle_timeout: Duration::from_secs(300),
         request_timeout: Duration::from_secs(2),
         extra_arguments: Vec::new(),

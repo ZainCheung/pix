@@ -2,7 +2,7 @@ use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -526,11 +526,12 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
     let environment = HostEnvironment::resolve_for("pi");
     let executable = configured_pi_executable(&config, &environment);
     let pi_executable = executable.display().to_string();
-    let runtime = std::sync::Arc::new(
+    let runtime_manager = std::sync::Arc::new(
         RuntimeManager::new(RuntimeManagerOptions {
             executable,
             lock_directory: config_directory.join("locks"),
             max_active_sessions: config.preferences.max_active_sessions,
+            max_concurrent_turns: config.preferences.max_concurrent_turns,
             idle_timeout: std::time::Duration::from_secs(config.preferences.idle_timeout_seconds),
             request_timeout: std::time::Duration::from_secs(30),
             // Keep Pi's normal extension discovery intact. The Pix-owned
@@ -550,7 +551,7 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
         identity.private_key,
         coordinator,
         std::sync::Arc::new(HostState::new(config)),
-        runtime,
+        std::sync::Arc::clone(&runtime_manager),
     )
     .context("starting Pix host service")?;
     let (relay_events_tx, relay_events) = mpsc::channel();
@@ -612,7 +613,17 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
     // the host has not joined yet; the handshake then hangs and the Mac
     // never sees a pairing request.
     let mut pending_remote_pairing: Option<PendingRemotePairing> = None;
+    let mut last_runtime_maintenance = Instant::now();
     loop {
+        if last_runtime_maintenance.elapsed() >= Duration::from_secs(1) {
+            last_runtime_maintenance = Instant::now();
+            if let Err(error) = runtime_manager.reap_exited() {
+                log.append_text("runtime", &format!("reap failed: {error}"));
+            }
+            if let Err(error) = runtime_manager.sweep_idle() {
+                log.append_text("runtime", &format!("idle sweep failed: {error}"));
+            }
+        }
         control
             .poll_event_subscribers()
             .context("accepting host event subscribers")?;

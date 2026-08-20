@@ -51,6 +51,27 @@ done
     (directory, path)
 }
 
+fn failing_snapshot_script() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempdir().expect("temporary fake Pi directory");
+    let path = directory.path().join("failing-pi.sh");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  type=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  if [ "$type" = "get_state" ]; then
+    printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_state\",\"success\":false,\"error\":\"not ready\"}"
+  fi
+done
+"#,
+    )
+    .expect("write failing Pi");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .expect("make failing Pi executable");
+    (directory, path)
+}
+
 fn request(request_id: u64, request: ClientRequest) -> ClientEnvelope {
     ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
@@ -80,6 +101,7 @@ fn setup() -> (
             executable,
             lock_directory: locks.path().to_path_buf(),
             max_active_sessions: 4,
+            max_concurrent_turns: 4,
             idle_timeout: Duration::from_secs(300),
             request_timeout: Duration::from_secs(2),
             extra_arguments: Vec::new(),
@@ -211,6 +233,55 @@ fn creates_an_untitled_session_without_a_display_name() {
     manager
         .release(session_id.parse().expect("session ID"))
         .expect("release runtime");
+}
+
+#[test]
+fn failed_create_snapshot_releases_the_runtime_and_session_lease() {
+    let (_script, executable) = failing_snapshot_script();
+    let workspace = tempdir().expect("workspace");
+    let locks = tempdir().expect("lock directory");
+    let mut config = HostConfig::new("Test Mac");
+    let workspace_id = WorkspaceRegistry::new(&mut config)
+        .add(workspace.path(), Some("Project".to_owned()))
+        .expect("authorize workspace")
+        .id;
+    let manager = Arc::new(
+        RuntimeManager::new(RuntimeManagerOptions {
+            executable,
+            lock_directory: locks.path().to_path_buf(),
+            max_active_sessions: 1,
+            max_concurrent_turns: 4,
+            idle_timeout: Duration::from_secs(300),
+            request_timeout: Duration::from_secs(2),
+            extra_arguments: Vec::new(),
+            environment: HostEnvironment::from_process(),
+        })
+        .expect("runtime manager"),
+    );
+    let mut dispatcher =
+        HostProtocolDispatcher::new(Arc::new(HostState::new(config)), Arc::clone(&manager));
+
+    let response = dispatcher.dispatch(request(
+        20,
+        ClientRequest::SessionCreate {
+            workspace_id,
+            name: Some("will fail".to_owned()),
+        },
+    ));
+    assert!(matches!(response[0].event, ServerEvent::RequestAck));
+    assert!(matches!(
+        response[1].event,
+        ServerEvent::Error {
+            code: ErrorCode::PiUnavailable,
+            retryable: true,
+            ..
+        }
+    ));
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(
+        manager.reap_exited().expect("reap after failed create"),
+        Vec::new()
+    );
 }
 
 #[test]

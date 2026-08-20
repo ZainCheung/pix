@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
-use pix_wire::HostModelDefaults;
+use pix_wire::{HostModelDefaults, SessionState};
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
@@ -12,6 +12,8 @@ use crate::pi_rpc::{PiCommand, PiEvent, PiResponse, RpcError};
 use crate::runtime::{PiRuntime, PiRuntimeOptions, RuntimeError, SessionLaunch};
 use crate::session::{DiscoveredSession, SessionError, SessionSnapshot};
 use crate::session_lock::SessionId;
+
+const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveRuntimeSummary {
@@ -25,7 +27,10 @@ pub struct ActiveRuntimeSummary {
 pub struct RuntimeManagerOptions {
     pub executable: PathBuf,
     pub lock_directory: PathBuf,
+    /// Maximum number of resident Pi child processes.
     pub max_active_sessions: usize,
+    /// Maximum number of sessions with an accepted turn in flight.
+    pub max_concurrent_turns: usize,
     pub idle_timeout: Duration,
     pub request_timeout: Duration,
     pub extra_arguments: Vec<String>,
@@ -38,10 +43,13 @@ impl RuntimeManagerOptions {
     ///
     /// # Errors
     ///
-    /// Returns [`RuntimeManagerError`] when no active session slot is allowed.
+    /// Returns [`RuntimeManagerError`] when no runtime or turn slot is allowed.
     pub fn validate(&self) -> Result<(), RuntimeManagerError> {
         if self.max_active_sessions == 0 {
             return Err(RuntimeManagerError::InvalidLimit);
+        }
+        if self.max_concurrent_turns == 0 {
+            return Err(RuntimeManagerError::InvalidTurnLimit);
         }
         Ok(())
     }
@@ -49,16 +57,40 @@ impl RuntimeManagerOptions {
 
 struct ManagedRuntime {
     runtime: Arc<PiRuntime>,
+    operation: Arc<Mutex<()>>,
     workspace: PathBuf,
     client_count: usize,
     last_used: Instant,
     completed: bool,
+    phase: RuntimePhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePhase {
+    Starting,
+    Idle,
+    Running,
+    Compacting,
+    Unavailable,
+}
+
+impl RuntimePhase {
+    const fn session_state(self) -> SessionState {
+        match self {
+            Self::Starting => SessionState::Starting,
+            Self::Idle => SessionState::Idle,
+            Self::Running => SessionState::Running,
+            Self::Compacting => SessionState::Compacting,
+            Self::Unavailable => SessionState::Unavailable,
+        }
+    }
 }
 
 /// Owns all active Pi children and enforces host runtime limits.
 pub struct RuntimeManager {
     options: RuntimeManagerOptions,
     runtimes: Mutex<HashMap<SessionId, ManagedRuntime>>,
+    turns: Mutex<HashSet<SessionId>>,
     lifecycle: Mutex<()>,
 }
 
@@ -73,6 +105,7 @@ impl RuntimeManager {
         Ok(Self {
             options,
             runtimes: Mutex::new(HashMap::new()),
+            turns: Mutex::new(HashSet::new()),
             lifecycle: Mutex::new(()),
         })
     }
@@ -185,26 +218,46 @@ impl RuntimeManager {
         session_id: SessionId,
         command: &PiCommand,
     ) -> Result<PiResponse, RuntimeManagerError> {
-        let runtime = self.active_runtime(session_id)?;
-        let response = runtime
-            .rpc()
-            .request(command, self.options.request_timeout)?;
+        let (runtime, operation) = self.runtime_and_operation(session_id)?;
+        let _operation = try_lock_operation(&operation, session_id)?;
+        let admitted = if is_turn_command(command) {
+            self.try_admit_turn(session_id)?
+        } else {
+            false
+        };
+        let response = match runtime.rpc().request(command, self.options.request_timeout) {
+            Ok(response) => response,
+            Err(error) => {
+                if admitted {
+                    self.release_turn(session_id);
+                }
+                return Err(error.into());
+            }
+        };
         let mut runtimes = self
             .runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let turn_active = is_turn_command(command) && self.turn_is_active(session_id);
         let Some(managed) = runtimes.get_mut(&session_id) else {
+            if admitted {
+                self.release_turn(session_id);
+            }
             return Err(RuntimeManagerError::NotActive(session_id));
         };
         managed.last_used = Instant::now();
-        if matches!(
-            command,
-            PiCommand::Prompt { .. }
-                | PiCommand::Steer { .. }
-                | PiCommand::FollowUp { .. }
-                | PiCommand::Compact { .. }
-        ) {
-            managed.completed = false;
+        match command {
+            PiCommand::Prompt { .. } | PiCommand::Steer { .. } | PiCommand::FollowUp { .. }
+                if turn_active =>
+            {
+                managed.completed = false;
+                managed.phase = RuntimePhase::Running;
+            }
+            PiCommand::Compact { .. } if turn_active => {
+                managed.completed = false;
+                managed.phase = RuntimePhase::Compacting;
+            }
+            _ => {}
         }
         Ok(response)
     }
@@ -230,7 +283,8 @@ impl RuntimeManager {
     /// Returns [`RuntimeManagerError`] for unknown sessions, RPC failures, or
     /// incompatible Pi snapshot data.
     pub fn snapshot(&self, session_id: SessionId) -> Result<SessionSnapshot, RuntimeManagerError> {
-        let runtime = self.active_runtime(session_id)?;
+        let (runtime, operation) = self.runtime_and_operation(session_id)?;
+        let _operation = try_lock_operation(&operation, session_id)?;
         let snapshot = SessionSnapshot::read(runtime.rpc(), self.options.request_timeout)?;
         let mut runtimes = self
             .runtimes
@@ -239,8 +293,14 @@ impl RuntimeManager {
         let Some(managed) = runtimes.get_mut(&session_id) else {
             return Err(RuntimeManagerError::NotActive(session_id));
         };
-        managed.completed = !snapshot.is_streaming && !snapshot.is_compacting;
+        managed.phase = phase_for_snapshot(snapshot.is_streaming, snapshot.is_compacting);
+        managed.completed = matches!(managed.phase, RuntimePhase::Idle);
+        let completed = managed.completed;
         managed.last_used = Instant::now();
+        drop(runtimes);
+        if completed {
+            self.release_turn(session_id);
+        }
         Ok(snapshot)
     }
 
@@ -281,6 +341,14 @@ impl RuntimeManager {
     }
 
     fn release_inner(&self, session_id: SessionId) -> Result<(), RuntimeManagerError> {
+        let operation = self
+            .runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .map(|managed| Arc::clone(&managed.operation))
+            .ok_or(RuntimeManagerError::NotActive(session_id))?;
+        let _operation = try_lock_operation(&operation, session_id)?;
         let managed = self
             .runtimes
             .lock()
@@ -294,6 +362,7 @@ impl RuntimeManager {
                 .insert(session_id, ManagedRuntime { runtime, ..managed });
             RuntimeManagerError::Busy(session_id)
         })?;
+        self.release_turn(session_id);
         runtime.stop()?;
         Ok(())
     }
@@ -315,23 +384,78 @@ impl RuntimeManager {
                 .runtimes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            runtimes
+            let mut candidates = runtimes
                 .iter()
                 .filter(|(_, managed)| {
                     managed.client_count == 0
                         && now.duration_since(managed.last_used) >= idle_timeout
                 })
-                .map(|(id, _)| *id)
-                .collect::<Vec<_>>()
+                .map(|(id, managed)| (*id, managed.last_used))
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(_, last_used)| *last_used);
+            candidates.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
         };
         let mut released = Vec::new();
+        let mut first_error = None;
         for id in candidates {
-            if self.refresh_completed(id)? {
-                self.release_inner(id)?;
-                released.push(id);
+            match self.refresh_completed_with_timeout(id, self.probe_timeout()) {
+                Ok(true) => match self.release_inner(id) {
+                    Ok(()) => released.push(id),
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
+                },
+                Ok(false) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
             }
         }
+        if released.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
         Ok(released)
+    }
+
+    /// Removes runtimes whose Pi child has already exited.
+    ///
+    /// The RPC client broadcasts the terminal `Closed` event before it is
+    /// dropped, so attached clients still receive an `Unavailable` state while
+    /// the manager releases the process lease and registry entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] if the child cannot be inspected or a
+    /// runtime cannot be released cleanly.
+    pub fn reap_exited(&self) -> Result<Vec<SessionId>, RuntimeManagerError> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let exited = {
+            let runtimes = self
+                .runtimes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut exited = Vec::new();
+            for (id, managed) in runtimes.iter() {
+                if managed.runtime.try_wait()?.is_some() {
+                    exited.push(*id);
+                }
+            }
+            exited
+        };
+        let mut reaped = Vec::new();
+        for id in exited {
+            match self.release_inner(id) {
+                Ok(()) => reaped.push(id),
+                Err(RuntimeManagerError::NotActive(_) | RuntimeManagerError::Busy(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(reaped)
     }
 
     #[must_use]
@@ -374,17 +498,72 @@ impl RuntimeManager {
             .map(|managed| managed.completed)
     }
 
-    /// Records completion state derived by the Pi compatibility bridge.
-    pub fn mark_completed(&self, session_id: SessionId, completed: bool) {
-        if let Some(managed) = self
-            .runtimes
+    /// Returns the current wire-compatible state for an active runtime.
+    #[must_use]
+    pub fn session_state(&self, session_id: SessionId) -> Option<SessionState> {
+        self.runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&session_id)
+            .get(&session_id)
+            .map(|managed| managed.phase.session_state())
+    }
+
+    /// Refreshes an active runtime from Pi before a detached session is shown
+    /// in a catalog. A failed refresh is returned to the caller so it can keep
+    /// the previous in-memory state without blocking the whole session list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] if the session is inactive or Pi does
+    /// not return a usable state response within the probe timeout.
+    pub fn refresh_state(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionState, RuntimeManagerError> {
+        self.refresh_completed_with_timeout(session_id, self.probe_timeout())?;
+        self.session_state(session_id)
+            .ok_or(RuntimeManagerError::NotActive(session_id))
+    }
+
+    /// Records an authoritative state received from the Pi compatibility
+    /// bridge. This is intentionally in-memory; Pi JSONL remains durable truth.
+    pub fn mark_state(&self, session_id: SessionId, state: SessionState) {
         {
-            managed.completed = completed;
-            managed.last_used = Instant::now();
+            if let Some(managed) = self
+                .runtimes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_mut(&session_id)
+            {
+                managed.phase = match state {
+                    SessionState::Sleeping | SessionState::Idle => RuntimePhase::Idle,
+                    SessionState::Starting => RuntimePhase::Starting,
+                    SessionState::Running => RuntimePhase::Running,
+                    SessionState::Compacting => RuntimePhase::Compacting,
+                    SessionState::Unavailable => RuntimePhase::Unavailable,
+                };
+                managed.completed = matches!(managed.phase, RuntimePhase::Idle);
+                managed.last_used = Instant::now();
+            }
         }
+        if matches!(
+            state,
+            SessionState::Idle | SessionState::Sleeping | SessionState::Unavailable
+        ) {
+            self.release_turn(session_id);
+        }
+    }
+
+    /// Records completion state derived by the Pi compatibility bridge.
+    pub fn mark_completed(&self, session_id: SessionId, completed: bool) {
+        self.mark_state(
+            session_id,
+            if completed {
+                SessionState::Idle
+            } else {
+                SessionState::Running
+            },
+        );
     }
 
     #[must_use]
@@ -429,17 +608,19 @@ impl RuntimeManager {
                 id,
                 ManagedRuntime {
                     runtime,
+                    operation: Arc::new(Mutex::new(())),
                     workspace,
                     client_count: 1,
                     last_used: Instant::now(),
-                    completed: true,
+                    completed: false,
+                    phase: RuntimePhase::Starting,
                 },
             );
         Ok(())
     }
 
     fn make_capacity(&self) -> Result<(), RuntimeManagerError> {
-        let candidate = {
+        let candidates = {
             let runtimes = self
                 .runtimes
                 .lock()
@@ -447,23 +628,26 @@ impl RuntimeManager {
             if runtimes.len() < self.options.max_active_sessions {
                 return Ok(());
             }
-            runtimes
+            let mut candidates = runtimes
                 .iter()
-                .filter(|(_, managed)| managed.client_count == 0 && managed.completed)
-                .min_by_key(|(_, managed)| managed.last_used)
-                .map(|(id, _)| *id)
+                .filter(|(_, managed)| managed.client_count == 0)
+                .map(|(id, managed)| (*id, managed.last_used))
+                .collect::<Vec<_>>();
+            candidates.sort_by_key(|(_, last_used)| *last_used);
+            candidates.into_iter().map(|(id, _)| id).collect::<Vec<_>>()
         };
-        let Some(candidate) = candidate else {
-            return Err(RuntimeManagerError::Capacity {
-                limit: self.options.max_active_sessions,
-            });
-        };
-        if !self.refresh_completed(candidate)? {
-            return Err(RuntimeManagerError::Capacity {
-                limit: self.options.max_active_sessions,
-            });
+        for candidate in candidates {
+            if self
+                .refresh_completed_with_timeout(candidate, self.probe_timeout())
+                .unwrap_or(false)
+                && self.release_inner(candidate).is_ok()
+            {
+                return Ok(());
+            }
         }
-        self.release_inner(candidate)
+        Err(RuntimeManagerError::Capacity {
+            limit: self.options.max_active_sessions,
+        })
     }
 
     fn active_runtime(&self, session_id: SessionId) -> Result<Arc<PiRuntime>, RuntimeManagerError> {
@@ -475,31 +659,119 @@ impl RuntimeManager {
             .ok_or(RuntimeManagerError::NotActive(session_id))
     }
 
-    fn refresh_completed(&self, session_id: SessionId) -> Result<bool, RuntimeManagerError> {
-        let runtime = self.active_runtime(session_id)?;
-        let response = runtime
-            .rpc()
-            .request(&PiCommand::GetState, self.options.request_timeout)?;
+    fn try_admit_turn(&self, session_id: SessionId) -> Result<bool, RuntimeManagerError> {
+        let mut turns = self
+            .turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if turns.contains(&session_id) {
+            return Ok(false);
+        }
+        if turns.len() >= self.options.max_concurrent_turns {
+            return Err(RuntimeManagerError::TurnCapacity {
+                limit: self.options.max_concurrent_turns,
+            });
+        }
+        turns.insert(session_id);
+        Ok(true)
+    }
+
+    fn release_turn(&self, session_id: SessionId) {
+        self.turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+    }
+
+    fn turn_is_active(&self, session_id: SessionId) -> bool {
+        self.turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(&session_id)
+    }
+
+    fn runtime_and_operation(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(Arc<PiRuntime>, Arc<Mutex<()>>), RuntimeManagerError> {
+        self.runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .map(|managed| (Arc::clone(&managed.runtime), Arc::clone(&managed.operation)))
+            .ok_or(RuntimeManagerError::NotActive(session_id))
+    }
+
+    fn refresh_completed_with_timeout(
+        &self,
+        session_id: SessionId,
+        timeout: Duration,
+    ) -> Result<bool, RuntimeManagerError> {
+        let (runtime, operation) = self.runtime_and_operation(session_id)?;
+        let _operation = try_lock_operation(&operation, session_id)?;
+        let response = runtime.rpc().request(&PiCommand::GetState, timeout)?;
         let state = response
             .data
             .ok_or(RpcError::MissingResponseData("get_state"))?;
-        let completed = state
+        let is_streaming = state
             .get("isStreaming")
             .and_then(serde_json::Value::as_bool)
-            == Some(false)
-            && state
-                .get("isCompacting")
-                .and_then(serde_json::Value::as_bool)
-                == Some(false);
+            == Some(true);
+        let is_compacting = state
+            .get("isCompacting")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        let phase = phase_for_snapshot(is_streaming, is_compacting);
+        let completed = matches!(phase, RuntimePhase::Idle);
         if let Some(managed) = self
             .runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&session_id)
         {
+            managed.phase = phase;
             managed.completed = completed;
+            managed.last_used = Instant::now();
+        }
+        if completed {
+            self.release_turn(session_id);
         }
         Ok(completed)
+    }
+
+    fn probe_timeout(&self) -> Duration {
+        self.options.request_timeout.min(RUNTIME_PROBE_TIMEOUT)
+    }
+}
+
+fn phase_for_snapshot(is_streaming: bool, is_compacting: bool) -> RuntimePhase {
+    if is_compacting {
+        RuntimePhase::Compacting
+    } else if is_streaming {
+        RuntimePhase::Running
+    } else {
+        RuntimePhase::Idle
+    }
+}
+
+fn is_turn_command(command: &PiCommand) -> bool {
+    matches!(
+        command,
+        PiCommand::Prompt { .. }
+            | PiCommand::Steer { .. }
+            | PiCommand::FollowUp { .. }
+            | PiCommand::Compact { .. }
+    )
+}
+
+fn try_lock_operation(
+    operation: &Mutex<()>,
+    session_id: SessionId,
+) -> Result<MutexGuard<'_, ()>, RuntimeManagerError> {
+    match operation.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+        Err(TryLockError::WouldBlock) => Err(RuntimeManagerError::Busy(session_id)),
     }
 }
 
@@ -507,8 +779,12 @@ impl RuntimeManager {
 pub enum RuntimeManagerError {
     #[error("max_active_sessions must be greater than zero")]
     InvalidLimit,
-    #[error("active Pi session limit {limit} reached and no completed idle runtime can be stopped")]
+    #[error("max_concurrent_turns must be greater than zero")]
+    InvalidTurnLimit,
+    #[error("active Pi session limit {limit} reached and no idle runtime can be stopped")]
     Capacity { limit: usize },
+    #[error("concurrent Pi turn limit {limit} reached")]
+    TurnCapacity { limit: usize },
     #[error("Pi session is not active: {0}")]
     NotActive(SessionId),
     #[error("Pi session has no attached client: {0}")]

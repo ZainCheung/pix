@@ -64,6 +64,11 @@ impl HostConfig {
                 "max_active_sessions must be greater than zero",
             ));
         }
+        if self.preferences.max_concurrent_turns == 0 {
+            return Err(ConfigError::Invalid(
+                "max_concurrent_turns must be greater than zero",
+            ));
+        }
         if let Some(url) = &self.preferences.relay_url
             && !(url.starts_with("wss://") || url.starts_with("ws://"))
         {
@@ -151,7 +156,11 @@ pub struct Preferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
     pub idle_timeout_seconds: u64,
+    /// Maximum number of Pi child processes kept resident at once.
     pub max_active_sessions: usize,
+    /// Maximum number of sessions allowed to execute a turn concurrently.
+    #[serde(default = "default_max_concurrent_turns")]
+    pub max_concurrent_turns: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi_executable: Option<PathBuf>,
     /// Round-trips preference fields introduced by newer builds.
@@ -172,6 +181,10 @@ impl Preferences {
     }
 }
 
+fn default_max_concurrent_turns() -> usize {
+    4
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -179,6 +192,7 @@ impl Default for Preferences {
             relay_url: None,
             idle_timeout_seconds: 300,
             max_active_sessions: 4,
+            max_concurrent_turns: 4,
             pi_executable: None,
             unknown: serde_json::Map::new(),
         }
@@ -457,6 +471,19 @@ mod tests {
 
         let config = ConfigStore::new(&path).load().expect("load config");
         assert_eq!(config.preferences.pi_executable, None);
+        assert_eq!(config.preferences.max_concurrent_turns, 4);
+    }
+
+    #[test]
+    fn rejects_zero_concurrent_turn_limit() {
+        let mut config = HostConfig::new("Test Mac");
+        config.preferences.max_concurrent_turns = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::Invalid(
+                "max_concurrent_turns must be greater than zero"
+            ))
+        ));
     }
 
     #[test]

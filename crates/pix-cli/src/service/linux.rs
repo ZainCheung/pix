@@ -60,6 +60,12 @@ pub(crate) fn stop(store: &ConfigStore) -> Result<()> {
         if active(store)? {
             run_systemctl(&["stop", UNIT_NAME])?;
             println!("Pix service stopped.");
+        } else if crate::status::request_control_command(store.path(), "quit")? {
+            // A user-level unit can be installed but inactive while a
+            // manually launched service instance is still serving this
+            // config. Prefer the instance's private control socket before
+            // reporting that the service is stopped.
+            println!("Requested Pix host service shutdown.");
         } else {
             println!("Pix service is not running.");
         }

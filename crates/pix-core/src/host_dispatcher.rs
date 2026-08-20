@@ -155,17 +155,12 @@ impl HostProtocolDispatcher {
         let mapped = pi_bridge::event(session_id, event)?;
         if let Some(event) = &mapped {
             match event {
-                ServerEvent::SessionState {
-                    state: SessionState::Idle,
-                    ..
-                } => self.runtimes.mark_completed(session_id, true),
-                ServerEvent::SessionState {
-                    state: SessionState::Running,
-                    ..
+                ServerEvent::SessionState { state, .. } => {
+                    self.runtimes.mark_state(session_id, *state);
                 }
-                | ServerEvent::Compaction { .. } => {
-                    self.runtimes.mark_completed(session_id, false);
-                }
+                ServerEvent::Compaction { .. } => self
+                    .runtimes
+                    .mark_state(session_id, SessionState::Compacting),
                 _ => {}
             }
         }
@@ -230,12 +225,21 @@ impl HostProtocolDispatcher {
         }
     }
 
-    pub(crate) fn resolve_response(&self, pending: PendingResponse) -> ServerEnvelope {
+    pub(crate) fn resolve_response(&mut self, pending: PendingResponse) -> ServerEnvelope {
         let event = match pending.event {
             PendingEvent::Ready(event) => event,
-            PendingEvent::SessionSnapshot(session_id) => self
-                .session_snapshot_event(session_id)
-                .unwrap_or_else(|error| error.public_event()),
+            PendingEvent::SessionSnapshot {
+                session_id,
+                cleanup_on_error,
+            } => match self.session_snapshot_event(session_id) {
+                Ok(event) => event,
+                Err(error) => {
+                    if cleanup_on_error {
+                        self.cleanup_failed_session_start(session_id);
+                    }
+                    error.public_event()
+                }
+            },
         };
         response(pending.request_id, event)
     }
@@ -285,7 +289,7 @@ impl HostProtocolDispatcher {
                 let session_id = self.require_attached(&session_id)?;
                 self.runtimes
                     .request(session_id, &PiCommand::SetSessionName { name })?;
-                Ok(snapshot_after_ack(session_id))
+                Ok(snapshot_after_ack(session_id, false))
             }
             ClientRequest::SessionRelease { session_id } => {
                 let session_id = self.require_attached(&session_id)?;
@@ -478,17 +482,26 @@ impl HostProtocolDispatcher {
         };
         let sessions = discovered
             .into_iter()
-            .map(|session| WireSessionSummary {
-                id: session.summary.id.to_string(),
-                name: session.summary.name,
-                modified_at: session.summary.modified_at.to_rfc3339(),
-                message_count: session.summary.message_count,
-                first_user_message: session.summary.first_user_message,
-                state: match self.runtimes.is_completed(session.summary.id) {
-                    Some(true) => SessionState::Idle,
-                    Some(false) => SessionState::Running,
-                    None => SessionState::Sleeping,
-                },
+            .map(|session| {
+                let state = if self.runtimes.client_count(session.summary.id) == Some(0) {
+                    self.runtimes
+                        .refresh_state(session.summary.id)
+                        .ok()
+                        .or_else(|| self.runtimes.session_state(session.summary.id))
+                        .unwrap_or(SessionState::Sleeping)
+                } else {
+                    self.runtimes
+                        .session_state(session.summary.id)
+                        .unwrap_or(SessionState::Sleeping)
+                };
+                WireSessionSummary {
+                    id: session.summary.id.to_string(),
+                    name: session.summary.name,
+                    modified_at: session.summary.modified_at.to_rfc3339(),
+                    message_count: session.summary.message_count,
+                    first_user_message: session.summary.first_user_message,
+                    state,
+                }
             })
             .collect();
         let event = ServerEvent::SessionList {
@@ -523,15 +536,16 @@ impl HostProtocolDispatcher {
         self.attached_sessions.insert(session_id);
         if let Err(error) = self.subscribe_session(session_id) {
             self.attached_sessions.remove(&session_id);
-            let _ = self.runtimes.release(session_id);
+            self.release_failed_runtime(session_id);
             return Err(error);
         }
-        Ok(snapshot_after_ack(session_id))
+        Ok(snapshot_after_ack(session_id, true))
     }
 
     fn attach_session(&mut self, value: &str) -> Result<ServerEvent, DispatchError> {
         let session_id = parse_session_id(value)?;
         let already_attached = self.attached_sessions.contains(&session_id);
+        let mut opened_runtime = false;
         if !already_attached {
             if self.runtimes.is_active(session_id) {
                 self.ensure_active_session_authorized(session_id)?;
@@ -543,13 +557,18 @@ impl HostProtocolDispatcher {
                     located.store.session_directory(),
                     &located.session,
                 )?;
+                opened_runtime = true;
             }
             self.attached_sessions.insert(session_id);
         }
         if let Err(error) = self.subscribe_session(session_id) {
             if !already_attached {
                 self.attached_sessions.remove(&session_id);
-                let _ = self.runtimes.detach(session_id);
+                if opened_runtime {
+                    self.release_failed_runtime(session_id);
+                } else {
+                    let _ = self.runtimes.detach(session_id);
+                }
             }
             return Err(error);
         }
@@ -558,7 +577,11 @@ impl HostProtocolDispatcher {
             Err(error) if !already_attached => {
                 self.attached_sessions.remove(&session_id);
                 self.event_receivers.remove(&session_id);
-                let _ = self.runtimes.detach(session_id);
+                if opened_runtime {
+                    self.release_failed_runtime(session_id);
+                } else {
+                    let _ = self.runtimes.detach(session_id);
+                }
                 Err(error)
             }
             Err(error) => Err(error),
@@ -589,6 +612,21 @@ impl HostProtocolDispatcher {
         let receiver = self.runtimes.subscribe(session_id)?;
         self.event_receivers.insert(session_id, receiver);
         Ok(())
+    }
+
+    fn cleanup_failed_session_start(&mut self, session_id: SessionId) {
+        self.attached_sessions.remove(&session_id);
+        self.event_receivers.remove(&session_id);
+        self.release_failed_runtime(session_id);
+    }
+
+    fn release_failed_runtime(&self, session_id: SessionId) {
+        if self.runtimes.release(session_id).is_err() {
+            // A concurrent operation may still own the operation gate. Drop
+            // this connection's reference so the periodic idle sweep can
+            // retry cleanup once that operation settles.
+            let _ = self.runtimes.detach(session_id);
+        }
     }
 
     fn require_attached(&self, value: &str) -> Result<SessionId, DispatchError> {
@@ -679,17 +717,23 @@ pub(crate) struct PendingResponse {
 #[allow(clippy::large_enum_variant)]
 enum PendingEvent {
     Ready(ServerEvent),
-    SessionSnapshot(SessionId),
+    SessionSnapshot {
+        session_id: SessionId,
+        cleanup_on_error: bool,
+    },
 }
 
 fn ready(event: ServerEvent) -> PendingEvent {
     PendingEvent::Ready(event)
 }
 
-fn snapshot_after_ack(session_id: SessionId) -> Vec<PendingEvent> {
+fn snapshot_after_ack(session_id: SessionId, cleanup_on_error: bool) -> Vec<PendingEvent> {
     vec![
         ready(ServerEvent::RequestAck),
-        PendingEvent::SessionSnapshot(session_id),
+        PendingEvent::SessionSnapshot {
+            session_id,
+            cleanup_on_error,
+        },
     ]
 }
 
@@ -783,6 +827,11 @@ impl DispatchError {
             Self::Runtime(RuntimeManagerError::Capacity { .. }) => (
                 ErrorCode::Capacity,
                 "Active session capacity has been reached",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::TurnCapacity { .. }) => (
+                ErrorCode::Capacity,
+                "Concurrent turn capacity has been reached",
                 true,
             ),
             Self::Runtime(
