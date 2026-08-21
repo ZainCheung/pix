@@ -4,8 +4,10 @@ set -eu
 # Build the public macOS menu-bar client and embed the matching pix CLI.
 #
 # The script is intentionally usable without Apple signing credentials. Set
-# MACOS_CODE_SIGN_IDENTITY and MACOS_DEVELOPMENT_TEAM for a signed build, and
-# MACOS_NOTARY_PROFILE for notarization. Credentials never belong in this
+# MACOS_CODE_SIGN_IDENTITY and MACOS_DEVELOPMENT_TEAM for a signed build. For
+# notarization, either set MACOS_NOTARY_PROFILE for a local Keychain profile or
+# set MACOS_NOTARY_KEY_PATH, MACOS_NOTARY_KEY_ID, and
+# MACOS_NOTARY_ISSUER_ID for a Team API Key. Credentials never belong in this
 # repository.
 
 repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
@@ -32,6 +34,38 @@ case "$mac_arch" in
         ;;
 esac
 cli_target=${MACOS_CLI_TARGET:-$default_cli_target}
+
+notary_profile=${MACOS_NOTARY_PROFILE:-}
+notary_key_path=${MACOS_NOTARY_KEY_PATH:-}
+notary_key_id=${MACOS_NOTARY_KEY_ID:-}
+notary_issuer_id=${MACOS_NOTARY_ISSUER_ID:-}
+
+if [ -n "$notary_profile" ] && {
+    [ -n "$notary_key_path" ] ||
+    [ -n "$notary_key_id" ] ||
+    [ -n "$notary_issuer_id" ];
+}; then
+    printf '%s\n' "Choose MACOS_NOTARY_PROFILE or Team API Key credentials, not both." >&2
+    exit 1
+fi
+
+if [ -n "$notary_key_path" ] || [ -n "$notary_key_id" ] || [ -n "$notary_issuer_id" ]; then
+    [ -n "$notary_key_path" ] && [ -n "$notary_key_id" ] && [ -n "$notary_issuer_id" ] || {
+        printf '%s\n' "MACOS_NOTARY_KEY_PATH, MACOS_NOTARY_KEY_ID, and MACOS_NOTARY_ISSUER_ID are required together." >&2
+        exit 1
+    }
+    [ -f "$notary_key_path" ] || {
+        printf '%s\n' "Notary API key file not found: $notary_key_path" >&2
+        exit 1
+    }
+fi
+
+if [ -n "$notary_profile" ] || [ -n "$notary_key_path" ]; then
+    [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ] || {
+        printf '%s\n' "Notarization requires MACOS_CODE_SIGN_IDENTITY." >&2
+        exit 1
+    }
+fi
 
 cargo build --manifest-path "$repository_root/Cargo.toml" -p pix-cli \
     --release --locked --target "$cli_target"
@@ -103,18 +137,23 @@ if [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ]; then
     codesign --verify --deep --strict --verbose=2 "$app_path"
 fi
 
-if [ -n "${MACOS_NOTARY_PROFILE:-}" ]; then
-    [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ] || {
-        printf '%s\n' "MACOS_NOTARY_PROFILE requires a signed build." >&2
-        exit 1
-    }
+if [ -n "$notary_profile" ] || [ -n "$notary_key_path" ]; then
     notarization_zip="$output_dir/Pix-notarize.zip"
     rm -f "$notarization_zip"
     ditto -c -k --keepParent "$app_path" "$notarization_zip"
-    xcrun notarytool submit "$notarization_zip" \
-        --keychain-profile "$MACOS_NOTARY_PROFILE" \
-        --wait
+    if [ -n "$notary_profile" ]; then
+        xcrun notarytool submit "$notarization_zip" \
+            --keychain-profile "$notary_profile" \
+            --wait
+    else
+        xcrun notarytool submit "$notarization_zip" \
+            --key "$notary_key_path" \
+            --key-id "$notary_key_id" \
+            --issuer "$notary_issuer_id" \
+            --wait
+    fi
     xcrun stapler staple "$app_path"
+    xcrun stapler validate "$app_path"
     spctl --assess --type execute --verbose=2 "$app_path"
 fi
 

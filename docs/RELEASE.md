@@ -22,11 +22,16 @@ git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` validates the tag, verifies the workspace,
-builds native Linux x86_64 and ARM64 artifacts, builds the public unsigned
-macOS arm64 application archive, builds the Apple XCFramework, generates the
-SBOM/license report and one `SHA256SUMS` manifest, creates an artifact
-provenance attestation, and publishes a draft only after all assets are ready.
-The release workflow refuses tags that are not contained in `origin/main`.
+builds native Linux x86_64 and ARM64 artifacts, builds the Apple XCFramework,
+and builds the macOS arm64 application on a GitHub-hosted `macos-15` runner.
+The macOS job references the protected `apple-release` Environment: after
+approval it imports the Developer ID certificate into a temporary Keychain,
+signs the app and embedded CLI, notarizes with the Team API Key, staples the
+ticket, verifies Gatekeeper readiness, and removes all signing material. The
+workflow then generates the SBOM/license report and one `SHA256SUMS` manifest,
+creates an artifact provenance attestation, and publishes a draft only after
+all assets are ready. The release workflow refuses tags that are not contained
+in `origin/main`.
 
 The published files use stable names:
 
@@ -46,9 +51,10 @@ SHA256SUMS
 
 The Apple wire archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
 `VERSION`, and `COMMIT`. The macOS archive contains a self-contained
-`Pix.app` with a `pix` CLI built from the same source commit. The public
-archive is unsigned; Developer ID signing and notarization are performed in a
-protected release environment when distribution requires it.
+`Pix.app` with a `pix` CLI built from the same source commit. The macOS archive
+is signed and notarized when the `apple-release` Environment is approved. The
+Apple wire archive is a static XCFramework artifact and does not participate
+in Developer ID notarization.
 
 ## Homebrew Cask
 

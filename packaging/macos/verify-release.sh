@@ -3,7 +3,7 @@ set -eu
 
 # Verify a Pix macOS application bundle. Unsigned source builds can be checked
 # for structure with MACOS_SKIP_CODESIGN=1; distribution builds should leave
-# both checks enabled.
+# code-signature, Gatekeeper, and stapled-ticket checks enabled.
 
 app_path=${1:?usage: verify-release.sh <path-to-Pix.app>}
 
@@ -22,6 +22,9 @@ if [ "${MACOS_SKIP_CODESIGN:-0}" != "1" ]; then
     codesign --verify --deep --strict --verbose=2 "$app_path"
     if [ "${MACOS_SKIP_GATEKEEPER:-0}" != "1" ] && command -v spctl >/dev/null 2>&1; then
         spctl --assess --type execute --verbose=2 "$app_path"
+    fi
+    if command -v xcrun >/dev/null 2>&1; then
+        xcrun stapler validate "$app_path"
     fi
 fi
 
