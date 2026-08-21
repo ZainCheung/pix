@@ -508,23 +508,6 @@ final class HostModel {
         return result
     }
 
-    /// Appends raw bytes to a log file, creating parent directories on
-    /// first use. Called from pipe-handler threads; never throws.
-    nonisolated private static func appendToLog(_ data: Data, at url: URL) {
-        let manager = FileManager.default
-        if !manager.fileExists(atPath: url.path) {
-            try? manager.createDirectory(
-                at: url.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            manager.createFile(atPath: url.path, contents: nil)
-        }
-        guard let handle = try? FileHandle(forWritingTo: url) else { return }
-        defer { try? handle.close() }
-        _ = try? handle.seekToEnd()
-        try? handle.write(contentsOf: data)
-    }
-
     /// Resolves the Pix CLI in the same order a user expects from a terminal:
     /// the release bundle, an explicit development override, the inherited
     /// PATH, the interactive login-shell PATH, and common user install paths.
