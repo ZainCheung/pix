@@ -103,6 +103,8 @@ wire contract.
 For a packaged host:
 
 - Linux x86_64 or ARM64.
+- macOS 14 or newer for the menu-bar application (public archives currently
+  target Apple Silicon).
 - Pi installed and available on `PATH`, or an explicit executable
   path.
 - A Pi version in the currently verified range `>=0.84.1, <0.85.0`.
