@@ -15,6 +15,7 @@ targets:
     sources:
       - path: Pix
     resources:
+      - path: Pix/Assets.xcassets
       - path: Pix/PrivacyInfo.xcprivacy
     settings:
       base:

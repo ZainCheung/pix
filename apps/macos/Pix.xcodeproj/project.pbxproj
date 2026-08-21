@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		09AD247B6B3D963ABFE3EE01 /* RemotePairingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 539F44CAD653A676ED57A0D6 /* RemotePairingWindow.swift */; };
+		41BD093D6D697C5DE3DE2597 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFE54B32065C3BB5A052FA6C /* Assets.xcassets */; };
 		5E9F60AA0C2B70F57600AF88 /* HostModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C266F2440693B4A72B52E81C /* HostModel.swift */; };
 		66F2387BDF8EF31ABD27986B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 4FFE7256A50D7E91C2BC2C9A /* PrivacyInfo.xcprivacy */; };
 		6F63368CBCE05E2C40C75961 /* HostModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68FA8482D3A2E602D4EDCE0 /* HostModelTests.swift */; };
@@ -37,6 +38,7 @@
 		8BBE39F0D0C92EEA99C8B426 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C266F2440693B4A72B52E81C /* HostModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostModel.swift; sourceTree = "<group>"; };
 		C5695ECBD05269F936D7A6F0 /* Pix.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pix.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CFE54B32065C3BB5A052FA6C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DBE4AEBF08911680D2EF8A48 /* HostTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostTypes.swift; sourceTree = "<group>"; };
 		F68FA8482D3A2E602D4EDCE0 /* HostModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -62,6 +64,7 @@
 		5142615253D11BB350770751 /* Pix */ = {
 			isa = PBXGroup;
 			children = (
+				CFE54B32065C3BB5A052FA6C /* Assets.xcassets */,
 				454A1E7C8E168D128CF48DBF /* Info.plist */,
 				4FFE7256A50D7E91C2BC2C9A /* PrivacyInfo.xcprivacy */,
 				FBA96963E872CB3CD0198595 /* App */,
@@ -212,6 +215,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				41BD093D6D697C5DE3DE2597 /* Assets.xcassets in Resources */,
 				66F2387BDF8EF31ABD27986B /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
