@@ -726,6 +726,14 @@ fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) -> Result<(
                 Some("sessions") => {
                     emit_sessions(&service, output, &log, &mut control);
                 }
+                Some("refresh") => {
+                    if let Err(error) = service.refresh_config() {
+                        emit_command_error(&anyhow::Error::new(error), output, &log, &mut control);
+                    } else {
+                        emit_devices(&service, output, &log, &mut control);
+                        emit_sessions(&service, output, &log, &mut control);
+                    }
+                }
                 Some("release") => {
                     if let Err(error) =
                         release_session(&service, words.next(), output, &log, &mut control)

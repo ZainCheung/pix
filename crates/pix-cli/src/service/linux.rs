@@ -116,24 +116,12 @@ pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
     Ok(unit_file_path()?.is_file())
 }
 
-pub(crate) fn active(_store: &ConfigStore) -> Result<bool> {
-    let output = Command::new("systemctl")
-        .args([
-            "--user",
-            "show",
-            UNIT_NAME,
-            "--property=ActiveState",
-            "--value",
-        ])
-        .output()
-        .context("inspecting Pix systemd user service state")?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    Ok(matches!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "active" | "activating" | "deactivating"
-    ))
+pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
+    require_systemctl()?;
+    // systemd --user is global to the login session and cannot distinguish a
+    // different Pix config. The config-scoped status record is the source of
+    // truth used by `pix status` and native clients.
+    Ok(crate::status::HostServiceStatus::current(store.path()).is_some())
 }
 
 pub(crate) fn unit_file_path() -> Result<PathBuf> {

@@ -9,7 +9,7 @@ truth; Host does not maintain a message database.
 
 - `pix-wire` owns protocol versioning, canonical envelopes, frame limits,
   Noise XX/IK handshakes, encryption, replay protection, and the UniFFI API
-  consumed by the private Apple clients.
+  consumed by the private iOS client.
 - `pix-core` owns workspace boundaries, pairing, Bonjour/direct TCP, relay
   connections, Pi process lifecycle, RPC adaptation, and the one-writer
   invariant.
@@ -35,7 +35,7 @@ macOS menu app never start a competing foreground daemon; they attach through
 the mode-0600 sockets derived from the selected configuration path:
 
 - `run/host-service.sock` accepts one-line commands (`approve`, `reject`,
-  `devices`, `sessions`, `pair-remote`, and lifecycle commands).
+  `devices`, `sessions`, `refresh`, `pair-remote`, and lifecycle commands).
 - `run/host-events.sock` streams transient JSONL service events and retains no
   history.
 - `run/host-service.json` is a liveness record containing only process and
@@ -54,9 +54,12 @@ application payload.
 
 ## Apple boundary
 
-The private iOS and macOS clients own UI, native sockets, Keychain integration,
-and disposable view state. They must use the Rust `pix-wire` implementation and
-must not reimplement cryptography, framing, or durable session storage.
+The public macOS client owns menu-bar/settings UI, native folder pickers,
+Keychain integration, and the local Host service bridge. The private iOS client
+owns its SwiftUI presentation, native sockets, Keychain integration, and
+disposable view state. Both clients must use the Rust `pix-wire`
+implementation and must not reimplement cryptography, framing, or durable
+session storage.
 
 ## Security invariants
 

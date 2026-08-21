@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "name": "Pix",
+  "bundleId": "com.pix.macos",
+  "xcode": {
+    "container": "Pix.xcodeproj",
+    "scheme": "Pix",
+    "mainTarget": "Pix",
+    "configuration": "Debug"
+  },
+  "platforms": ["macOS"],
+  "tests": {
+    "unitTarget": "PixTests"
+  }
+}

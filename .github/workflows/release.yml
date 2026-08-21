@@ -196,9 +196,119 @@ jobs:
           path: ${{ runner.temp }}/pix-release/*
           if-no-files-found: error
 
+  macos-app:
+    name: macOS application
+    needs: [validate, verify]
+    runs-on: macos-15
+    environment: apple-release
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+          targets: aarch64-apple-darwin
+      - name: Import temporary signing credentials
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          keychain_path="$RUNNER_TEMP/pix-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/pix-developer-id.p12"
+          notary_key_path="$RUNNER_TEMP/AuthKey.p8"
+          keychain_password="$(openssl rand -hex 32)"
+
+          printf '%s' "$APPLE_CERTIFICATE_P12" | base64 --decode > "$certificate_path"
+          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 --decode > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          security create-keychain \
+            -p "$keychain_password" \
+            "$keychain_path"
+          security set-keychain-settings \
+            -lut 21600 \
+            "$keychain_path"
+          security unlock-keychain \
+            -p "$keychain_password" \
+            "$keychain_path"
+          security import "$certificate_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains \
+            -d user \
+            -s "$keychain_path"
+          security default-keychain \
+            -s "$keychain_path"
+
+          security find-identity \
+            -v \
+            -p codesigning \
+            "$keychain_path" | grep -F -- "$APPLE_SIGNING_IDENTITY"
+
+          {
+            printf 'MACOS_NOTARY_KEY_PATH=%s\n' "$notary_key_path"
+          } >> "$GITHUB_ENV"
+
+      - name: Build signed and notarized macOS app archive
+        env:
+          MACOS_ARCH: arm64
+          MACOS_CLI_TARGET: aarch64-apple-darwin
+          MACOS_CODE_SIGN_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+          MACOS_DEVELOPMENT_TEAM: ${{ vars.APPLE_TEAM_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: packaging/macos/build-release.sh "$RUNNER_TEMP/pix-macos-release"
+
+      - name: Verify signed and notarized macOS app
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/pix-macos-release/pix-${{ needs.validate.outputs.version }}-macos-arm64.zip"
+          unpack_dir="$RUNNER_TEMP/pix-macos-verify"
+          rm -Rf "$unpack_dir"
+          mkdir -p "$unpack_dir"
+          ditto -x -k "$archive" "$unpack_dir"
+          packaging/macos/verify-release.sh "$unpack_dir/Pix.app"
+          xcrun stapler validate "$unpack_dir/Pix.app"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pix-macos-app
+          path: ${{ runner.temp }}/pix-macos-release/pix-*-macos-arm64.zip
+          if-no-files-found: error
+
+      - name: Clean temporary signing credentials
+        if: ${{ always() }}
+        run: |
+          set +e
+          keychain_path="$RUNNER_TEMP/pix-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/pix-developer-id.p12"
+          notary_key_path="$RUNNER_TEMP/AuthKey.p8"
+          login_keychain="$HOME/Library/Keychains/login.keychain-db"
+
+          security default-keychain -s "$login_keychain" >/dev/null 2>&1 || true
+          security list-keychains -d user -s \
+            "$login_keychain" \
+            /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+          security delete-keychain "$keychain_path" >/dev/null 2>&1 || true
+          rm -f "$certificate_path" "$notary_key_path"
+
   finalize:
     name: Finalize release metadata
-    needs: [validate, linux, apple]
+    needs: [validate, linux, apple, macos-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -215,6 +325,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: pix-apple
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pix-macos-app
           merge-multiple: true
           path: dist
       - name: Generate SBOM, licenses, and checksums

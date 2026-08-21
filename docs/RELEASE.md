@@ -23,10 +23,15 @@ git push origin v0.1.0
 
 `.github/workflows/release.yml` validates the tag, verifies the workspace,
 builds native Linux x86_64 and ARM64 artifacts, builds the Apple XCFramework,
-generates the SBOM/license report and one `SHA256SUMS` manifest, creates an
-artifact provenance attestation, and publishes a draft only after all assets
-are ready. The release workflow refuses tags that are not contained in
-`origin/main`.
+and builds the macOS arm64 application on a GitHub-hosted `macos-15` runner.
+The macOS job references the protected `apple-release` Environment: after
+approval it imports the Developer ID certificate into a temporary Keychain,
+signs the app and embedded CLI, notarizes with the Team API Key, staples the
+ticket, verifies Gatekeeper readiness, and removes all signing material. The
+workflow then generates the SBOM/license report and one `SHA256SUMS` manifest,
+creates an artifact provenance attestation, and publishes a draft only after
+all assets are ready. The release workflow refuses tags that are not contained
+in `origin/main`.
 
 The published files use stable names:
 
@@ -38,13 +43,41 @@ pix_<version>_arm64.deb
 pix-<version>-1.x86_64.rpm
 pix-<version>-1.aarch64.rpm
 pix-wire-<version>-apple.zip
+pix-<version>-macos-arm64.zip
 pix-<version>-sbom.spdx.json
 pix-<version>-licenses.txt
 SHA256SUMS
 ```
 
-The Apple archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
-`VERSION`, and `COMMIT`.
+The Apple wire archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
+`VERSION`, and `COMMIT`. The macOS archive contains a self-contained
+`Pix.app` with a `pix` CLI built from the same source commit. The macOS archive
+is signed and notarized when the `apple-release` Environment is approved. The
+Apple wire archive is a static XCFramework artifact and does not participate
+in Developer ID notarization.
+
+## Homebrew Cask
+
+After a published stable release, `.github/workflows/homebrew-cask.yml`
+downloads the macOS asset, verifies the signed bundle and Gatekeeper result,
+renders `Casks/pix.rb`, runs Homebrew Cask validation, and opens a pull request
+against this repository. The Cask installs `Pix.app` and links the bundled
+`pix` executable into Homebrew's `bin` directory. It never removes Pix Host
+configuration, Keychain identity, authorized workspaces, or Pi session files.
+
+The first-party Cask is generated only after the release asset passes the
+Developer ID/notarization gate. The current release workflow publishes arm64
+only; add an Intel or universal asset before broadening the Cask architecture
+constraint. Because this source repository is not named `homebrew-pix`, the
+initial first-party tap setup uses the explicit URL form:
+
+```sh
+brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
+brew install --cask pix
+```
+
+A future dedicated `homebrew-pix` tap can provide the shorter fully-qualified
+one-command form without changing the release asset or Cask contents.
 
 ## Local packaging
 
@@ -61,6 +94,7 @@ runner, then finalize the collected directory once:
 ```sh
 packaging/linux/build-release.sh x86_64-unknown-linux-gnu dist
 packaging/linux/package.sh x86_64-unknown-linux-gnu dist
+packaging/macos/build-release.sh dist
 SOURCE_DATE_EPOCH=0 packaging/release/finalize.sh dist
 ```
 

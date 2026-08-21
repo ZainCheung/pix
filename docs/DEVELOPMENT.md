@@ -13,7 +13,8 @@ contribution rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 - Rust 1.91 or newer.
 - A Pi installation in the verified range `>=0.84.1, <0.85.0`.
-- Linux or macOS for host development. Published host packages are Linux-only.
+- Linux or macOS for host development. Linux packages and unsigned macOS app
+  archives are published from this repository.
 - Node.js and npm when changing the relay.
 - A running local relay only when exercising remote transport end to end.
 
@@ -88,9 +89,10 @@ not stop or replace an existing `serve` process:
 cargo run -p pix-cli -- --config /tmp/pix.json device pair
 ~~~
 
-Use `pix serve --json-events` when testing a native UI bridge. Its JSONL
-events retain request IDs for automation; the normal `pix serve` presenter
-never prints Rust debug structs or raw relay payloads.
+Use `pix serve --json-events` when testing a foreground automation bridge. The
+public macOS client uses the platform-managed service and its config-scoped
+JSONL event socket instead; both paths retain request IDs and never print raw
+relay payloads.
 
 ## Relay development
 
@@ -198,9 +200,10 @@ Apple client boundary aligned:
   language.
 - Do not commit signing material or private client files to this repository.
 
-The public Apple build helper is
-`packaging/apple/build-pix-wire-xcframework.sh`; the native Apple
-clients that consume its output live elsewhere.
+The public Apple wire build helper is
+`packaging/apple/build-pix-wire-xcframework.sh`; the macOS client lives under
+`apps/macos`. The private iOS client consumes the generated XCFramework from
+the public repository.
 
 ## Pull request checklist
 

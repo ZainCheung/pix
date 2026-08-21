@@ -1,0 +1,38 @@
+name: Pix
+options:
+  bundleIdPrefix: com.pix
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+targets:
+  Pix:
+    type: application
+    platform: macOS
+    sources:
+      - path: Pix
+    resources:
+      - path: Pix/PrivacyInfo.xcprivacy
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pix.macos
+        INFOPLIST_FILE: Pix/Info.plist
+        CODE_SIGN_STYLE: Automatic
+    scheme:
+      testTargets:
+        - PixTests
+  PixTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: PixTests
+    dependencies:
+      - target: Pix
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pix.macos.tests
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic

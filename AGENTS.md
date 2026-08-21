@@ -1,8 +1,8 @@
 # Pix Host repository instructions
 
-This repository contains the open-source Rust host and content-blind relay.
-The Apple clients live in a separate private repository and are consumers of
-the public `pix-wire` protocol boundary.
+This repository contains the open-source Rust host, content-blind relay, and
+the public macOS menu-bar client. The iOS client remains in a separate private
+repository and consumes the public `pix-wire` protocol boundary.
 
 - Pi is the only supported agent runtime.
 - Pi native JSONL sessions remain the durable source of truth.

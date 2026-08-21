@@ -175,6 +175,25 @@ impl HostServiceHandle {
         Ok(self.shared.coordinator.list_devices()?)
     }
 
+    /// Reloads host configuration changed by a local Pix CLI or native client.
+    ///
+    /// The persistent service owns the in-memory workspace authorization view;
+    /// a config mutation performed by another Pix process must explicitly
+    /// refresh it before the next remote request is authorized.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostServiceError`] when the durable configuration cannot be
+    /// loaded or fails `HostState` validation.
+    pub fn refresh_config(&self) -> Result<(), HostServiceError> {
+        let config = self.shared.coordinator.current_config()?;
+        self.shared
+            .host_state
+            .replace(config)
+            .map_err(PairingError::Config)
+            .map_err(HostServiceError::Pairing)
+    }
+
     /// Revokes a paired device and closes every matching live connection.
     ///
     /// # Errors
