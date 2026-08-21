@@ -100,8 +100,7 @@ jobs:
         run: |
           set -eu
           sha256="$(shasum -a 256 "$PIX_CASK_ASSET" | awk '{print $1}')"
-          asset_name="$(basename "$PIX_CASK_ASSET")"
-          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$asset_name"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/v#{version}/pix-#{version}-macos-arm64.zip"
           packaging/macos/update-homebrew-cask.sh \
             "$VERSION" "$url" "$sha256" Casks/pix.rb
           printf 'PIX_CASK_SHA256=%s\n' "$sha256" >> "$GITHUB_ENV"

@@ -22,7 +22,10 @@ if command -v brew >/dev/null 2>&1 && [ -n "${PIX_HOMEBREW_TAP:-}" ]; then
     # clone.
     cask_ref="$PIX_HOMEBREW_TAP/pix"
     HOMEBREW_NO_AUTO_UPDATE=1 brew style --cask "$cask_ref"
-    HOMEBREW_NO_AUTO_UPDATE=1 brew audit --cask --new --tap "$PIX_HOMEBREW_TAP" pix
+    # --new applies Homebrew/homebrew-cask's popularity gate. This repository
+    # is validating its own first-party tap, so use the normal audit here;
+    # official homebrew/cask submission can run --new separately.
+    HOMEBREW_NO_AUTO_UPDATE=1 brew audit --cask --tap "$PIX_HOMEBREW_TAP" pix
 elif [ -z "${PIX_HOMEBREW_TAP:-}" ]; then
     # The public pix checkout is also the source repository, not a Homebrew
     # tap clone. Keep local validation useful without mutating the developer's
