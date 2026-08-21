@@ -34,6 +34,7 @@ case "$mac_arch" in
         ;;
 esac
 cli_target=${MACOS_CLI_TARGET:-$default_cli_target}
+macos_build_version=${version%%[-+]*}
 
 notary_profile=${MACOS_NOTARY_PROFILE:-}
 notary_key_path=${MACOS_NOTARY_KEY_PATH:-}
@@ -94,6 +95,8 @@ if [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ]; then
             archive \
             ARCHS="$mac_arch" \
             ONLY_ACTIVE_ARCH=YES \
+            MARKETING_VERSION="$version" \
+            CURRENT_PROJECT_VERSION="$macos_build_version" \
             CODE_SIGN_IDENTITY="$MACOS_CODE_SIGN_IDENTITY" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$MACOS_DEVELOPMENT_TEAM"
@@ -106,6 +109,8 @@ if [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ]; then
             archive \
             ARCHS="$mac_arch" \
             ONLY_ACTIVE_ARCH=YES \
+            MARKETING_VERSION="$version" \
+            CURRENT_PROJECT_VERSION="$macos_build_version" \
             CODE_SIGN_IDENTITY="$MACOS_CODE_SIGN_IDENTITY" \
             CODE_SIGN_STYLE=Manual
     fi
@@ -118,6 +123,8 @@ else
         archive \
         ARCHS="$mac_arch" \
         ONLY_ACTIVE_ARCH=YES \
+        MARKETING_VERSION="$version" \
+        CURRENT_PROJECT_VERSION="$macos_build_version" \
         CODE_SIGNING_ALLOWED=NO \
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGN_IDENTITY=
