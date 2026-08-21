@@ -1,0 +1,159 @@
+name: Homebrew Cask
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to turn into a Cask update (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Validate release and propose Cask update
+    if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+
+      - name: Resolve release tag
+        id: release
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -eu
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              printf '%s\n' "Expected a release tag such as v0.1.0, got: $tag" >&2
+              exit 1
+              ;;
+          esac
+          version="${tag#v}"
+          {
+            printf 'tag=%s\n' "$tag"
+            printf 'version=%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Prepare automation branch
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -eu
+          branch="automation/homebrew-cask-$TAG"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+          fi
+          git switch -C "$branch" origin/main
+          printf 'PIX_CASK_BRANCH=%s\n' "$branch" >> "$GITHUB_ENV"
+
+      - name: Download published macOS asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          download_dir="$RUNNER_TEMP/pix-cask"
+          mkdir -p "$download_dir"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "pix-$VERSION-macos-arm64.zip" \
+            --dir "$download_dir"
+          asset="$download_dir/pix-$VERSION-macos-arm64.zip"
+          [ -s "$asset" ] || {
+            printf '%s\n' "Published macOS asset is missing: $asset" >&2
+            exit 1
+          }
+          printf 'PIX_CASK_ASSET=%s\n' "$asset" >> "$GITHUB_ENV"
+
+      - name: Verify Developer ID and Gatekeeper readiness
+        id: signing_gate
+        run: |
+          set -eu
+          unpack_dir="$RUNNER_TEMP/pix-cask/unpacked"
+          mkdir -p "$unpack_dir"
+          ditto -x -k "$PIX_CASK_ASSET" "$unpack_dir"
+          if packaging/macos/verify-release.sh "$unpack_dir/Pix.app"; then
+            printf 'ready=true\n' >> "$GITHUB_OUTPUT"
+          else
+            printf 'ready=false\n' >> "$GITHUB_OUTPUT"
+            printf '%s\n' \
+              "::warning::Skipping Homebrew Cask PR because the release is not signed and Gatekeeper-ready."
+          fi
+
+      - name: Render Cask metadata
+        if: steps.signing_gate.outputs.ready == 'true'
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          sha256="$(shasum -a 256 "$PIX_CASK_ASSET" | awk '{print $1}')"
+          asset_name="$(basename "$PIX_CASK_ASSET")"
+          url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/$asset_name"
+          packaging/macos/update-homebrew-cask.sh \
+            "$VERSION" "$url" "$sha256" Casks/pix.rb
+          printf 'PIX_CASK_SHA256=%s\n' "$sha256" >> "$GITHUB_ENV"
+
+      - name: Validate generated Cask
+        if: steps.signing_gate.outputs.ready == 'true'
+        run: |
+          set -eu
+          tap_name="pix/ci"
+          brew tap-new "$tap_name" --no-git
+          cleanup() {
+            brew untap "$tap_name" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          tap_path="$(brew --repository "$tap_name")"
+          mkdir -p "$tap_path/Casks"
+          cp Casks/pix.rb "$tap_path/Casks/pix.rb"
+          HOMEBREW_NO_INSTALL_FROM_API=1 \
+            PIX_HOMEBREW_TAP="$tap_name" \
+            PIX_HOMEBREW_CASK_INSTALL=1 \
+            packaging/macos/verify-homebrew-cask.sh "$tap_path/Casks/pix.rb"
+
+      - name: Commit and open Cask update PR
+        if: steps.signing_gate.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          git add Casks/pix.rb
+          if git diff --cached --quiet; then
+            printf '%s\n' "Cask already matches $TAG; no PR needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "pix $VERSION"
+          git push --force-with-lease origin "HEAD:$PIX_CASK_BRANCH"
+          existing_pr="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --head "$PIX_CASK_BRANCH" \
+            --state open \
+            --json number \
+            --jq '.[0].number // ""')"
+          if [ -n "$existing_pr" ]; then
+            printf '%s\n' "Cask update PR already exists: #$existing_pr"
+            exit 0
+          fi
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --base main \
+            --head "$PIX_CASK_BRANCH" \
+            --title "pix $VERSION Homebrew Cask" \
+            --body "Updates Casks/pix.rb to the signed and notarized macOS asset from [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)."

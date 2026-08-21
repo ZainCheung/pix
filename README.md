@@ -129,6 +129,22 @@ The release workflow publishes tarballs for Linux x86_64 and ARM64, plus
 native `.deb` and `.rpm` packages when the corresponding
 packaging tool is available.
 
+### macOS application and CLI
+
+A production macOS release will contain a signed/notarized `Pix.app` and its
+matching `pix` CLI. Once the first-party Cask update has been merged, Homebrew
+users can install both from the same bundle:
+
+```sh
+brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
+brew install --cask pix
+```
+
+The Cask links `pix` into Homebrew's `bin` directory. It is an arm64 package
+until an Intel or universal archive is published. Homebrew is an installation
+channel; Pix's in-app updater will become the primary update path when Sparkle
+is integrated.
+
 Debian or Ubuntu:
 
 ~~~bash

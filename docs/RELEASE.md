@@ -50,6 +50,29 @@ The Apple wire archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
 archive is unsigned; Developer ID signing and notarization are performed in a
 protected release environment when distribution requires it.
 
+## Homebrew Cask
+
+After a published stable release, `.github/workflows/homebrew-cask.yml`
+downloads the macOS asset, verifies the signed bundle and Gatekeeper result,
+renders `Casks/pix.rb`, runs Homebrew Cask validation, and opens a pull request
+against this repository. The Cask installs `Pix.app` and links the bundled
+`pix` executable into Homebrew's `bin` directory. It never removes Pix Host
+configuration, Keychain identity, authorized workspaces, or Pi session files.
+
+The first-party Cask is generated only after the release asset passes the
+Developer ID/notarization gate. The current release workflow publishes arm64
+only; add an Intel or universal asset before broadening the Cask architecture
+constraint. Because this source repository is not named `homebrew-pix`, the
+initial first-party tap setup uses the explicit URL form:
+
+```sh
+brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
+brew install --cask pix
+```
+
+A future dedicated `homebrew-pix` tap can provide the shorter fully-qualified
+one-command form without changing the release asset or Cask contents.
+
 ## Local packaging
 
 `scripts/version.sh` is the shared version reader used by packaging and CI.
