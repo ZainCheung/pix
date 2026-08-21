@@ -17,7 +17,7 @@
   <a href="https://github.com/ZainCheung/pix/releases"><img src="https://img.shields.io/github/v/release/ZainCheung/pix?display_name=tag" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ZainCheung/pix" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/rust-1.91%2B-orange?logo=rust" alt="Rust 1.91 or newer">
-  <img src="https://img.shields.io/badge/platforms-Linux%20x86__64%20%7C%20ARM64-blue" alt="Linux x86_64 and ARM64">
+  <img src="https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue" alt="Linux and macOS">
 </p>
 
 ## What is Pix?
@@ -27,11 +27,10 @@ It runs alongside Pi on your computer and lets explicitly authorized clients
 discover, connect to, and control Pi sessions without moving your workspaces
 to a hosted service.
 
-This repository contains the Pix Host, the `pix` CLI, the
-`pix-wire` protocol implementation, protocol fixtures, and the
-content-blind relay. The native iOS and macOS clients are maintained in a
-separate private repository and use the pinned `pix-wire` release
-from this repository.
+This repository contains the Pix Host, the `pix` CLI, the public macOS
+menu-bar client, the `pix-wire` protocol implementation, protocol fixtures,
+and the content-blind relay. The native iOS client remains in a separate
+private repository and uses the pinned `pix-wire` release from this repository.
 
 ## Why Pix?
 
@@ -115,9 +114,9 @@ For a source build:
   `--approve`, `--session`, and `--session-id`).
 - Node.js and npm only when developing the relay.
 
-The Rust workspace includes macOS host support for source builds, but this
-repository's public host packages are currently Linux-only. The Apple clients
-and their distribution artifacts are maintained separately.
+The Rust workspace and macOS menu-bar target support source builds. Linux
+packages and unsigned macOS application archives are published from this
+repository; iOS source and distribution remain private.
 
 ## Installation
 
@@ -341,6 +340,21 @@ Read [SECURITY.md](SECURITY.md) before reporting a vulnerability and
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the detailed security
 invariants.
 
+## macOS client development
+
+The macOS client is a SwiftUI menu-bar app under `apps/macos`. It uses the
+platform-managed Host service and never starts a competing foreground daemon.
+
+~~~bash
+cd apps/macos
+xcodegen generate
+xcodebuild test -project Pix.xcodeproj -scheme Pix \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
+~~~
+
+See [apps/macos/README.md](apps/macos/README.md) for source builds and local
+release-bundle checks.
+
 ## Development
 
 ### Prerequisites
@@ -404,7 +418,8 @@ pix/
 │   └── pix-wire/      # Protocol, crypto, framing, and UniFFI boundary
 ├── protocol/          # Versioned schemas and cross-language fixtures
 ├── relay/             # Content-blind Cloudflare Worker relay
-├── packaging/         # Linux packages and Apple XCFramework helper
+├── apps/macos/        # Public SwiftUI macOS menu-bar client
+├── packaging/         # Linux packages, macOS bundle, and Apple wire helper
 ├── scripts/            # Release and development scripts
 ├── docs/              # Architecture, development, and release docs
 └── .github/           # CI and release workflows
@@ -422,7 +437,7 @@ The host control plane is intentionally split into three public Rust crates:
   framing, encryption, replay protection, and the Apple UniFFI boundary.
 
 Do not duplicate wire or cryptographic logic in another language. For detailed
-invariants, compatibility rules, and the private Apple boundary, read
+  invariants, compatibility rules, and the iOS-private boundary, read
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/DECISIONS.md](docs/DECISIONS.md).
 
@@ -458,9 +473,9 @@ Before opening a pull request:
 
 Stable builds are published through [GitHub Releases](https://github.com/ZainCheung/pix/releases).
 Pix uses the workspace version in `Cargo.toml` and matching
-`vX.Y.Z` tags. Linux release artifacts currently target x86_64 and
-ARM64; the workflow also builds the public `pix-wire` Apple
-XCFramework consumed by the private clients.
+`vX.Y.Z` tags. Linux release artifacts currently target x86_64 and ARM64;
+the workflow also builds the public macOS client archive and the `pix-wire`
+Apple XCFramework consumed by the private iOS client.
 
 See [docs/RELEASE.md](docs/RELEASE.md) for the maintainer workflow. Do not
 deploy the relay or publish a release from a local checkout containing secrets.
@@ -472,9 +487,9 @@ deploy the relay or publish a release from a local checkout containing secrets.
 > before v1.0.
 
 The public repository currently contains the Pix Host, encrypted LAN and relay
-transports, device pairing, diagnostics, and Linux packaging. Native Apple
-clients remain in a separate private repository, and no public macOS host
-installer is published here.
+transports, device pairing, diagnostics, Linux packaging, and the macOS
+menu-bar client. The iOS client remains private; macOS distribution signing is
+still a release-environment concern.
 
 ## Troubleshooting
 
@@ -515,8 +530,8 @@ individually with the `pix device` commands.
 ### Does Pix require the Apple client?
 
 No. The host and CLI are usable without it, and the wire protocol is documented
-for other authorized clients. The native Apple clients are maintained
-separately.
+for other authorized clients. The macOS client is public, while the native iOS
+client remains private.
 
 ### Where does Pix store its configuration?
 

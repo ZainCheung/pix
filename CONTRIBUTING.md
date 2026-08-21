@@ -1,8 +1,8 @@
 # Contributing
 
-Keep changes scoped to the host, wire protocol, or content-blind relay. The
-private Apple clients consume this repository through a pinned release and are
-not part of public pull requests.
+Keep changes scoped to the host, wire protocol, content-blind relay, or the
+public macOS menu-bar client. The private iOS client consumes this repository
+through a pinned release and is not part of public pull requests.
 
 Before opening a pull request, run:
 

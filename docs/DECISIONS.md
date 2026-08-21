@@ -2,8 +2,9 @@
 
 ## Public boundary
 
-The Rust host, `pix-wire`, protocol fixtures, and content-blind relay are open
-source. SwiftUI clients remain in a separate private repository.
+The Rust host, `pix-wire`, protocol fixtures, content-blind relay, and the
+SwiftUI macOS menu-bar client are open source. The SwiftUI iOS client remains
+in a separate private repository.
 
 ## Protocol source of truth
 

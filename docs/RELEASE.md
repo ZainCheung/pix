@@ -22,11 +22,11 @@ git push origin v0.1.0
 ```
 
 `.github/workflows/release.yml` validates the tag, verifies the workspace,
-builds native Linux x86_64 and ARM64 artifacts, builds the Apple XCFramework,
-generates the SBOM/license report and one `SHA256SUMS` manifest, creates an
-artifact provenance attestation, and publishes a draft only after all assets
-are ready. The release workflow refuses tags that are not contained in
-`origin/main`.
+builds native Linux x86_64 and ARM64 artifacts, builds the public unsigned
+macOS arm64 application archive, builds the Apple XCFramework, generates the
+SBOM/license report and one `SHA256SUMS` manifest, creates an artifact
+provenance attestation, and publishes a draft only after all assets are ready.
+The release workflow refuses tags that are not contained in `origin/main`.
 
 The published files use stable names:
 
@@ -38,13 +38,17 @@ pix_<version>_arm64.deb
 pix-<version>-1.x86_64.rpm
 pix-<version>-1.aarch64.rpm
 pix-wire-<version>-apple.zip
+pix-<version>-macos-arm64.zip
 pix-<version>-sbom.spdx.json
 pix-<version>-licenses.txt
 SHA256SUMS
 ```
 
-The Apple archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
-`VERSION`, and `COMMIT`.
+The Apple wire archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
+`VERSION`, and `COMMIT`. The macOS archive contains a self-contained
+`Pix.app` with a `pix` CLI built from the same source commit. The public
+archive is unsigned; Developer ID signing and notarization are performed in a
+protected release environment when distribution requires it.
 
 ## Local packaging
 
@@ -61,6 +65,7 @@ runner, then finalize the collected directory once:
 ```sh
 packaging/linux/build-release.sh x86_64-unknown-linux-gnu dist
 packaging/linux/package.sh x86_64-unknown-linux-gnu dist
+packaging/macos/build-release.sh dist
 SOURCE_DATE_EPOCH=0 packaging/release/finalize.sh dist
 ```
 

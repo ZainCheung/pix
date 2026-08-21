@@ -196,9 +196,32 @@ jobs:
           path: ${{ runner.temp }}/pix-release/*
           if-no-files-found: error
 
+  macos-app:
+    name: macOS application
+    needs: [validate, verify]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.91.0
+          targets: aarch64-apple-darwin
+      - name: Build unsigned macOS app archive
+        env:
+          MACOS_ARCH: arm64
+          MACOS_CLI_TARGET: aarch64-apple-darwin
+        run: packaging/macos/build-release.sh "$RUNNER_TEMP/pix-macos-release"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pix-macos-app
+          path: ${{ runner.temp }}/pix-macos-release/pix-*-macos-arm64.zip
+          if-no-files-found: error
+
   finalize:
     name: Finalize release metadata
-    needs: [validate, linux, apple]
+    needs: [validate, linux, apple, macos-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -215,6 +238,11 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: pix-apple
+          merge-multiple: true
+          path: dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: pix-macos-app
           merge-multiple: true
           path: dist
       - name: Generate SBOM, licenses, and checksums

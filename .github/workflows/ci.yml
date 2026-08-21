@@ -68,6 +68,21 @@ jobs:
       - name: Build XCFramework and typecheck Swift bindings
         run: packaging/apple/build-pix-wire-xcframework.sh "$RUNNER_TEMP/pix-wire-build"
 
+  macos-app:
+    name: macOS app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Test macOS menu-bar app
+        working-directory: apps/macos
+        run: >-
+          xcodebuild test
+          -project Pix.xcodeproj
+          -scheme Pix
+          -destination 'platform=macOS'
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
+
   linux-packaging:
     name: Linux packaging smoke test
     runs-on: ubuntu-latest

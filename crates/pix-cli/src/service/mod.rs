@@ -90,7 +90,7 @@ pub fn managed_service_installed(store: &ConfigStore) -> Result<bool> {
     platform_installed(store)
 }
 
-/// Returns whether the platform manager currently reports the service active.
+/// Returns whether the selected configuration's host service is active.
 pub fn managed_service_active(store: &ConfigStore) -> Result<bool> {
     platform_active(store)
 }

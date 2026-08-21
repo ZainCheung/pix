@@ -133,8 +133,11 @@ pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
     Ok(launch_agent_path()?.is_file())
 }
 
-pub(crate) fn active(_store: &ConfigStore) -> Result<bool> {
-    launchctl_is_loaded()
+pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
+    // launchctl is global to the user session and cannot distinguish a
+    // different Pix config. The config-scoped status record is the source of
+    // truth used by the native macOS client and `pix status`.
+    Ok(crate::status::HostServiceStatus::current(store.path()).is_some())
 }
 
 fn require_launchctl() -> Result<()> {
