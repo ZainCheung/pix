@@ -137,13 +137,15 @@ users can install both from the same bundle:
 
 ```sh
 brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
-brew install --cask pix
+brew install --cask ZainCheung/pix/pix
 ```
 
-The Cask links `pix` into Homebrew's `bin` directory. It is an arm64 package
-until an Intel or universal archive is published. Homebrew is an installation
-channel; Pix's in-app updater will become the primary update path when Sparkle
-is integrated.
+The fully qualified Cask name makes Homebrew trust only this requested Cask;
+using the short name after tapping requires an explicit
+`brew trust --cask ZainCheung/pix/pix`. The Cask links `pix` into Homebrew's
+`bin` directory. It is an arm64 package until an Intel or universal archive is
+published. Homebrew is an installation channel; Pix's in-app updater will
+become the primary update path when Sparkle is integrated.
 
 Debian or Ubuntu:
 
