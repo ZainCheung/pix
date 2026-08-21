@@ -73,11 +73,14 @@ initial first-party tap setup uses the explicit URL form:
 
 ```sh
 brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
-brew install --cask pix
+brew install --cask ZainCheung/pix/pix
 ```
 
-A future dedicated `homebrew-pix` tap can provide the shorter fully-qualified
-one-command form without changing the release asset or Cask contents.
+Homebrew requires explicit trust for non-official taps. Installing the fully
+qualified Cask trusts only `ZainCheung/pix/pix`; if the short name is preferred
+after tapping, run `brew trust --cask ZainCheung/pix/pix` first. A future
+dedicated `homebrew-pix` tap can provide the conventional tap name without
+changing the release asset or Cask contents.
 
 ## Local packaging
 
