@@ -117,6 +117,7 @@ pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
 }
 
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
+    require_systemctl()?;
     // systemd --user is global to the login session and cannot distinguish a
     // different Pix config. The config-scoped status record is the source of
     // truth used by `pix status` and native clients.

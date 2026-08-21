@@ -134,6 +134,7 @@ pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
 }
 
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
+    require_launchctl()?;
     // launchctl is global to the user session and cannot distinguish a
     // different Pix config. The config-scoped status record is the source of
     // truth used by the native macOS client and `pix status`.
