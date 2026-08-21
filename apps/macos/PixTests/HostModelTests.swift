@@ -47,7 +47,7 @@ func parsesPairedDeviceTextInventory() {
 func activeSessionUsesWorkspaceName() {
     let session = ActiveSession(
         id: "session-1",
-        workspacePath: "/tmp/pix-workspace",
+        workspacePath: "/tmp/pix",
         clients: 1,
         state: "running"
     )
