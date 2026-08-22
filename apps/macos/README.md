@@ -2,14 +2,16 @@
 
 Pix for macOS is a native SwiftUI menu bar host surface. It keeps the desktop
 scope deliberately small: Pi detection, explicitly authorized workspaces,
-pairing approval, remote pairing QR presentation, paired-device revoke,
+the Add Device pairing guide, local-network instructions, relay configuration,
+remote pairing QR presentation, pairing approval, paired-device revoke,
 active-session release, launch at login, diagnostics, and service status.
 
-When the host has a relay endpoint configured (`pix relay set <url>`), the
-menu offers **Pair iPhone Remotely…**, which asks the host service for a
-two-minute single-use pairing channel and renders it as a QR code. Approval
-still happens in this app with the same six-digit confirmation as local
-pairing, and the relay never sees plaintext or pairing secrets.
+Choose **Add Device…** from the menu bar to open the pairing guide. It starts
+with local-network steps, which need no relay. The same window can save a
+`ws://` or `wss://` relay endpoint, restart the managed Host service, and then
+offer a remote QR flow. Approval still happens in this app with the same
+six-digit confirmation for either transport, and the relay never sees
+plaintext or pairing secrets.
 
 The Rust host core remains the authority for secure transport, workspace
 boundaries, paired-device persistence, and Pi process ownership. The menu bar
@@ -34,8 +36,9 @@ export PIX_CLI="$PWD/target/release/pix"
 2. Open `Pix.xcodeproj` in Xcode and run the `Pix` scheme on **My Mac**.
 3. If macOS shows **Developer Tools Access**, type your Mac login password.
    That prompt is Xcode's debugger asking to attach. It is not a Pix crash.
-4. Click the Pix menu bar icon → **Add Workspace…**, then start the iOS app
-   on a phone or simulator on the same LAN.
+4. Click the Pix menu bar icon → **Add Workspace…** to authorize a folder,
+   then choose **Add Device…** and start the iOS app on a phone or simulator.
+   For local pairing, keep both devices on the same LAN.
 
 Xcode GUI launches do not inherit your shell `PATH`. The app looks for `pix`
 inside a release bundle first, then in the current `PATH`, the interactive

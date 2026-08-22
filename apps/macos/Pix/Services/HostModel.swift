@@ -16,10 +16,26 @@ final class HostModel {
     private(set) var pairingRequests: [PairingRequest] = []
     private(set) var launchAtLoginEnabled = false
     private(set) var lastDiagnostic: String?
-    /// Relay endpoint the running host service is using, when configured.
-    private(set) var relayURL: String?
+    /// Relay endpoint and enabled state reported by the host configuration.
+    /// The channel secret is intentionally not represented in the macOS model.
+    private(set) var relayConfiguration = RelayConfiguration.none
+    private(set) var relayError: String?
+    private(set) var isUpdatingRelay = false
     /// Active remote pairing offer awaiting QR presentation.
     private(set) var remotePairing: RemotePairingOffer?
+    private(set) var remotePairingError: String?
+
+    var relayURL: String? {
+        relayConfiguration.url
+    }
+
+    var relayEnabled: Bool {
+        relayConfiguration.isEnabled
+    }
+
+    var hasActiveRelay: Bool {
+        relayConfiguration.isActive
+    }
 
     private let configPath: URL
     private var didStart = false
@@ -27,6 +43,9 @@ final class HostModel {
     private var serviceEvents: UnixSocketConnection?
     private var serviceBuffer = Data()
     private var restartAttempts = 0
+    private var isRequestingRemotePairing = false
+    private var lifecycleTask: Task<Void, Never>?
+    private var refreshQueued = false
     /// The CLI is resolved once for the lifetime of the model so the doctor
     /// check, inventory commands, and platform-managed Host service all use
     /// the same executable. An explicit refresh clears this cache.
@@ -43,26 +62,55 @@ final class HostModel {
         userStopped = false
         status = .starting
 
-        Task { @MainActor in
-            do {
-                let output = try await runPix(arguments: [
-                    "--config",
-                    configPath.path,
-                    "doctor",
-                ])
-                piVersion = parseVersion(from: output)
-                launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
-                try await startHostService()
-                await loadHostInventory()
-                status = .ready
-            } catch {
-                status = .needsSetup(error.localizedDescription)
+        lifecycleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.startLifecycle()
+        }
+    }
+
+    private func startLifecycle() async {
+        defer {
+            lifecycleTask = nil
+            let shouldRefresh = refreshQueued
+            refreshQueued = false
+            if !shouldRefresh, isUpdatingRelay, status == .ready {
+                isUpdatingRelay = false
+                relayError = nil
+            }
+            if shouldRefresh {
+                refresh()
+            }
+        }
+        do {
+            let output = try await runPix(arguments: [
+                "--config",
+                configPath.path,
+                "doctor",
+            ])
+            piVersion = parseVersion(from: output)
+            launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
+            try await startHostService()
+            await loadHostInventory()
+            status = .ready
+        } catch {
+            status = .needsSetup(error.localizedDescription)
+            if isUpdatingRelay, !refreshQueued {
+                relayError = error.localizedDescription
+                isUpdatingRelay = false
             }
         }
     }
 
     func updatePairingRequests(_ requests: [PairingRequest]) {
         pairingRequests = requests
+    }
+
+    func pruneExpiredPairingRequests(at date: Date = Date()) {
+        pairingRequests.removeAll { $0.expiresAt <= date }
+    }
+
+    func clearRelayError() {
+        relayError = nil
     }
 
     func stop() {
@@ -178,12 +226,46 @@ final class HostModel {
     /// Asks the host service for a fresh two-minute remote pairing channel.
     /// The QR payload arrives as a `remote_pairing_ready` event.
     func startRemotePairing() {
+        guard hasActiveRelay else {
+            relayError = String(localized: "Configure and enable a relay before using remote pairing.")
+            return
+        }
         remotePairing = nil
+        remotePairingError = nil
+        isRequestingRemotePairing = true
         sendServiceCommand("pair-remote")
     }
 
     func dismissRemotePairing() {
         remotePairing = nil
+        remotePairingError = nil
+        isRequestingRemotePairing = false
+    }
+
+    /// Persists a relay endpoint through the Pix CLI, then restarts the
+    /// platform-managed service so its relay manager uses the new endpoint.
+    func configureRelay(_ value: String) {
+        relayError = nil
+        guard let url = Self.normalizedRelayURL(value) else {
+            relayError = String(localized: "Enter a relay URL that starts with ws:// or wss://.")
+            return
+        }
+        updateRelay(arguments: ["relay", "set", url])
+    }
+
+    func disableRelay() {
+        guard relayConfiguration.isConfigured else { return }
+        updateRelay(arguments: ["relay", "disable"])
+    }
+
+    func enableRelay() {
+        guard relayConfiguration.isConfigured else { return }
+        updateRelay(arguments: ["relay", "enable"])
+    }
+
+    func clearRelay() {
+        guard relayConfiguration.isConfigured else { return }
+        updateRelay(arguments: ["relay", "clear"])
     }
 
     func selectPiExecutable() {
@@ -241,9 +323,17 @@ final class HostModel {
     }
 
     func refresh() {
+        guard lifecycleTask == nil else {
+            refreshQueued = true
+            return
+        }
+        beginRefresh()
+    }
+
+    private func beginRefresh() {
         userStopped = true
         teardownService()
-        Task { @MainActor [weak self] in
+        lifecycleTask = Task { @MainActor [weak self] in
             guard let self else { return }
             _ = try? await runPix(arguments: [
                 "--config",
@@ -253,6 +343,7 @@ final class HostModel {
             ])
             resolvedPixExecutable = nil
             didStart = false
+            lifecycleTask = nil
             start()
         }
     }
@@ -285,6 +376,11 @@ final class HostModel {
                         }
                     }
                 }
+                // Event sockets are intentionally history-free. Reconcile
+                // requests that arrived before this subscriber attached.
+                sendServiceCommand("devices")
+                sendServiceCommand("sessions")
+                sendServiceCommand("pending")
                 return
             } catch {
                 lastError = error
@@ -321,7 +417,12 @@ final class HostModel {
         restartAttempts += 1
         Task { @MainActor in
             try await Task.sleep(for: .seconds(delay))
-            guard !userStopped, serviceEvents == nil else { return }
+            guard !userStopped else { return }
+            if lifecycleTask != nil {
+                refreshQueued = true
+                return
+            }
+            guard serviceEvents == nil else { return }
             status = .starting
             do {
                 try await startHostService()
@@ -339,7 +440,12 @@ final class HostModel {
                 try UnixSocketConnection(path: path).sendLine(command)
             } catch {
                 Task { @MainActor [weak self] in
-                    self?.status = .failed(String(localized: "Pix could not send the host command."))
+                    guard let self else { return }
+                    self.status = .failed(String(localized: "Pix could not send the host command."))
+                    if command == "pair-remote" {
+                        self.remotePairingError = String(localized: "Pix could not start remote pairing.")
+                        self.isRequestingRemotePairing = false
+                    }
                 }
             }
         }
@@ -377,6 +483,7 @@ final class HostModel {
             restartAttempts = 0
             sendServiceCommand("devices")
             sendServiceCommand("sessions")
+            sendServiceCommand("pending")
         case .pairingRequested(let request):
             pairingRequests.removeAll { $0.id == request.id }
             pairingRequests.append(request.value)
@@ -390,6 +497,10 @@ final class HostModel {
             break
         case .commandError(let message):
             lastDiagnostic = message
+            if isRequestingRemotePairing {
+                remotePairingError = message
+                isRequestingRemotePairing = false
+            }
         case .deviceList(let devices):
             self.devices = devices
         case .deviceRevoked(let id):
@@ -399,13 +510,15 @@ final class HostModel {
         case .sessionReleased(let id):
             sessions.removeAll { $0.id == id }
         case .relayConfigured(let url):
-            relayURL = url
+            relayConfiguration = RelayConfiguration(url: url, isEnabled: true)
         case .relayChannel:
             // Standing-channel lifecycle stays payload-free; the menu needs
             // no per-device relay indicator in v1.
             break
         case .remotePairingReady(let offer):
             remotePairing = offer
+            remotePairingError = nil
+            isRequestingRemotePairing = false
         }
     }
 
@@ -433,6 +546,32 @@ final class HostModel {
             "show",
         ]) {
             piExecutable = parsePiExecutable(from: piOutput)
+        }
+        if let relayOutput = try? await runPix(arguments: [
+            "--config",
+            configPath.path,
+            "relay",
+            "show",
+        ]) {
+            relayConfiguration = Self.parseRelayConfiguration(from: relayOutput)
+        }
+    }
+
+    private func updateRelay(arguments: [String]) {
+        relayError = nil
+        dismissRemotePairing()
+        isUpdatingRelay = true
+        Task { @MainActor in
+            do {
+                _ = try await runPix(arguments: [
+                    "--config",
+                    configPath.path,
+                ] + arguments)
+                refresh()
+            } catch {
+                isUpdatingRelay = false
+                relayError = error.localizedDescription
+            }
         }
     }
 
@@ -692,6 +831,58 @@ final class HostModel {
             return current
         }
         return legacy
+    }
+
+    /// Parses the stable, human-readable output of `pix relay show` without
+    /// exposing relay channel secrets to the UI model.
+    nonisolated static func parseRelayConfiguration(from output: String) -> RelayConfiguration {
+        guard let line = output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .map(String.init)
+            .first(where: { $0.hasPrefix("relay:") })
+        else {
+            return .none
+        }
+
+        let prefix = "relay: "
+        guard line.hasPrefix(prefix) else { return .none }
+        let value = String(line.dropFirst(prefix.count))
+        if value == "not configured" {
+            return .none
+        }
+        if value.hasSuffix(" (disabled)") {
+            return RelayConfiguration(
+                url: String(value.dropLast(" (disabled)".count)),
+                isEnabled: false
+            )
+        }
+        if value.hasSuffix(" (enabled)") {
+            return RelayConfiguration(
+                url: String(value.dropLast(" (enabled)".count)),
+                isEnabled: true
+            )
+        }
+        return RelayConfiguration(url: value, isEnabled: true)
+    }
+
+    /// Relay configuration follows the CLI's WebSocket endpoint rules. Query
+    /// strings and paths remain available for self-hosted relay deployments;
+    /// user-info is rejected so credentials cannot be smuggled into a saved
+    /// URL.
+    nonisolated static func normalizedRelayURL(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "ws" || scheme == "wss",
+              let host = components.host,
+              !host.isEmpty,
+              components.user == nil,
+              components.password == nil,
+              !trimmed.contains(where: { $0.isWhitespace })
+        else {
+            return nil
+        }
+        return trimmed
     }
 
     private func parsePiExecutable(from output: String) -> String? {

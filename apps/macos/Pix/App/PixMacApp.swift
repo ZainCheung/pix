@@ -25,11 +25,12 @@ struct PixMacApp: App {
         }
         .menuBarExtraStyle(.menu)
 
-        Window(String(localized: "Pair iPhone Remotely"), id: "remote-pairing") {
-            RemotePairingWindow()
+        Window(String(localized: "Add Device"), id: "add-device") {
+            AddDeviceWindow()
                 .environment(model)
         }
         .windowResizability(.contentSize)
+        .defaultSize(width: 460, height: 700)
         .defaultPosition(.center)
 
         Settings {

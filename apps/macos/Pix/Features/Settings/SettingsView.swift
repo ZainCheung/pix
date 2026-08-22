@@ -21,6 +21,7 @@ struct SettingsView: View {
 
 private struct GeneralSettingsView: View {
     @Environment(HostModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Form {
@@ -35,14 +36,29 @@ private struct GeneralSettingsView: View {
                 }
             }
             Section(String(localized: "Remote access")) {
-                LabeledContent(
-                    String(localized: "Relay"),
-                    value: model.relayURL ?? String(localized: "Not configured")
-                )
-                Text(String(localized: "The relay carries only end-to-end encrypted frames. Configure it with: pix relay set wss://your-relay — remote pairing and away-from-home access activate automatically."))
+                if let relayURL = model.relayURL {
+                    LabeledContent(
+                        String(localized: "Relay"),
+                        value: relayURL
+                    )
+                    Text(
+                        model.relayEnabled
+                            ? String(localized: "Relay is enabled. Remote pairing is available from Add Device.")
+                            : String(localized: "Relay is saved but disabled.")
+                    )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+                } else {
+                    LabeledContent(
+                        String(localized: "Relay"),
+                        value: String(localized: "Not configured")
+                    )
+                }
+                Button(String(localized: "Configure relay…")) {
+                    openWindow(id: "add-device")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
             }
             Section(String(localized: "Startup")) {
                 Toggle(
