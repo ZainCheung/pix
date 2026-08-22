@@ -273,7 +273,7 @@ jobs:
             printf 'MACOS_NOTARY_KEY_PATH=%s\n' "$notary_key_path"
           } >> "$GITHUB_ENV"
 
-      - name: Build signed and notarized macOS app archive
+      - name: Build signed and notarized macOS app archives
         env:
           MACOS_ARCH: arm64
           MACOS_CLI_TARGET: aarch64-apple-darwin
@@ -287,17 +287,30 @@ jobs:
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/pix-macos-release/pix-${{ needs.validate.outputs.version }}-macos-arm64.zip"
+          dmg="$RUNNER_TEMP/pix-macos-release/pix-${{ needs.validate.outputs.version }}-macos-arm64.dmg"
           unpack_dir="$RUNNER_TEMP/pix-macos-verify"
+          mount_dir="$RUNNER_TEMP/pix-macos-dmg-mount"
           rm -Rf "$unpack_dir"
           mkdir -p "$unpack_dir"
           ditto -x -k "$archive" "$unpack_dir"
           packaging/macos/verify-release.sh "$unpack_dir/Pix.app"
           xcrun stapler validate "$unpack_dir/Pix.app"
 
+          rm -Rf "$mount_dir"
+          mkdir -p "$mount_dir"
+          cleanup() {
+            hdiutil detach "$mount_dir" >/dev/null 2>&1 || true
+            rm -Rf "$mount_dir"
+          }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir"
+          packaging/macos/verify-release.sh "$mount_dir/Pix.app"
+          xcrun stapler validate "$dmg"
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pix-macos-app
-          path: ${{ runner.temp }}/pix-macos-release/pix-*-macos-arm64.zip
+          path: ${{ runner.temp }}/pix-macos-release/pix-*-macos-arm64.*
           if-no-files-found: error
 
       - name: Clean temporary signing credentials

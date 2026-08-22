@@ -110,7 +110,7 @@ while IFS= read -r path; do
         packaging/macos/*|packaging/release/*|scripts/*)
             mark_all
             ;;
-        docs/*|README.md|CONTRIBUTING.md|SECURITY.md|THIRD_PARTY_NOTICES.md|LICENSE|AGENTS.md|Casks/*)
+        docs/*|website/*|README.md|CONTRIBUTING.md|SECURITY.md|THIRD_PARTY_NOTICES.md|LICENSE|AGENTS.md|Casks/*)
             ;;
         *)
             # New source/configuration areas must not silently bypass CI.

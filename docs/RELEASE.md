@@ -43,6 +43,7 @@ pix_<version>_arm64.deb
 pix-<version>-1.x86_64.rpm
 pix-<version>-1.aarch64.rpm
 pix-wire-<version>-apple.zip
+pix-<version>-macos-arm64.dmg
 pix-<version>-macos-arm64.zip
 pix-<version>-sbom.spdx.json
 pix-<version>-licenses.txt
@@ -50,11 +51,13 @@ SHA256SUMS
 ```
 
 The Apple wire archive contains `PixWireFFI.xcframework`, `PixWire.swift`,
-`VERSION`, and `COMMIT`. The macOS archive contains a self-contained
-`Pix.app` with a `pix` CLI built from the same source commit. The macOS archive
-is signed and notarized when the `apple-release` Environment is approved. The
-Apple wire archive is a static XCFramework artifact and does not participate
-in Developer ID notarization.
+`VERSION`, and `COMMIT`. The macOS DMG and ZIP contain the same self-contained
+`Pix.app` with a `pix` CLI built from the same source commit. The DMG includes
+an `/Applications` shortcut for drag-and-drop installation and is submitted to
+Apple notarization. The ZIP retains the stapled app for script and Homebrew
+compatibility; CI validates the bundle after extraction. The Apple wire archive
+is a static XCFramework artifact and does not participate in Developer ID
+notarization.
 
 ## Homebrew Cask
 

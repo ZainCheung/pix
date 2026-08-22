@@ -9,6 +9,7 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#usage">Usage</a> ·
   <a href="#development">Development</a> ·
+  <a href="https://pix.deepoke.com">Website</a> ·
   <a href="docs/ARCHITECTURE.md">Architecture</a>
 </p>
 
@@ -117,23 +118,41 @@ For a source build:
 - Node.js and npm only when developing the relay.
 
 The Rust workspace and macOS menu-bar target support source builds. Linux
-packages and unsigned macOS application archives are published from this
+packages and signed macOS application archives are published from this
 repository; iOS source and distribution remain private.
 
 ## Installation
 
-### Linux release packages
+### Release packages and quick install
 
 Download a release from [GitHub Releases](https://github.com/ZainCheung/pix/releases).
 The release workflow publishes tarballs for Linux x86_64 and ARM64, plus
-native `.deb` and `.rpm` packages when the corresponding
-packaging tool is available.
+native `.deb` and `.rpm` packages when the corresponding packaging tool is
+available. macOS Apple Silicon releases include a notarized `.dmg` for drag-
+and-drop installation and a `.zip` compatibility archive.
+
+The [Pix website](https://pix.deepoke.com) links directly to the latest DMG
+when that asset is available, without sending users through the release page.
+
+For the quickest install on a supported macOS Apple Silicon or Linux host,
+use the first-party installer. It installs `pix` into `~/.local/bin` without
+requiring root; on macOS it also installs `Pix.app` into `~/Applications`:
+
+~~~bash
+curl -fsSL https://pix.deepoke.com/install.sh | sh
+~~~
+
+The script resolves the latest GitHub Release at install time. If a matching
+asset is not available, use the [release page](https://github.com/ZainCheung/pix/releases/latest)
+to choose a package manually.
 
 ### macOS application and CLI
 
-A production macOS release will contain a signed/notarized `Pix.app` and its
-matching `pix` CLI. Once the first-party Cask update has been merged, Homebrew
-users can install both from the same bundle:
+A production macOS release contains a signed/notarized `Pix.app` and its
+matching `pix` CLI. Open the DMG and drag Pix to Applications, or use the
+ZIP/first-party installer when a terminal-driven install is preferred. Once
+the first-party Cask update has been merged, Homebrew users can install both
+from the same bundle:
 
 ```sh
 brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git

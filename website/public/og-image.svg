@@ -1,0 +1,12 @@
+<svg width="1200" height="630" viewBox="0 0 1200 630" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <path d="M0 80H1200M0 160H1200M0 240H1200M0 320H1200M0 400H1200M0 480H1200M0 560H1200M80 0V630M160 0V630M240 0V630M320 0V630M400 0V630M480 0V630M560 0V630M640 0V630M720 0V630M800 0V630M880 0V630M960 0V630M1040 0V630M1120 0V630" stroke="#e5e5e5"/>
+  <path d="M80 470H380C455 470 480 435 480 380V250C480 195 515 160 580 160H1120" stroke="#171717" stroke-width="3" stroke-dasharray="10 12"/>
+  <circle cx="480" cy="380" r="8" fill="#171717"/>
+  <circle cx="580" cy="160" r="8" fill="#171717"/>
+  <text x="82" y="160" fill="#525252" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="22" letter-spacing="5">LOCAL-FIRST / REMOTE CONTROL</text>
+  <text x="80" y="275" fill="#171717" font-family="Arial, sans-serif" font-size="96" font-weight="700">Pix</text>
+  <text x="80" y="360" fill="#737373" font-family="Arial, sans-serif" font-size="38">Your Pi stays on your machine.</text>
+  <text x="80" y="412" fill="#171717" font-family="Arial, sans-serif" font-size="38">Control it from anywhere.</text>
+  <text x="80" y="570" fill="#a3a3a3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="20">pix.deepoke.com</text>
+</svg>
