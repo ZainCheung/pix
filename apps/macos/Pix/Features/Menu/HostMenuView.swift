@@ -29,6 +29,13 @@ struct HostMenuView: View {
             Divider()
 
             Button {
+                openWindow(id: "add-device")
+                NSApp.activate(ignoringOtherApps: true)
+            } label: {
+                Label(String(localized: "Add Device…"), systemImage: "iphone.badge.plus")
+            }
+
+            Button {
                 model.addWorkspace()
             } label: {
                 Label(String(localized: "Add Workspace…"), systemImage: "folder.badge.plus")
@@ -90,6 +97,21 @@ struct HostMenuView: View {
                 Text(String(localized: "No pairing requests"))
                     .foregroundStyle(.secondary)
             } else {
+                Button {
+                    openWindow(id: "add-device")
+                    NSApp.activate(ignoringOtherApps: true)
+                } label: {
+                    Label {
+                        Text(
+                            model.pairingRequests.count == 1
+                                ? String(localized: "Review pairing request…")
+                                : String(localized: "Review pairing requests…")
+                        )
+                    } icon: {
+                        Image(systemName: "person.crop.circle.badge.questionmark")
+                    }
+                }
+
                 // Menu-style extras only render Buttons/Toggles reliably.
                 // A nested Menu wrapping a VStack silently dropped requests.
                 ForEach(model.pairingRequests) { request in
@@ -103,18 +125,6 @@ struct HostMenuView: View {
                     } label: {
                         Text(String(localized: "Reject \(request.deviceName)"))
                     }
-                }
-            }
-
-            if model.relayURL != nil {
-                Button {
-                    // The window's own task requests the pairing channel;
-                    // requesting here too would race it and flash a QR code
-                    // for a channel that is about to be replaced.
-                    openWindow(id: "remote-pairing")
-                    NSApp.activate(ignoringOtherApps: true)
-                } label: {
-                    Label(String(localized: "Pair iPhone Remotely…"), systemImage: "qrcode")
                 }
             }
 

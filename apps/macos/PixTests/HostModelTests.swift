@@ -23,6 +23,29 @@ func pairingRequestIsValueStable() {
     #expect(request.confirmationCode == "012345")
 }
 
+@Test("expired pairing requests are removed from the approval surface")
+@MainActor
+func expiredPairingRequestsArePruned() {
+    let model = HostModel(configPath: URL(fileURLWithPath: "/tmp/pix-test-config.json"))
+    model.updatePairingRequests([
+        PairingRequest(
+            id: UUID(),
+            deviceName: "Expired iPhone",
+            confirmationCode: "012345",
+            expiresAt: Date(timeIntervalSince1970: 100)
+        ),
+        PairingRequest(
+            id: UUID(),
+            deviceName: "Active iPhone",
+            confirmationCode: "678901",
+            expiresAt: Date(timeIntervalSince1970: 200)
+        ),
+    ])
+    model.pruneExpiredPairingRequests(at: Date(timeIntervalSince1970: 150))
+    #expect(model.pairingRequests.count == 1)
+    #expect(model.pairingRequests.first?.deviceName == "Active iPhone")
+}
+
 @Test("device inventory parser keeps names and hides empty lists")
 func parsesPairedDeviceTextInventory() {
     let devices = HostTextInventory.devices(
@@ -126,4 +149,33 @@ func prefersUnifiedConfigPath() throws {
     )
     try Data("{}".utf8).write(to: current)
     #expect(HostModel.defaultConfigPath(homeDirectory: root) == current)
+}
+
+@Test("relay status parser distinguishes enabled and disabled endpoints")
+func parsesRelayStatus() {
+    let enabled = HostModel.parseRelayConfiguration(
+        from: "relay: wss://relay.example.com (enabled)\n"
+    )
+    #expect(enabled.url == "wss://relay.example.com")
+    #expect(enabled.isActive)
+
+    let disabled = HostModel.parseRelayConfiguration(
+        from: "relay: wss://relay.example.com (disabled)\n"
+    )
+    #expect(disabled.url == "wss://relay.example.com")
+    #expect(disabled.isConfigured)
+    #expect(!disabled.isActive)
+
+    #expect(HostModel.parseRelayConfiguration(from: "relay: not configured\n") == .none)
+}
+
+@Test("relay URL validation only accepts credential-free WebSocket endpoints")
+func validatesRelayURL() {
+    #expect(HostModel.normalizedRelayURL(" wss://relay.example.com ") == "wss://relay.example.com")
+    #expect(HostModel.normalizedRelayURL("ws://127.0.0.1:8787") == "ws://127.0.0.1:8787")
+    #expect(HostModel.normalizedRelayURL("wss://relay.example.com/edge?region=cn") == "wss://relay.example.com/edge?region=cn")
+    #expect(HostModel.normalizedRelayURL("https://relay.example.com") == nil)
+    #expect(HostModel.normalizedRelayURL("wss://user:secret@relay.example.com") == nil)
+    #expect(HostModel.normalizedRelayURL("wss://relay.example.com/with space") == nil)
+    #expect(HostModel.normalizedRelayURL("not a URL") == nil)
 }
