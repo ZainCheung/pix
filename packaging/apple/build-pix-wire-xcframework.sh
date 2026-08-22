@@ -29,11 +29,37 @@ for target in \
     }
 done
 
-cargo build -p pix-wire --release --target aarch64-apple-ios
-cargo build -p pix-wire --release --target aarch64-apple-ios-sim
-cargo build -p pix-wire --release --target x86_64-apple-ios
-cargo build -p pix-wire --release --target aarch64-apple-darwin
-cargo build -p pix-wire --release --target x86_64-apple-darwin
+# Build the independent target artifacts in bounded parallel batches. Cargo
+# still serializes shared dependency work where necessary, while the target
+# specific link steps can overlap. Override PIX_CARGO_BUILD_JOBS when a local
+# machine or runner needs a different memory/CPU trade-off.
+cargo_build_jobs=${PIX_CARGO_BUILD_JOBS:-2}
+export CARGO_BUILD_JOBS="$cargo_build_jobs"
+
+build_targets() {
+    pids=""
+    for target in "$@"; do
+        cargo build -p pix-wire --release --target "$target" &
+        pids="$pids $!"
+    done
+
+    status=0
+    for pid in $pids; do
+        if ! wait "$pid"; then
+            status=1
+        fi
+    done
+    [ "$status" -eq 0 ]
+}
+
+build_targets \
+    aarch64-apple-ios \
+    aarch64-apple-ios-sim \
+    x86_64-apple-ios
+build_targets \
+    aarch64-apple-darwin \
+    x86_64-apple-darwin
+
 cargo build -p pix-wire --release --features bindgen --bin uniffi-bindgen-swift
 
 mkdir -p "$bindings_directory" "$headers_directory"

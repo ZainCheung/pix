@@ -103,8 +103,10 @@ SOURCE_DATE_EPOCH=0 packaging/release/finalize.sh dist
 
 ## Relay deployment
 
-Relay changes on `main` are tested and deployed only by
-`.github/workflows/relay-deploy.yml`. Configure the `relay-production`
-Environment with the least-privileged `CLOUDFLARE_API_TOKEN` secret and the
+Relay changes on `main` are tested by the reusable Relay checks workflow and
+deployed only after those checks pass. The standalone
+`.github/workflows/relay-deploy.yml` workflow remains available for a manual
+validated deployment. Configure the `relay-production` Environment with the
+least-privileged `CLOUDFLARE_API_TOKEN` secret and the
 `CLOUDFLARE_ACCOUNT_ID` variable. Deployment concurrency is serialized so two
 production Worker updates cannot run at the same time.

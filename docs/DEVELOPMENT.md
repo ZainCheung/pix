@@ -139,6 +139,13 @@ cargo test -p pix-core pairing
 cargo test -p pix-cli --test e2e_lan
 ~~~
 
+GitHub CI classifies changed paths before starting platform jobs. Pull requests
+run only the affected Rust, Relay, Apple, macOS, or packaging checks and expose
+one `CI gate` result for branch protection; documentation-only changes still
+run the detector and gate. A weekday scheduled run and manual dispatch execute
+the complete matrix, while Relay deployment runs only after its checks pass on
+`main`.
+
 Tests that need a real Pi are explicitly ignored unless the executable is
 available. Do not put real workspace paths, prompts, credentials, private
 keys, pairing tokens, or relay secrets in fixtures.
