@@ -166,6 +166,42 @@ fi
 
 rm -Rf "$output_dir/Pix.app"
 ditto "$app_path" "$output_dir/Pix.app"
+
+# Ship a drag-and-drop disk image alongside the ZIP archive. Keeping the
+# Applications alias makes the first-run install path familiar to macOS users,
+# while the app inside the image is the same stapled bundle as the ZIP copy.
+dmg_path="$output_dir/pix-$version-macos-$mac_arch.dmg"
+dmg_staging="$output_dir/.pix-dmg-staging"
+rm -Rf "$dmg_staging" "$dmg_path"
+mkdir -p "$dmg_staging"
+ditto "$output_dir/Pix.app" "$dmg_staging/Pix.app"
+ln -s /Applications "$dmg_staging/Applications"
+hdiutil create \
+    -volname "Pix" \
+    -srcfolder "$dmg_staging" \
+    -ov \
+    -format UDZO \
+    "$dmg_path"
+rm -Rf "$dmg_staging"
+
+if [ -n "$notary_profile" ] || [ -n "$notary_key_path" ]; then
+    if [ -n "$notary_profile" ]; then
+        xcrun notarytool submit "$dmg_path" \
+            --keychain-profile "$notary_profile" \
+            --wait
+    else
+        xcrun notarytool submit "$dmg_path" \
+            --key "$notary_key_path" \
+            --key-id "$notary_key_id" \
+            --issuer "$notary_issuer_id" \
+            --wait
+    fi
+    xcrun stapler staple "$dmg_path"
+    xcrun stapler validate "$dmg_path"
+fi
+
 ditto -c -k --sequesterRsrc --keepParent \
     "$output_dir/Pix.app" "$output_dir/pix-$version-macos-$mac_arch.zip"
 printf '%s\n' "Wrote $output_dir/Pix.app"
+printf '%s\n' "Wrote $dmg_path"
+printf '%s\n' "Wrote $output_dir/pix-$version-macos-$mac_arch.zip"

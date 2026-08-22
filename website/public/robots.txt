@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://pix.deepoke.com/sitemap.xml

@@ -11,6 +11,8 @@ DerivedData/
 # Node / Cloudflare
 node_modules/
 .wrangler/
+.tanstack/
+dist/
 .dev.vars
 
 # Environment and secrets
