@@ -10,6 +10,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: homebrew-cask-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   pull-requests: write
@@ -19,6 +23,7 @@ jobs:
     name: Validate release and propose Cask update
     if: github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
