@@ -281,3 +281,29 @@ func validatesRelayURL() {
     #expect(HostModel.normalizedRelayURL("wss://relay.example.com/with space") == nil)
     #expect(HostModel.normalizedRelayURL("not a URL") == nil)
 }
+
+@Test("first-run detection follows the status envelope's config state")
+func firstRunDetectionFollowsConfigState() {
+    let missing = HostModel.isConfiguredStatus(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"missing","pi":{"source":"path"},"devices":0,"workspaces":0}}
+        """
+    )
+    #expect(missing == false)
+
+    let ready = HostModel.isConfiguredStatus(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"source":"path","version":"0.84.2"},"devices":1,"workspaces":2}}
+        """
+    )
+    #expect(ready == true)
+
+    #expect(HostModel.isConfiguredStatus(from: "Pix status\n  config: missing") == nil)
+}
+
+@Test("guided setup recommends the product relay")
+func setupRecommendsProductRelay() {
+    #expect(HostModel.defaultRelayURL == "wss://pix-relay.zaincheung-255.workers.dev")
+    #expect(HostModel.normalizedRelayURL(HostModel.defaultRelayURL) != nil)
+    #expect(HostModel.normalizedRelayURL("not a url") == nil)
+}

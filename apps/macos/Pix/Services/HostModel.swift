@@ -8,6 +8,9 @@ import ServiceManagement
 @MainActor
 final class HostModel {
     private(set) var status: HostStatus = .starting
+    /// False until the CLI reports a host configuration file. Mirrors the
+    /// CLI home screen's first-run state: setup guidance appears only then.
+    private(set) var isConfigured = true
     private(set) var piVersion: String?
     private(set) var piExecutable: String?
     private(set) var workspaces: [WorkspaceItem] = []
@@ -91,12 +94,19 @@ final class HostModel {
                 configPath.path,
                 "status",
             ])
-            guard let version = parseVersion(from: output) else {
+            isConfigured = Self.isConfiguredStatus(from: output) ?? true
+            piVersion = parseVersion(from: output)
+            guard isConfigured else {
+                // First run: hold in setup state without touching the
+                // service or inventories; the setup guide drives the rest.
+                status = .needsSetup(String(localized: "Pix is not set up on this computer."))
+                return
+            }
+            guard piVersion != nil else {
                 throw HostModelError.commandFailed(
                     "Pi was not found on this host; install Pi or set its path with `pix pi set`."
                 )
             }
-            piVersion = version
             launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
             try await startHostService()
             await loadHostInventory()
@@ -108,6 +118,60 @@ final class HostModel {
                 isUpdatingRelay = false
             }
         }
+    }
+
+    enum SetupRelayChoice {
+        case recommended
+        case localOnly
+        case custom(String)
+    }
+
+    /// The product relay the CLI setup offers by default.
+    static let defaultRelayURL = "wss://pix-relay.zaincheung-255.workers.dev"
+
+    /// Applies the guided first-run choices through the same headless CLI
+    /// commands the terminal wizard commits, then adopts the running host.
+    func applySetup(
+        relay: SetupRelayChoice,
+        workspaceURL: URL,
+        installService: Bool
+    ) async throws {
+        switch relay {
+        case .recommended:
+            _ = try await runPix(arguments: ["relay", "set", Self.defaultRelayURL])
+        case .custom(let url):
+            _ = try await runPix(arguments: ["relay", "set", url])
+        case .localOnly:
+            break
+        }
+        _ = try await runPix(arguments: ["workspace", "add", workspaceURL.path])
+        isConfigured = true
+        if installService {
+            try await startHostService()
+        }
+        await loadHostInventory()
+        status = .ready
+    }
+
+    /// Pins an explicit Pi executable (`pix pi set`) and refreshes the
+    /// resolved version for the setup guide.
+    func setPiExecutable(_ url: URL) async throws {
+        _ = try await runPix(arguments: ["pi", "set", url.path])
+        if let output = try? await runPix(arguments: ["status"]) {
+            piVersion = parseVersion(from: output)
+        }
+    }
+
+    /// Re-reads `pix status` without touching the service. The setup guide
+    /// uses it after choosing a Pi executable.
+    func refreshStatusOnly() async throws {
+        let output = try await runPix(arguments: [
+            "--config",
+            configPath.path,
+            "status",
+        ])
+        isConfigured = Self.isConfiguredStatus(from: output) ?? isConfigured
+        piVersion = parseVersion(from: output)
     }
 
     func updatePairingRequests(_ requests: [PairingRequest]) {
@@ -640,7 +704,7 @@ final class HostModel {
 
     private func parseVersion(from output: String) -> String? {
         if let report = Self.decodeCLIData(CLIStatusData.self, from: output) {
-            return report.pi.version
+            return report.pi.version ?? nil
         }
         return output
             .split(separator: "\n")
@@ -899,6 +963,16 @@ final class HostModel {
         return url
     }
 
+    /// True when the CLI reports an existing host configuration. Nil when
+    /// the output is not a recognizable status envelope.
+    nonisolated static func isConfiguredStatus(from output: String) -> Bool? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<CLIStatusData>.self, from: data),
+              envelope.ok
+        else { return nil }
+        return envelope.data.configState != "missing"
+    }
+
     nonisolated static func headlessArguments(_ arguments: [String]) -> [String] {
         ["--output", "json", "--no-input"] + arguments
     }
@@ -1057,10 +1131,17 @@ private struct CLIErrorEnvelope: Decodable {
 
 private struct CLIStatusData: Decodable {
     struct Pi: Decodable {
-        let version: String
+        let version: String?
+        let executable: String?
     }
 
+    let configState: String?
     let pi: Pi
+
+    enum CodingKeys: String, CodingKey {
+        case configState = "config_state"
+        case pi
+    }
 }
 
 private struct CLIWorkspaceListData: Decodable {

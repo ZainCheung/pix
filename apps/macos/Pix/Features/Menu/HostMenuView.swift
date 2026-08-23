@@ -20,30 +20,36 @@ struct HostMenuView: View {
 
             Divider()
 
-            Button {
-                presentPairingWindow()
-            } label: {
-                Label(String(localized: "Add Device…"), systemImage: "plus.circle")
-            }
-
-            if !snapshot.pairingRequests.isEmpty {
+            if !model.isConfigured {
                 Button {
-                    presentPairingWindow()
+                    presentSetupWindow()
                 } label: {
-                    Label(
-                        snapshot.pairingRequests.count == 1
-                            ? String(localized: "Review pairing request…")
-                            : String(localized: "Review pairing requests…"),
-                        systemImage: "person.crop.circle.badge.questionmark"
-                    )
+                    Label(String(localized: "Set up Pix…"), systemImage: "wand.and.stars")
                 }
-            }
 
-            workspacesMenu
-            devicesMenu
+                Text(String(localized: "Pix has no host configuration yet."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                if !snapshot.pairingRequests.isEmpty {
+                    Button {
+                        presentPairingWindow()
+                    } label: {
+                        Label(
+                            snapshot.pairingRequests.count == 1
+                                ? String(localized: "Review pairing request…")
+                                : String(localized: "Review pairing requests…"),
+                            systemImage: "person.crop.circle.badge.questionmark"
+                        )
+                    }
+                }
 
-            if !snapshot.sessions.isEmpty {
-                sessionsMenu
+                workspacesMenu
+                devicesMenu
+
+                if !snapshot.sessions.isEmpty {
+                    sessionsMenu
+                }
             }
 
             Divider()
@@ -182,10 +188,17 @@ struct HostMenuView: View {
 
     private var devicesMenu: some View {
         Menu {
+            Button {
+                presentPairingWindow()
+            } label: {
+                Label(String(localized: "Add Device…"), systemImage: "plus.circle")
+            }
+
             if snapshot.devices.isEmpty {
                 Text(String(localized: "No paired devices"))
                     .foregroundStyle(.secondary)
             } else {
+                Divider()
                 ForEach(snapshot.devices) { device in
                     deviceMenu(device)
                 }
@@ -240,6 +253,11 @@ struct HostMenuView: View {
         openWindow(id: "add-device")
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    private func presentSetupWindow() {
+        openWindow(id: "setup")
+        NSApp.activate(ignoringOtherApps: true)
+    }
 }
 
 /// The status-item label remains live even while the menu itself is closed, so
@@ -247,9 +265,16 @@ struct HostMenuView: View {
 struct StatusItemLabel: View {
     @Environment(HostModel.self) private var model
     @Environment(\.openWindow) private var openWindow
+    @AppStorage("didPresentSetupGuide") private var didPresentSetupGuide = false
 
     var body: some View {
         StatusLabel(status: model.status)
+            .onChange(of: model.isConfigured) { _, configured in
+                guard !configured, !didPresentSetupGuide else { return }
+                didPresentSetupGuide = true
+                openWindow(id: "setup")
+                NSApp.activate(ignoringOtherApps: true)
+            }
             .onChange(of: model.pairingRequests) { oldRequests, newRequests in
                 let oldIDs = Set(oldRequests.map(\.id))
                 let newIDs = Set(newRequests.map(\.id))

@@ -6,5 +6,6 @@
 | Host domain | `Pix/Domain/` | Status, workspace, device, and pairing value types |
 | Host model | `Pix/Services/HostModel.swift` | Native UI state, Pix diagnostics, and host control commands |
 | Menu bar | `Pix/Features/Menu/` | Host status, workspace/device submenus, pairing guide, session actions, and quit |
+| Setup guide | `Pix/Features/Setup/` | First-run window shown only while no host configuration exists: Pi check, remote access, workspace, background service |
 | Settings | `Pix/Features/Settings/` | Pi path, launch-at-login, diagnostics, privacy, workspace, and paired-device management |
 | Tests | `PixTests/` | Swift Testing coverage for host-facing value state |

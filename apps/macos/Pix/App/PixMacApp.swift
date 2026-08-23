@@ -26,6 +26,14 @@ struct PixMacApp: App {
         }
         .menuBarExtraStyle(.menu)
 
+        Window(String(localized: "Set Up Pix"), id: "setup") {
+            SetupWindow()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 460, height: 640)
+        .defaultPosition(.center)
+
         Window(String(localized: "Add Device"), id: "add-device") {
             AddDeviceWindow()
                 .environment(model)
