@@ -63,9 +63,15 @@ pub(crate) fn setup(store: &ConfigStore, options: &SetupOptions) -> Result<()> {
 
     let ui = SetupUi::new(interactive, options.verbose);
     let config_was_present = store.path().is_file();
-    let config = store
-        .load_or_create(default_host_name())
-        .context("loading Pix configuration")?;
+    // Nothing touches disk until the wizard commits: abandoning setup must
+    // leave the host exactly as it was, including the home screen's
+    // first-run state. Identity creation is deferred with it because its
+    // keychain entry is keyed by the persisted host ID.
+    let config = if config_was_present {
+        store.load().context("loading Pix configuration")?
+    } else {
+        pix_core::HostConfig::new(default_host_name())
+    };
 
     if config_was_present
         && setup_is_already_configured(store, &config)
@@ -259,6 +265,9 @@ pub(crate) fn commit_setup_draft(
     transaction
         .save(&current)
         .context("saving setup configuration")?;
+    // The durable host ID exists only now; create the matching identity
+    // before any service can observe a half-committed host.
+    load_host_identity(store, current.host.id).context("preparing host identity")?;
     drop(transaction);
     if service_was_live && restart_required {
         restart_or_stop_for_configuration_change(store)?;
@@ -336,7 +345,7 @@ pub(crate) fn setup_quick(
 }
 
 pub(crate) fn prepare_setup_environment(
-    store: &ConfigStore,
+    _store: &ConfigStore,
     config: &mut pix_core::HostConfig,
     options: &SetupOptions,
     ui: SetupUi,
@@ -358,20 +367,6 @@ pub(crate) fn prepare_setup_environment(
                     ui.hint(&format!(
                         "Executable: {}",
                         installation.executable.display()
-                    ));
-                }
-                if ui.interactive() {
-                    ui.task("Preparing host identity...");
-                } else {
-                    ui.task("Host identity");
-                }
-                let _identity =
-                    load_host_identity(store, config.host.id).context("preparing host identity")?;
-                ui.task_done("Host identity ready");
-                if options.verbose {
-                    ui.hint(&format!(
-                        "Identity store: {}",
-                        host_identity_path(store).display()
                     ));
                 }
                 return Ok(installation.version.to_string());
@@ -842,7 +837,7 @@ pub(crate) fn verify_setup(
     ui: SetupUi,
     pi_version: String,
     relay: Option<String>,
-    service_installed: bool,
+    _service_installed: bool,
     elapsed: std::time::Duration,
 ) -> Result<()> {
     if !ui.interactive() {
@@ -854,15 +849,23 @@ pub(crate) fn verify_setup(
     ui.crumb_header("Setup");
     ui.section("Verifying setup");
     ui.task("Checking host service...");
-    let running = service_installed || HostServiceStatus::current(store.path()).is_some();
+    let running = HostServiceStatus::current(store.path()).is_some();
+    let installed = service::managed_service_installed(store).unwrap_or(false);
     if running {
         ui.task_done("Host service running");
     } else {
         ui.task_failed("Host service not running");
-        ui.warning(
-            "You can still run Pix manually",
-            Some("Start it with `pix serve`."),
-        );
+        if installed {
+            ui.warning(
+                "The service is installed but stopped",
+                Some("Start it with `pix service start`."),
+            );
+        } else {
+            ui.warning(
+                "You can still run Pix manually",
+                Some("Start it with `pix serve`."),
+            );
+        }
     }
     ui.task("Checking connection...");
     if relay.is_some() {
@@ -934,6 +937,39 @@ pub(crate) fn verify_setup(
     Ok(())
 }
 
+/// Uninstalls the pairing-temporary service when dropped unless disarmed.
+/// Covers `bail!` and `?` exits; a hard Ctrl+C kill is the one path that can
+/// leave the unit behind.
+#[cfg(unix)]
+struct TempServiceGuard<'a> {
+    store: &'a ConfigStore,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl TempServiceGuard<'_> {
+    fn cleanup(&mut self) -> Result<()> {
+        if self.armed {
+            self.armed = false;
+            service::uninstall_for_setup(self.store)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TempServiceGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
+/// Distinguishes an explicit user cancellation from a relay failure so the
+/// recovery menu never traps someone who asked to leave.
+fn is_user_cancel(error: &anyhow::Error) -> bool {
+    format!("{error:#}").contains("cancelled")
+}
+
 /// Attaches the interactive pairing flow to the already-running persistent
 /// host service. The service remains available to the macOS menu app and other
 /// clients throughout pairing; approving a request only updates durable host
@@ -954,6 +990,13 @@ pub(crate) fn run_setup_pairing(store: &ConfigStore, pairing: SetupPairingOption
     }
     #[cfg(unix)]
     let service_was_running = HostServiceStatus::current(store.path()).is_some();
+    // When pairing had to install the service itself, the host must end up
+    // uninstalled again on every exit path — the user asked for no service.
+    #[cfg(unix)]
+    let mut temp_service = TempServiceGuard {
+        store,
+        armed: !service_was_running && !keep_service,
+    };
     #[cfg(unix)]
     let event_stream = {
         service::ensure_running(store)?;
@@ -1093,9 +1136,9 @@ pub(crate) fn run_setup_pairing(store: &ConfigStore, pairing: SetupPairingOption
                         .get("connection_id")
                         .and_then(serde_json::Value::as_str)
                 {
-                    if !service_was_running {
-                        service::stop(store).context("stopping the temporary setup service")?;
-                    }
+                    temp_service
+                        .cleanup()
+                        .context("removing the temporary setup service")?;
                     ui.success("iPhone paired", None);
                     return Ok(());
                 }
@@ -1146,6 +1189,7 @@ pub(crate) fn run_setup_pairing_with_recovery(
             },
         ) {
             Ok(()) => return Ok(relay),
+            Err(error) if is_user_cancel(&error) => return Err(error),
             Err(_error) if relay.is_some() && interactive => {
                 let relay_label = relay
                     .as_deref()
@@ -1289,10 +1333,27 @@ use crate::commands::pi::configured_pi_version;
 use crate::commands::relay::{display_relay_url, validate_relay_url};
 use crate::commands::shared::{
     DEFAULT_RELAY_URL, default_host_name, display_workspace_path, expand_home,
-    format_confirmation_code, home_directory, host_identity_path, host_service_control_live,
-    load_host_identity, plural, prepare_running_service_mutation, refresh_running_service,
+    format_confirmation_code, home_directory, host_service_control_live, load_host_identity,
+    plural, prepare_running_service_mutation, refresh_running_service,
     restart_or_stop_for_configuration_change, terminal_label,
 };
 use crate::commands::workspace::add_workspace;
 use crate::serve::{pairing_instructions, render_remote_pairing_for_ui};
 use crate::service;
+
+#[cfg(test)]
+mod tests {
+    use super::is_user_cancel;
+
+    #[test]
+    fn cancellations_are_distinguished_from_relay_failures() {
+        assert!(is_user_cancel(&anyhow::anyhow!("cancelled by user")));
+        assert!(is_user_cancel(&anyhow::anyhow!(
+            "outer: {}",
+            anyhow::anyhow!("setup cancelled by user")
+        )));
+        assert!(!is_user_cancel(&anyhow::anyhow!(
+            "the relay channel failed to join"
+        )));
+    }
+}

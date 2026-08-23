@@ -82,13 +82,6 @@ pub(crate) fn display_workspace_path(path: &std::path::Path) -> String {
     path.display().to_string()
 }
 
-pub(crate) fn host_identity_path(store: &ConfigStore) -> PathBuf {
-    store.path().parent().map_or_else(
-        || PathBuf::from("host-identity.key"),
-        |dir| dir.join("host-identity.key"),
-    )
-}
-
 pub(crate) fn restart_or_stop_for_configuration_change(store: &ConfigStore) -> Result<()> {
     if service::managed_service_installed(store)? {
         service::restart_for_config(store)

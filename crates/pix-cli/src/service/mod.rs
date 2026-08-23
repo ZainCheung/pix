@@ -101,7 +101,15 @@ fn emit_mutation(output: CommandOutput, command: &str, store: &ConfigStore) -> R
 /// Installs and starts the service for setup. The returned path is only used
 /// for setup UI; the actual daemon is managed by the platform service manager.
 pub fn install_for_setup(store: &ConfigStore) -> Result<PathBuf> {
-    platform_install(store, false, false)
+    let unit_path = platform_install(store, false, false)?;
+    wait_until_ready(store)?;
+    Ok(unit_path)
+}
+
+/// Removes the service unit. Setup uses this when the user asked for no
+/// background service but pairing needed a temporary host.
+pub fn uninstall_for_setup(store: &ConfigStore) -> Result<()> {
+    platform_uninstall(store, false)
 }
 
 fn start_with_announce(store: &ConfigStore, announce: bool) -> Result<()> {
@@ -113,10 +121,6 @@ fn start_with_announce(store: &ConfigStore, announce: bool) -> Result<()> {
     }
     platform_start(store, announce)?;
     wait_until_ready(store)
-}
-
-pub fn stop(store: &ConfigStore) -> Result<()> {
-    platform_stop(store, true)
 }
 
 /// Stops the selected host without writing human text into a structured caller.
