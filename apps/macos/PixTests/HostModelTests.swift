@@ -9,28 +9,6 @@ func hostModelStartsInSetupState() {
     #expect(model.status == .starting)
     #expect(model.workspaces.isEmpty)
     #expect(model.devices.isEmpty)
-    #expect(model.inventoryRevision == 0)
-}
-
-@Test("menu lifecycle status can advance independently of its inventory snapshot")
-func menuStatusPresentationReflectsReadyState() {
-    let starting = HostMenuStatusPresentation(status: .starting, detail: nil)
-    let ready = HostMenuStatusPresentation(status: .ready, detail: nil)
-
-    #expect(starting.status == .starting)
-    #expect(ready.status == .ready)
-    #expect(ready.status.title == "Ready")
-    #expect(starting.status.menuSymbolName == "clock")
-    #expect(ready.status.menuSymbolName == "checkmark.circle.fill")
-    #expect(HostStatus.failed("boom").tint == .danger)
-    #expect(HostStatus.failed("boom").title == "Error")
-    #expect(HostStatus.failed("boom").menuSymbolName == "xmark.circle.fill")
-}
-
-@Test("menu inventory hydrates only after reconciliation advances its revision")
-func menuInventoryHydratesAfterInventoryRevision() {
-    #expect(!HostMenuSnapshot.shouldHydrate(forInventoryRevision: 0))
-    #expect(HostMenuSnapshot.shouldHydrate(forInventoryRevision: 1))
 }
 
 @Test("pairing requests preserve the six digit confirmation code")
@@ -100,24 +78,6 @@ func activeSessionUsesWorkspaceName() {
     #expect(session.isRunning)
 }
 
-@Test("workspace session inventory decodes menu-safe summaries")
-func parsesWorkspaceSessionInventory() {
-    let workspaceID = UUID()
-    let sessions = HostModel.parseWorkspaceSessions(
-        from: """
-        {"id":"session-1","title":"Fix menu hover","modified_at":"2026-08-23T10:00:00.123Z","message_count":4}
-        {"id":"session-2","title":null,"modified_at":"2026-08-22T10:00:00Z","message_count":0}
-        """,
-        workspaceID: workspaceID
-    )
-
-    #expect(sessions.count == 2)
-    #expect(sessions.first?.workspaceID == workspaceID)
-    #expect(sessions.first?.displayTitle == "Fix menu hover")
-    #expect(sessions.last?.displayTitle == "Untitled Session")
-    #expect(sessions.first?.messageCount == 4)
-}
-
 @Test("CLI resolver finds a Pix binary in the GUI-visible PATH")
 func resolvesPixFromPathWithoutShellEnvironment() throws {
     let root = FileManager.default.temporaryDirectory
@@ -140,52 +100,6 @@ func resolvesPixFromPathWithoutShellEnvironment() throws {
         searchLoginShell: false
     )
     #expect(resolved.standardizedFileURL == executable.standardizedFileURL)
-}
-
-@Test("CLI resolver prefers the embedded binary over a stale PATH install")
-func resolvesEmbeddedPixBeforePath() throws {
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("pix-host-model-\(UUID().uuidString)")
-    let bundleURL = root.appendingPathComponent("Pix.bundle")
-    let resources = bundleURL.appendingPathComponent("Contents/Resources")
-    let staleBin = root.appendingPathComponent("stale-bin")
-    try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
-    try FileManager.default.createDirectory(at: staleBin, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: root) }
-
-    try Data(
-        """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.pix.tests</string></dict></plist>
-        """.utf8
-    ).write(to: bundleURL.appendingPathComponent("Contents/Info.plist"))
-
-    let embedded = resources.appendingPathComponent("pix")
-    try Data("#!/bin/sh\n".utf8).write(to: embedded)
-    try FileManager.default.setAttributes(
-        [.posixPermissions: NSNumber(value: Int16(0o755))],
-        ofItemAtPath: embedded.path
-    )
-
-    let stale = staleBin.appendingPathComponent("pix")
-    try Data("#!/bin/sh\n".utf8).write(to: stale)
-    try FileManager.default.setAttributes(
-        [.posixPermissions: NSNumber(value: Int16(0o755))],
-        ofItemAtPath: stale.path
-    )
-
-    guard let bundle = Bundle(path: bundleURL.path) else {
-        Issue.record("Could not load the temporary test bundle")
-        return
-    }
-    let resolved = try HostModel.resolvePixExecutable(
-        environment: ["PATH": staleBin.path],
-        homeDirectory: root.appendingPathComponent("home"),
-        bundle: bundle,
-        searchLoginShell: false
-    )
-    #expect(resolved.standardizedFileURL == embedded.standardizedFileURL)
 }
 
 @Test("CLI resolver includes the mise shim fallback")

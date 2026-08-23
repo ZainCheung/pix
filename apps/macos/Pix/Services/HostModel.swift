@@ -13,11 +13,6 @@ final class HostModel {
     private(set) var workspaces: [WorkspaceItem] = []
     private(set) var devices: [PairedDevice] = []
     private(set) var sessions: [ActiveSession] = []
-    private(set) var workspaceSessions: [WorkspaceSession] = []
-    /// Increments after the initial CLI-backed workspace/device reconciliation
-    /// completes. Menu surfaces use this boundary instead of the host service's
-    /// early `ready` event, which can arrive before the CLI inventory finishes.
-    private(set) var inventoryRevision = 0
     private(set) var pairingRequests: [PairingRequest] = []
     private(set) var launchAtLoginEnabled = false
     private(set) var lastDiagnostic: String?
@@ -29,6 +24,7 @@ final class HostModel {
     /// Active remote pairing offer awaiting QR presentation.
     private(set) var remotePairing: RemotePairingOffer?
     private(set) var remotePairingError: String?
+
     var relayURL: String? {
         relayConfiguration.url
     }
@@ -155,15 +151,14 @@ final class HostModel {
                 guard let id = parseUUID(from: output) else {
                     throw HostModelError.invalidWorkspaceResponse
                 }
-                let workspace = WorkspaceItem(
-                    id: id,
-                    name: url.lastPathComponent,
-                    path: standardizedURL,
-                    isAvailable: true
+                workspaces.append(
+                    WorkspaceItem(
+                        id: id,
+                        name: url.lastPathComponent,
+                        path: standardizedURL,
+                        isAvailable: true
+                    )
                 )
-                workspaces.append(workspace)
-                workspaceSessions.append(contentsOf: await loadWorkspaceSessions(for: [workspace]))
-                inventoryRevision += 1
                 sendServiceCommand("refresh")
             } catch {
                 status = .failed(error.localizedDescription)
@@ -182,7 +177,6 @@ final class HostModel {
                     workspace.id.uuidString,
                 ])
                 workspaces.removeAll { $0.id == workspace.id }
-                workspaceSessions.removeAll { $0.workspaceID == workspace.id }
                 sendServiceCommand("refresh")
             } catch {
                 status = .failed(error.localizedDescription)
@@ -536,7 +530,6 @@ final class HostModel {
             "list",
         ]) {
             workspaces = parseWorkspaces(from: workspaceOutput)
-            workspaceSessions = await loadWorkspaceSessions(for: workspaces)
         }
         if let deviceOutput = try? await runPix(arguments: [
             "--config",
@@ -562,24 +555,6 @@ final class HostModel {
         ]) {
             relayConfiguration = Self.parseRelayConfiguration(from: relayOutput)
         }
-        inventoryRevision += 1
-    }
-
-    private func loadWorkspaceSessions(for workspaces: [WorkspaceItem]) async -> [WorkspaceSession] {
-        var result: [WorkspaceSession] = []
-        for workspace in workspaces {
-            guard let output = try? await runPix(arguments: [
-                "--config",
-                configPath.path,
-                "workspace",
-                "sessions",
-                workspace.id.uuidString,
-            ]) else {
-                continue
-            }
-            result.append(contentsOf: Self.parseWorkspaceSessions(from: output, workspaceID: workspace.id))
-        }
-        return result
     }
 
     private func updateRelay(arguments: [String]) {
@@ -670,35 +645,6 @@ final class HostModel {
             }
         }
         return result
-    }
-
-    nonisolated static func parseWorkspaceSessions(
-        from output: String,
-        workspaceID: UUID
-    ) -> [WorkspaceSession] {
-        let decoder = JSONDecoder()
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions.insert(.withFractionalSeconds)
-        let standardFormatter = ISO8601DateFormatter()
-
-        return output
-            .split(separator: "\n", omittingEmptySubsequences: true)
-            .compactMap { line in
-                let data = Data(line.utf8)
-                guard let record = try? decoder.decode(WorkspaceSessionRecord.self, from: data),
-                      let modifiedAt = fractionalFormatter.date(from: record.modifiedAt)
-                        ?? standardFormatter.date(from: record.modifiedAt)
-                else {
-                    return nil
-                }
-                return WorkspaceSession(
-                    id: record.id,
-                    workspaceID: workspaceID,
-                    title: record.title,
-                    modifiedAt: modifiedAt,
-                    messageCount: record.messageCount
-                )
-            }
     }
 
     /// Resolves the Pix CLI in the same order a user expects from a terminal:
@@ -1138,20 +1084,6 @@ private struct ServiceSession: Decodable {
 
     var value: ActiveSession {
         ActiveSession(id: id, workspacePath: workspace, clients: clients, state: state)
-    }
-}
-
-private struct WorkspaceSessionRecord: Decodable {
-    let id: String
-    let title: String?
-    let modifiedAt: String
-    let messageCount: Int
-
-    enum CodingKeys: String, CodingKey {
-        case id
-        case title
-        case modifiedAt = "modified_at"
-        case messageCount = "message_count"
     }
 }
 
