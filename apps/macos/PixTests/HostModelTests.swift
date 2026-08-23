@@ -167,6 +167,22 @@ func parsesRelayStatus() {
     #expect(!disabled.isActive)
 
     #expect(HostModel.parseRelayConfiguration(from: "relay: not configured\n") == .none)
+
+    let json = HostModel.parseRelayConfiguration(
+        from: """
+        {"schema_version":1,"ok":true,"command":"relay.show","data":{"url":"wss://relay.example.com","enabled":true,"configured":true,"service_restart_required":false}}
+        """
+    )
+    #expect(json.url == "wss://relay.example.com")
+    #expect(json.isActive)
+}
+
+@Test("native app always invokes the machine-readable non-interactive CLI")
+func buildsHeadlessCLIArguments() {
+    #expect(
+        HostModel.headlessArguments(["workspace", "list"])
+            == ["--output", "json", "--no-input", "workspace", "list"]
+    )
 }
 
 @Test("relay URL validation only accepts credential-free WebSocket endpoints")

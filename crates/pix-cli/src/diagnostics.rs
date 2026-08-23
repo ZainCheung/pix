@@ -18,7 +18,7 @@ use tempfile::Builder;
 
 use crate::status::HostServiceStatus;
 
-pub fn export_bundle(store: &ConfigStore, destination: PathBuf) -> Result<()> {
+pub fn export_bundle(store: &ConfigStore, destination: PathBuf, announce: bool) -> Result<PathBuf> {
     let archive_path = ensure_tar_gz_path(destination);
     let parent = archive_path
         .parent()
@@ -57,7 +57,7 @@ pub fn export_bundle(store: &ConfigStore, destination: PathBuf) -> Result<()> {
         .tempfile_in(parent)
         .with_context(|| format!("creating diagnostic archive in {}", parent.display()))?;
     let temporary_archive_path = archive.path().to_path_buf();
-    let status = Command::new("tar")
+    let output = Command::new("tar")
         .arg("-czf")
         .arg(&temporary_archive_path)
         .arg("-C")
@@ -69,10 +69,14 @@ pub fn export_bundle(store: &ConfigStore, destination: PathBuf) -> Result<()> {
             "pi-status.txt",
             "logs",
         ])
-        .status()
+        .output()
         .context("running tar to create the diagnostic bundle")?;
-    if !status.success() {
-        anyhow::bail!("tar exited with {status}");
+    if !output.status.success() {
+        anyhow::bail!(
+            "tar exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
     }
     archive
         .as_file_mut()
@@ -85,8 +89,10 @@ pub fn export_bundle(store: &ConfigStore, destination: PathBuf) -> Result<()> {
             error.error
         )
     })?;
-    println!("Diagnostic bundle written to {}", archive_path.display());
-    Ok(())
+    if announce {
+        println!("Diagnostic bundle written to {}", archive_path.display());
+    }
+    Ok(archive_path)
 }
 
 fn ensure_tar_gz_path(destination: PathBuf) -> PathBuf {
@@ -446,6 +452,27 @@ fn write_file(directory: &Path, name: &str, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("syncing {}", path.display()))?;
     Ok(())
 }
+pub(crate) fn diagnostics_command(
+    store: &ConfigStore,
+    command: DiagnosticsCommand,
+    output: CommandOutput,
+) -> Result<()> {
+    match command {
+        DiagnosticsCommand::Export { path } => {
+            let archive = export_bundle(store, path, !output.is_json())?;
+            if output.is_json() {
+                output.success(
+                    "diagnostics.export",
+                    &serde_json::json!({"archive": archive}),
+                )?;
+            }
+            Ok(())
+        }
+    }
+}
+
+use crate::DiagnosticsCommand;
+use crate::output::CommandOutput;
 
 #[cfg(test)]
 mod tests {
@@ -510,7 +537,8 @@ mod tests {
         fs::write(&destination, b"sentinel").expect("sentinel archive");
         let store = pix_core::ConfigStore::new(directory.path().join("config.json"));
 
-        let error = export_bundle(&store, destination.clone()).expect_err("existing archive");
+        let error =
+            export_bundle(&store, destination.clone(), false).expect_err("existing archive");
         assert!(error.to_string().contains("refusing to overwrite"));
         assert_eq!(
             fs::read(destination).expect("sentinel remains"),
@@ -535,7 +563,7 @@ mod tests {
         .expect("host log");
         let destination = directory.path().join("bundle.tar.gz");
 
-        export_bundle(&store, destination.clone()).expect("export bundle");
+        export_bundle(&store, destination.clone(), false).expect("export bundle");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

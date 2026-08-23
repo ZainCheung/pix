@@ -1,14 +1,14 @@
-//! Small terminal primitives used by `pix setup`.
+//! Small terminal primitives shared by Pix's human-facing command surfaces.
 //!
-//! Setup is deliberately not a full-screen TUI. These helpers keep the
-//! product-facing flow quiet, readable, and safe to use from a narrow
-//! terminal while retaining a plain-text path for scripts and CI.
+//! Pix is deliberately not a full-screen TUI. These helpers keep the product
+//! quiet, readable, and safe to use from a narrow terminal while machine
+//! callers use explicit subcommands and structured output instead.
 
 use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, size};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -18,6 +18,36 @@ const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const WHITE: &str = "\x1b[97m";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UiTone {
+    Default,
+    Success,
+    Warning,
+    Danger,
+    Muted,
+    Accent,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MenuItem<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) description: &'a str,
+}
+
+impl<'a> MenuItem<'a> {
+    #[must_use]
+    pub(crate) const fn new(label: &'a str, description: &'a str) -> Self {
+        Self { label, description }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuResult {
+    Selected(usize),
+    Help,
+    Quit,
+}
 
 /// The one terminal surface used by the setup wizard.
 #[derive(Debug, Clone, Copy)]
@@ -149,6 +179,23 @@ impl SetupUi {
         println!("  {}", self.paint(text, DIM, false));
     }
 
+    pub(crate) fn status_row(self, label: &str, value: &str, tone: UiTone) {
+        let label = format!("{label:<12}");
+        let (color, bold) = match tone {
+            UiTone::Default => (WHITE, false),
+            UiTone::Success => (GREEN, false),
+            UiTone::Warning => (YELLOW, false),
+            UiTone::Danger => (RED, false),
+            UiTone::Muted => (DIM, false),
+            UiTone::Accent => (CYAN, true),
+        };
+        println!(
+            "  {}{}",
+            self.paint(&label, DIM, false),
+            self.paint(value, color, bold)
+        );
+    }
+
     /// Draws one task as a spinner. The completion call replaces this line in
     /// an interactive terminal and becomes a normal line in plain output.
     pub(crate) fn task(self, text: &str) {
@@ -192,6 +239,190 @@ impl SetupUi {
             return self.select_events(prompt, options, default);
         }
         self.select_line(prompt, options, default)
+    }
+
+    /// A command launcher with a stable label column and optional descriptions.
+    /// Descriptions disappear on compact terminals instead of wrapping into the
+    /// redraw region. `q`/Escape leave the current surface and `?` asks the
+    /// caller to print the full command reference.
+    pub(crate) fn menu(
+        self,
+        prompt: &str,
+        options: &[MenuItem<'_>],
+        default: usize,
+    ) -> Result<MenuResult> {
+        if options.is_empty() {
+            return Ok(MenuResult::Quit);
+        }
+        self.ensure_tty()?;
+        if self.interactive && std::env::var("TERM").is_ok_and(|term| term != "dumb") {
+            return self.menu_events(prompt, options, default);
+        }
+        self.menu_line(prompt, options, default)
+    }
+
+    fn menu_events(
+        self,
+        prompt: &str,
+        options: &[MenuItem<'_>],
+        default: usize,
+    ) -> Result<MenuResult> {
+        let _raw_mode = RawModeGuard::enter()?;
+        let mut selected = default.min(options.len() - 1);
+        self.draw_menu(prompt, options, selected, false)?;
+        loop {
+            let terminal_event = event::read().context("reading Pix menu key event")?;
+            let Event::Key(key) = terminal_event else {
+                if matches!(terminal_event, Event::Resize(_, _)) {
+                    self.draw_menu(prompt, options, selected, true)?;
+                }
+                continue;
+            };
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c' | 'C'))
+            {
+                Self::finish_prompt();
+                bail!("cancelled by user");
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Left => selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Right => {
+                    selected = (selected + 1).min(options.len() - 1);
+                }
+                KeyCode::Home => selected = 0,
+                KeyCode::End => selected = options.len() - 1,
+                KeyCode::Enter => {
+                    Self::finish_prompt();
+                    return Ok(MenuResult::Selected(selected));
+                }
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+                    Self::finish_prompt();
+                    return Ok(MenuResult::Quit);
+                }
+                KeyCode::Char('?') => {
+                    Self::finish_prompt();
+                    return Ok(MenuResult::Help);
+                }
+                KeyCode::Char(value) if value.is_ascii_digit() => {
+                    if let Some(index) = value
+                        .to_digit(10)
+                        .and_then(|value| usize::try_from(value).ok())
+                        .and_then(|value| value.checked_sub(1))
+                        .filter(|index| *index < options.len())
+                    {
+                        selected = index;
+                    }
+                }
+                _ => continue,
+            }
+            self.draw_menu(prompt, options, selected, true)?;
+        }
+    }
+
+    fn menu_line(
+        self,
+        prompt: &str,
+        options: &[MenuItem<'_>],
+        default: usize,
+    ) -> Result<MenuResult> {
+        let selected = default.min(options.len() - 1);
+        if !prompt.trim().is_empty() {
+            println!("  {}", self.paint(prompt, WHITE, true));
+            println!();
+        }
+        for (index, option) in options.iter().enumerate() {
+            let marker = if index == selected { "❯" } else { " " };
+            println!("  {marker} {}", option.label);
+            if !option.description.is_empty() {
+                self.hint(&format!("      {}", option.description));
+            }
+        }
+        println!();
+        self.hint("enter a number   q quit   ? commands");
+        print!("  › ");
+        io::stdout().flush().context("flushing Pix menu")?;
+        let mut line = String::new();
+        let read = io::stdin()
+            .read_line(&mut line)
+            .context("reading Pix menu selection")?;
+        if read == 0 {
+            return Ok(MenuResult::Quit);
+        }
+        let answer = line.trim();
+        if answer.is_empty() {
+            return Ok(MenuResult::Selected(selected));
+        }
+        if matches!(answer, "q" | "Q") {
+            return Ok(MenuResult::Quit);
+        }
+        if answer == "?" {
+            return Ok(MenuResult::Help);
+        }
+        if let Ok(index) = answer.parse::<usize>()
+            && let Some(index) = index.checked_sub(1).filter(|index| *index < options.len())
+        {
+            return Ok(MenuResult::Selected(index));
+        }
+        bail!("unknown menu selection: {answer}")
+    }
+
+    fn draw_menu(
+        self,
+        prompt: &str,
+        options: &[MenuItem<'_>],
+        selected: usize,
+        redraw: bool,
+    ) -> Result<()> {
+        if redraw {
+            print!("\x1b[{}A\r", options.len() + 2);
+        } else if !prompt.trim().is_empty() {
+            print!("  {}\r\n\r\n", self.paint(prompt, WHITE, true));
+        }
+        let terminal_width = size()
+            .ok()
+            .map(|(columns, _)| usize::from(columns))
+            .filter(|columns| *columns > 0)
+            .unwrap_or(80);
+        let show_descriptions = terminal_width >= 68;
+        let label_width = options
+            .iter()
+            .map(|option| option.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(24);
+        for (index, option) in options.iter().enumerate() {
+            if redraw {
+                print!("\x1b[2K\r");
+            }
+            let current = index == selected;
+            let marker = if current { "❯" } else { " " };
+            let color = if current { CYAN } else { WHITE };
+            let label = format!("{:<width$}", option.label, width = label_width);
+            print!(
+                "  {} {}",
+                self.paint(marker, color, current),
+                self.paint(&label, color, current)
+            );
+            if show_descriptions && !option.description.is_empty() {
+                let description_color = if current { CYAN } else { DIM };
+                print!(
+                    "  {}",
+                    self.paint(option.description, description_color, false)
+                );
+            }
+            print!("\r\n");
+        }
+        if redraw {
+            print!("\x1b[2K\r");
+        }
+        print!("\r\n");
+        self.raw_hint("↑↓ move   enter select   q quit   ? commands");
+        if redraw {
+            print!("\x1b[2K\r");
+        }
+        print!("  › ");
+        io::stdout().flush().context("flushing Pix menu")?;
+        Ok(())
     }
 
     fn select_events(self, prompt: &str, options: &[String], default: usize) -> Result<usize> {

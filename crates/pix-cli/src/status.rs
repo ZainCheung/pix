@@ -5,7 +5,7 @@
 //! workspace paths, device identifiers, or session content.
 
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
+
+const LOCAL_CONTROL_SCHEMA_VERSION: u32 = 1;
+const MAX_CONTROL_REQUEST_BYTES: u64 = 64 * 1024;
 
 #[cfg(unix)]
 use std::net::Shutdown;
@@ -79,12 +82,7 @@ impl HostServiceStatus {
         let parent = path
             .parent()
             .context("locating host service status directory")?;
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "creating host service status directory {}",
-                parent.display()
-            )
-        })?;
+        prepare_private_run_directory(config_path)?;
         let mut temporary = Builder::new()
             .prefix(".pix-host-service-status-")
             .tempfile_in(parent)
@@ -237,6 +235,76 @@ pub struct HostServiceControl {
     event_subscribers: Vec<UnixStream>,
 }
 
+/// One command accepted from the private local control socket.
+pub enum HostControlCommand {
+    /// The original one-line interface used by existing native clients. Its
+    /// receipt acknowledgement has already been written to the caller.
+    Legacy(String),
+    /// A versioned request whose responder is completed after execution.
+    Rpc {
+        command: String,
+        args: serde_json::Value,
+        responder: HostControlResponder,
+    },
+}
+
+/// Single-use response channel for a versioned local control request.
+pub struct HostControlResponder {
+    #[cfg(unix)]
+    stream: UnixStream,
+    request_id: uuid::Uuid,
+}
+
+impl HostControlResponder {
+    pub fn success(self, data: &serde_json::Value) -> Result<()> {
+        let request_id = self.request_id;
+        self.write(serde_json::json!({
+            "schema_version": LOCAL_CONTROL_SCHEMA_VERSION,
+            "request_id": request_id,
+            "ok": true,
+            "data": data,
+        }))
+    }
+
+    pub fn error(self, code: &str, message: &str) -> Result<()> {
+        let request_id = self.request_id;
+        self.write(serde_json::json!({
+            "schema_version": LOCAL_CONTROL_SCHEMA_VERSION,
+            "request_id": request_id,
+            "ok": false,
+            "error": {
+                "code": code,
+                "message": message,
+            },
+        }))
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn write(mut self, response: serde_json::Value) -> Result<()> {
+        #[cfg(unix)]
+        {
+            serde_json::to_writer(&mut self.stream, &response)
+                .context("encoding host control response")?;
+            self.stream.write_all(b"\n")?;
+            self.stream.flush()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = response;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct HostControlRpcRequest {
+    schema_version: u32,
+    request_id: uuid::Uuid,
+    command: String,
+    #[serde(default)]
+    args: serde_json::Value,
+}
+
 impl HostServiceControl {
     pub fn bind(config_path: &Path) -> Result<Self> {
         #[cfg(unix)]
@@ -252,15 +320,7 @@ impl HostServiceControl {
     #[cfg(unix)]
     fn bind_unix(config_path: &Path) -> Result<Self> {
         let path = HostServiceStatus::control_socket_path_for(config_path);
-        let parent = path
-            .parent()
-            .context("locating host service control directory")?;
-        fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "creating host service control directory {}",
-                parent.display()
-            )
-        })?;
+        prepare_private_run_directory(config_path)?;
         let listener = bind_socket(&path, "control")?;
         let event_path = HostServiceStatus::event_socket_path_for(config_path);
         let event_listener = bind_socket(&event_path, "event")?;
@@ -274,7 +334,7 @@ impl HostServiceControl {
     }
 
     /// Polls one local command without blocking the host event loop.
-    pub fn try_next_command(&self) -> Result<Option<String>> {
+    pub fn try_next_command(&self) -> Result<Option<HostControlCommand>> {
         #[cfg(unix)]
         {
             match self.listener.accept() {
@@ -291,16 +351,78 @@ impl HostServiceControl {
                         .context("configuring host service control client")?;
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
-                    reader
+                    match reader
+                        .by_ref()
+                        .take(MAX_CONTROL_REQUEST_BYTES + 1)
                         .read_line(&mut line)
-                        .context("reading host service control command")?;
+                    {
+                        // A probe client may connect and never send, and a
+                        // stalled sender may hit the read timeout. Dropping
+                        // that one connection must never take the host down.
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock
+                                    | std::io::ErrorKind::TimedOut
+                                    | std::io::ErrorKind::ConnectionReset
+                                    | std::io::ErrorKind::UnexpectedEof
+                            ) =>
+                        {
+                            return Ok(None);
+                        }
+                        Err(error) => {
+                            return Err(error).context("reading host service control command");
+                        }
+                        Ok(_) => {}
+                    }
                     let mut stream = reader.into_inner();
                     let command = line.trim().to_owned();
-                    if !command.is_empty() {
-                        stream.write_all(b"ok\n")?;
+                    if command.len() as u64 > MAX_CONTROL_REQUEST_BYTES {
+                        let _ = write_rpc_error(
+                            &mut stream,
+                            None,
+                            "invalid_request",
+                            "host control request is too large",
+                        );
+                        return Ok(None);
                     }
-                    stream.flush()?;
-                    Ok(Some(command))
+                    if command.starts_with('{') {
+                        let request = match serde_json::from_str::<HostControlRpcRequest>(&command)
+                        {
+                            Ok(request) => request,
+                            Err(error) => {
+                                let _ = write_rpc_error(
+                                    &mut stream,
+                                    None,
+                                    "invalid_request",
+                                    &format!("invalid host control request: {error}"),
+                                );
+                                return Ok(None);
+                            }
+                        };
+                        if request.schema_version != LOCAL_CONTROL_SCHEMA_VERSION {
+                            let _ = write_rpc_error(
+                                &mut stream,
+                                Some(request.request_id),
+                                "unsupported_version",
+                                "unsupported host control schema version",
+                            );
+                            return Ok(None);
+                        }
+                        return Ok(Some(HostControlCommand::Rpc {
+                            command: request.command,
+                            args: request.args,
+                            responder: HostControlResponder {
+                                stream,
+                                request_id: request.request_id,
+                            },
+                        }));
+                    }
+                    if !command.is_empty() {
+                        let _ = stream.write_all(b"ok\n");
+                        let _ = stream.flush();
+                    }
+                    Ok(Some(HostControlCommand::Legacy(command)))
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
                 Err(error) => Err(error).context("accepting host service control command"),
@@ -350,6 +472,27 @@ impl HostServiceControl {
 }
 
 #[cfg(unix)]
+fn write_rpc_error(
+    stream: &mut UnixStream,
+    request_id: Option<uuid::Uuid>,
+    code: &str,
+    message: &str,
+) -> Result<()> {
+    serde_json::to_writer(
+        &mut *stream,
+        &serde_json::json!({
+            "schema_version": LOCAL_CONTROL_SCHEMA_VERSION,
+            "request_id": request_id,
+            "ok": false,
+            "error": {"code": code, "message": message},
+        }),
+    )?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    Ok(())
+}
+
+#[cfg(unix)]
 fn bind_socket(path: &Path, kind: &str) -> Result<UnixListener> {
     use std::os::unix::fs::FileTypeExt;
     use std::os::unix::fs::PermissionsExt;
@@ -391,6 +534,49 @@ fn bind_socket(path: &Path, kind: &str) -> Result<UnixListener> {
     permissions.set_mode(0o600);
     fs::set_permissions(path, permissions)?;
     Ok(listener)
+}
+
+#[cfg(unix)]
+fn prepare_private_run_directory(config_path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let config_directory = config_path
+        .parent()
+        .context("locating Pix configuration directory")?;
+    let owner = fs::metadata(config_directory)
+        .with_context(|| format!("inspecting {}", config_directory.display()))?
+        .uid();
+    let run_directory = config_directory.join("run");
+    match fs::symlink_metadata(&run_directory) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_dir() || metadata.uid() != owner {
+                bail!(
+                    "Pix run directory is not a user-owned real directory: {}",
+                    run_directory.display()
+                );
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&run_directory)
+                .with_context(|| format!("creating {}", run_directory.display()))?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspecting {}", run_directory.display()));
+        }
+    }
+    fs::set_permissions(&run_directory, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("securing {}", run_directory.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_private_run_directory(config_path: &Path) -> Result<()> {
+    let run_directory = config_path
+        .parent()
+        .context("locating Pix configuration directory")?
+        .join("run");
+    fs::create_dir_all(&run_directory)
+        .with_context(|| format!("creating {}", run_directory.display()))
 }
 
 impl Drop for HostServiceControl {
@@ -466,6 +652,96 @@ pub fn request_control_command(config_path: &Path, command: &str) -> Result<bool
     }
 }
 
+/// Checks the config-scoped control listener and removes only definitively
+/// stale Unix socket artifacts. A successful connect is the authority; the
+/// status file is intentionally not used as a liveness gate.
+pub fn control_socket_live(config_path: &Path) -> Result<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        let control_path = HostServiceStatus::control_socket_path_for(config_path);
+        match UnixStream::connect(&control_path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                for path in [
+                    control_path,
+                    HostServiceStatus::event_socket_path_for(config_path),
+                ] {
+                    if fs::symlink_metadata(&path)
+                        .is_ok_and(|metadata| metadata.file_type().is_socket())
+                    {
+                        let _ = fs::remove_file(path);
+                    }
+                }
+                let _ = HostServiceStatus::current(config_path);
+                Ok(false)
+            }
+            Err(error) => Err(error).context("probing the Pix host control socket"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = config_path;
+        Ok(false)
+    }
+}
+
+/// Sends one versioned request and waits for its execution response on the
+/// same private control socket. A legacy daemon replies with its historical
+/// `ok` receipt, which is detected before any domain mutation is attempted.
+#[cfg(unix)]
+pub fn request_control_rpc(
+    config_path: &Path,
+    request: &serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<serde_json::Value> {
+    let path = HostServiceStatus::control_socket_path_for(config_path);
+    let mut stream = UnixStream::connect(&path).with_context(|| {
+        format!(
+            "connecting to host service control socket {}; run `pix service start` first",
+            path.display()
+        )
+    })?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .context("configuring host control response timeout")?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .context("configuring host control request timeout")?;
+    stream
+        .set_nonblocking(false)
+        .context("configuring blocking host control client")?;
+    serde_json::to_writer(&mut stream, request).context("encoding host control request")?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    stream.shutdown(Shutdown::Write)?;
+    let mut response = String::new();
+    BufReader::new(stream)
+        .take(MAX_CONTROL_REQUEST_BYTES + 1)
+        .read_line(&mut response)
+        .context("reading host control response")?;
+    if response.trim() == "ok" {
+        bail!(
+            "the running Pix host predates versioned control responses; restart it with `pix service restart` and retry"
+        );
+    }
+    if response.len() as u64 > MAX_CONTROL_REQUEST_BYTES {
+        bail!("host control response is too large");
+    }
+    serde_json::from_str(response.trim()).context("decoding host control response")
+}
+
+#[cfg(not(unix))]
+pub fn request_control_rpc(
+    _config_path: &Path,
+    _request: &serde_json::Value,
+    _timeout: std::time::Duration,
+) -> Result<serde_json::Value> {
+    bail!("versioned Pix host control is currently available only on Unix hosts")
+}
+
 /// Connects to the ephemeral JSONL event stream of a running host service.
 /// Events are never persisted by this socket; subscribers receive only events
 /// emitted after their connection is accepted.
@@ -479,6 +755,116 @@ pub fn connect_event_stream(config_path: &Path) -> Result<UnixStream> {
         )
     })
 }
+
+pub(crate) fn show_logs(store: &ConfigStore, tail: usize, output: CommandOutput) -> Result<()> {
+    let path = HostLog::path_for(store.path());
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => {
+            let lines: Vec<&str> = contents.lines().collect();
+            let start = lines.len().saturating_sub(tail);
+            if output.is_json() {
+                let entries = lines[start..]
+                    .iter()
+                    .map(|line| {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .unwrap_or_else(|_| serde_json::Value::String((*line).to_owned()))
+                    })
+                    .collect::<Vec<_>>();
+                return output.success(
+                    "logs",
+                    &serde_json::json!({"path": path, "entries": entries}),
+                );
+            }
+            println!("log file: {}", path.display());
+            for line in &lines[start..] {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if output.is_json() {
+                return output.success("logs", &serde_json::json!({"path": path, "entries": []}));
+            }
+            println!("log file: {}", path.display());
+            println!("(no log entries yet)");
+            Ok(())
+        }
+        Err(error) => Err(error).context("reading host log"),
+    }
+}
+
+pub(crate) fn status_command(store: &ConfigStore, output: CommandOutput) -> Result<()> {
+    let overview = HostOverview::collect(store);
+    if output.is_json() {
+        return output.success("status", &overview);
+    }
+    if std::io::stdout().is_terminal() {
+        home::render_overview(&overview, SetupUi::new(true, false), true);
+        return Ok(());
+    }
+    legacy_status_command(store)
+}
+
+pub(crate) fn legacy_status_command(store: &ConfigStore) -> Result<()> {
+    println!("Pix status");
+    println!("  config: {}", store.path().display());
+    match store.load() {
+        Ok(config) => {
+            println!("  host: {}", terminal_label(&config.host.display_name));
+            println!(
+                "  host config: ok ({} workspace{}, {} paired device{})",
+                config.workspaces.len(),
+                plural(config.workspaces.len()),
+                config.devices.len(),
+                plural(config.devices.len())
+            );
+            match &config.preferences.relay_url {
+                Some(url) if config.preferences.relay_enabled => {
+                    println!("  relay: {url} (enabled)");
+                }
+                Some(url) => println!("  relay: {url} (disabled)"),
+                None => println!("  relay: not configured"),
+            }
+            if let Some(pi) = &config.preferences.pi_executable {
+                println!("  pi: configured ({})", pi.display());
+            } else {
+                println!("  pi: PATH discovery");
+            }
+        }
+        Err(pix_core::config::ConfigError::Read { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            println!("  host config: not created yet");
+        }
+        Err(error) => bail!("host config: {error}"),
+    }
+
+    if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
+        println!(
+            "  service: running (pid {}, port {}, started_at {})",
+            current.pid, current.port, current.started_at
+        );
+    } else {
+        let installed = service::managed_service_installed(store).unwrap_or(false);
+        let active = service::managed_service_active(store).unwrap_or(false);
+        if active {
+            println!("  service: manager active (host status is not ready yet)");
+        } else if installed {
+            println!("  service: installed but not running");
+        } else {
+            println!("  service: not running");
+        }
+    }
+    Ok(())
+}
+
+use crate::commands::shared::{plural, terminal_label};
+use crate::home::HostOverview;
+use crate::output::CommandOutput;
+use crate::serve::HostLog;
+use crate::setup_ui::SetupUi;
+use crate::{home, service};
+use pix_core::ConfigStore;
 
 #[cfg(test)]
 mod tests {
@@ -555,5 +941,57 @@ mod tests {
         assert_eq!(line.trim(), r#"{"type":"ready"}"#);
         assert!(!HostServiceStatus::event_socket_path_for(&config_path).is_file());
         assert!(HostServiceStatus::event_socket_path_for(&config_path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn silent_control_client_never_takes_the_host_down() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        let directory = tempdir().expect("temp dir");
+        let config_path = directory.path().join("config.json");
+        let control =
+            super::HostServiceControl::bind(&config_path).expect("bind host service sockets");
+
+        // A probe client connects and never sends anything. The host must
+        // drop it after the read timeout instead of surfacing an error that
+        // would terminate `pix serve`.
+        let silent = UnixStream::connect(HostServiceStatus::control_socket_path_for(&config_path))
+            .expect("connect without sending");
+        let started = Instant::now();
+        loop {
+            match control.try_next_command().expect("poll control command") {
+                Some(_) => panic!("unexpected control command from a silent client"),
+                None if started.elapsed() >= Duration::from_millis(1100) => break,
+                None => std::thread::sleep(Duration::from_millis(50)),
+            }
+        }
+        drop(silent);
+
+        // The control loop keeps serving well-behaved clients afterwards.
+        let mut client =
+            UnixStream::connect(HostServiceStatus::control_socket_path_for(&config_path))
+                .expect("connect well-behaved client");
+        client
+            .write_all(br#"{"schema_version":1,"request_id":"0199aaaa-f00d-7aa0-a0aa-000000000001","command":"status"}"#)
+            .expect("send control request");
+        client.write_all(b"\n").expect("send control newline");
+        client.flush().expect("flush control request");
+        let started = Instant::now();
+        loop {
+            if let Some(super::HostControlCommand::Rpc { command, .. }) =
+                control.try_next_command().expect("poll control command")
+            {
+                assert_eq!(command, "status");
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "well-behaved control client was never served"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

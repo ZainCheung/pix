@@ -427,28 +427,36 @@ struct RelayEndpoint {
 
 impl RelayEndpoint {
     fn parse(url: &str) -> Result<Self, RelayClientError> {
-        let (scheme, rest) = url.split_once("://").ok_or(RelayClientError::InvalidUrl)?;
-        let default_port = match scheme {
-            "wss" => 443,
-            "ws" => 80,
+        if url.is_empty()
+            || url.trim() != url
+            || url.contains(['@', '\\', '#'])
+            || url.chars().any(char::is_control)
+        {
+            return Err(RelayClientError::InvalidUrl);
+        }
+        let request = url
+            .into_client_request()
+            .map_err(|_| RelayClientError::InvalidUrl)?;
+        let uri = request.uri();
+        let default_port = match uri.scheme_str() {
+            Some("wss") => 443,
+            Some("ws") => 80,
             _ => return Err(RelayClientError::InvalidUrl),
         };
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-        if authority.is_empty() {
-            return Err(RelayClientError::InvalidUrl);
-        }
-        let (host, port) = match authority.rsplit_once(':') {
-            Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => (
-                host.to_owned(),
-                port.parse().map_err(|_| RelayClientError::InvalidUrl)?,
-            ),
-            _ => (authority.to_owned(), default_port),
-        };
-        if host.is_empty() {
-            return Err(RelayClientError::InvalidUrl);
-        }
+        let host = uri.host().ok_or(RelayClientError::InvalidUrl)?.to_owned();
+        let port = uri.port_u16().unwrap_or(default_port);
         Ok(Self { host, port })
     }
+}
+
+/// Validates a relay base URL using the same parser used by live connections.
+///
+/// # Errors
+///
+/// Returns [`RelayClientError::InvalidUrl`] for unsupported schemes,
+/// credentials, fragments, control characters, malformed hosts, or ports.
+pub fn validate_relay_url(url: &str) -> Result<(), RelayClientError> {
+    RelayEndpoint::parse(url).map(|_| ())
 }
 
 fn set_stream_read_timeout(

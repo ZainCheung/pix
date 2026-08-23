@@ -1,12 +1,16 @@
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 use tempfile::Builder;
 use thiserror::Error;
 use uuid::Uuid;
+
+const CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub const CONFIG_VERSION: u32 = 1;
 
@@ -70,10 +74,10 @@ impl HostConfig {
             ));
         }
         if let Some(url) = &self.preferences.relay_url
-            && !(url.starts_with("wss://") || url.starts_with("ws://"))
+            && crate::relay_client::validate_relay_url(url).is_err()
         {
             return Err(ConfigError::Invalid(
-                "relay_url must be a ws:// or wss:// endpoint",
+                "relay_url must be a valid ws:// or wss:// endpoint without credentials or a fragment",
             ));
         }
 
@@ -204,6 +208,58 @@ pub struct ConfigStore {
     path: PathBuf,
 }
 
+/// An exclusive, cross-process configuration transaction.
+///
+/// Keep the transaction short: read the latest snapshot, apply one logical
+/// mutation, and save it. The adjacent lock file is intentionally persistent;
+/// the operating system releases the advisory lock when this value is dropped.
+pub struct ConfigTransaction<'a> {
+    store: &'a ConfigStore,
+    _lock: File,
+}
+
+impl ConfigTransaction<'_> {
+    /// Loads the latest validated configuration while the exclusive lock is held.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the file is unreadable or fails
+    /// validation.
+    pub fn load(&self) -> Result<HostConfig, ConfigError> {
+        self.store.load_unlocked()
+    }
+
+    /// Loads configuration or creates the first host identity under the lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when reading fails for a reason other than a
+    /// missing file, or when the initial save fails.
+    pub fn load_or_create(
+        &self,
+        display_name: impl Into<String>,
+    ) -> Result<HostConfig, ConfigError> {
+        match self.load() {
+            Ok(config) => Ok(config),
+            Err(ConfigError::Read { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+                let config = HostConfig::new(display_name);
+                self.save(&config)?;
+                Ok(config)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Atomically saves configuration before releasing the transaction lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when serialization or the atomic write fails.
+    pub fn save(&self, config: &HostConfig) -> Result<(), ConfigError> {
+        self.store.save_unlocked(config)
+    }
+}
+
 impl ConfigStore {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
@@ -241,6 +297,10 @@ impl ConfigStore {
     /// Returns [`ConfigError`] for filesystem, JSON, schema, or invariant
     /// failures. An absent file is reported and is not created implicitly.
     pub fn load(&self) -> Result<HostConfig, ConfigError> {
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&self) -> Result<HostConfig, ConfigError> {
         let bytes = fs::read(&self.path).map_err(|source| ConfigError::Read {
             path: self.path.clone(),
             source,
@@ -264,15 +324,7 @@ impl ConfigStore {
         &self,
         display_name: impl Into<String>,
     ) -> Result<HostConfig, ConfigError> {
-        match self.load() {
-            Ok(config) => Ok(config),
-            Err(ConfigError::Read { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-                let config = HostConfig::new(display_name);
-                self.save(&config)?;
-                Ok(config)
-            }
-            Err(error) => Err(error),
-        }
+        self.transaction()?.load_or_create(display_name)
     }
 
     /// Persists configuration using a same-directory temporary file, file
@@ -283,6 +335,59 @@ impl ConfigStore {
     /// Returns [`ConfigError`] if validation or any persistence step fails.
     /// A newer schema already on disk is never overwritten.
     pub fn save(&self, config: &HostConfig) -> Result<(), ConfigError> {
+        self.transaction()?.save(config)
+    }
+
+    /// Acquires the per-config cross-process mutation lock.
+    ///
+    /// Callers performing read-modify-write changes must load and save through
+    /// the returned transaction so a stale snapshot cannot resurrect revoked
+    /// devices or workspace authorization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] when the parent directory cannot be created or
+    /// the lock file cannot be opened.
+    pub fn transaction(&self) -> Result<ConfigTransaction<'_>, ConfigError> {
+        let parent = self.path.parent().ok_or_else(|| ConfigError::InvalidPath {
+            path: self.path.clone(),
+        })?;
+        fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+        let lock_path = self.path.with_extension("lock");
+        validate_lock_directory(parent, &lock_path)?;
+        let lock = open_lock_file(&lock_path).map_err(|source| ConfigError::Lock {
+            path: lock_path.clone(),
+            source,
+        })?;
+        validate_lock_file(&lock, &lock_path)?;
+        let deadline = Instant::now() + CONFIG_LOCK_TIMEOUT;
+        loop {
+            match lock.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err(ConfigError::Busy { path: lock_path });
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(source) => {
+                    return Err(ConfigError::Lock {
+                        path: lock_path,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(ConfigTransaction {
+            store: self,
+            _lock: lock,
+        })
+    }
+
+    fn save_unlocked(&self, config: &HostConfig) -> Result<(), ConfigError> {
         config.validate()?;
         self.refuse_newer_on_disk()?;
 
@@ -365,6 +470,93 @@ impl ConfigStore {
 }
 
 #[cfg(unix)]
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(path)
+}
+
+#[cfg(unix)]
+fn validate_lock_directory(parent: &Path, lock_path: &Path) -> Result<(), ConfigError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::metadata(parent).map_err(|source| ConfigError::Lock {
+        path: lock_path.to_path_buf(),
+        source,
+    })?;
+    if metadata.mode() & 0o022 != 0 {
+        return Err(ConfigError::UnsafeLockDirectory {
+            path: parent.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_lock_directory(_parent: &Path, _lock_path: &Path) -> Result<(), ConfigError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_lock_file(lock: &File, path: &Path) -> Result<(), ConfigError> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = lock.metadata().map_err(|source| ConfigError::Lock {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parent_owner = path
+        .parent()
+        .and_then(|parent| fs::metadata(parent).ok())
+        .map(|parent| parent.uid());
+    if !metadata.file_type().is_file() || parent_owner != Some(metadata.uid()) {
+        return Err(ConfigError::UnsafeLockFile {
+            path: path.to_path_buf(),
+        });
+    }
+    if metadata.mode() & 0o077 != 0 {
+        lock.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|source| ConfigError::Lock {
+                path: path.to_path_buf(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn validate_lock_file(lock: &File, path: &Path) -> Result<(), ConfigError> {
+    if !lock
+        .metadata()
+        .map_err(|source| ConfigError::Lock {
+            path: path.to_path_buf(),
+            source,
+        })?
+        .is_file()
+    {
+        return Err(ConfigError::UnsafeLockFile {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<(), ConfigError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
@@ -389,6 +581,14 @@ pub enum ConfigError {
     Read { path: PathBuf, source: io::Error },
     #[error("failed to write configuration at {path}: {source}")]
     Write { path: PathBuf, source: io::Error },
+    #[error("failed to lock configuration at {path}: {source}")]
+    Lock { path: PathBuf, source: io::Error },
+    #[error("configuration is busy; timed out waiting for {path}")]
+    Busy { path: PathBuf },
+    #[error("configuration lock directory is not private and user-owned: {path}")]
+    UnsafeLockDirectory { path: PathBuf },
+    #[error("configuration lock is not a private, user-owned regular file: {path}")]
+    UnsafeLockFile { path: PathBuf },
     #[error("failed to decode configuration at {path}: {source}")]
     Decode {
         path: PathBuf,
@@ -406,6 +606,7 @@ pub enum ConfigError {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::thread;
 
     use tempfile::tempdir;
 
@@ -487,6 +688,20 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsafe_relay_urls_at_the_persistence_boundary() {
+        for url in [
+            "wss://user:secret@relay.example.com",
+            "wss://relay.example.com/#fragment",
+            "wss://relay.example.com\nspoof",
+            "https://relay.example.com",
+        ] {
+            let mut config = HostConfig::new("Test Mac");
+            config.preferences.relay_url = Some(url.to_owned());
+            assert!(config.validate().is_err(), "accepted {url}");
+        }
+    }
+
+    #[test]
     fn round_trips_fields_from_newer_builds_of_the_same_schema() {
         let directory = tempdir().expect("temporary directory");
         let path = directory.path().join("config.json");
@@ -542,5 +757,41 @@ mod tests {
             store.save(&HostConfig::new("Test Mac")),
             Err(ConfigError::UnsupportedVersion { found: 999, .. })
         ));
+    }
+
+    #[test]
+    fn transactions_serialize_cross_thread_read_modify_write() {
+        let directory = tempdir().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        store
+            .save(&HostConfig::new("Test Mac"))
+            .expect("save initial config");
+
+        let workers = (0..12)
+            .map(|_| {
+                let store = store.clone();
+                thread::spawn(move || {
+                    let transaction = store.transaction().expect("lock config");
+                    let mut config = transaction.load().expect("load config");
+                    let count = config
+                        .unknown
+                        .get("test_counter")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    config
+                        .unknown
+                        .insert("test_counter".to_owned(), serde_json::json!(count + 1));
+                    transaction.save(&config).expect("save config");
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().expect("join config worker");
+        }
+
+        assert_eq!(
+            store.load().expect("load final config").unknown["test_counter"],
+            12
+        );
     }
 }

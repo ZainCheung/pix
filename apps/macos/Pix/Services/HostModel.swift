@@ -537,7 +537,7 @@ final class HostModel {
             "device",
             "list",
         ]) {
-            devices = HostTextInventory.devices(from: deviceOutput)
+            devices = parseDevices(from: deviceOutput)
         }
         if let piOutput = try? await runPix(arguments: [
             "--config",
@@ -591,7 +591,7 @@ final class HostModel {
             let output = Pipe()
             let errors = Pipe()
             process.executableURL = executable
-            process.arguments = arguments
+            process.arguments = Self.headlessArguments(arguments)
             process.environment = environment
             process.standardOutput = output
             process.standardError = errors
@@ -600,7 +600,8 @@ final class HostModel {
             let stdout = output.fileHandleForReading.readDataToEndOfFile()
             let stderr = errors.fileHandleForReading.readDataToEndOfFile()
             guard process.terminationStatus == 0 else {
-                let message = String(data: stderr, encoding: .utf8) ?? "Pix Core failed"
+                let rawMessage = String(data: stderr, encoding: .utf8) ?? "Pix Core failed"
+                let message = Self.parseCLIError(from: rawMessage) ?? rawMessage
                 throw HostModelError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             return String(data: stdout, encoding: .utf8) ?? ""
@@ -608,20 +609,37 @@ final class HostModel {
     }
 
     private func parseVersion(from output: String) -> String? {
-        output
+        if let report = Self.decodeCLIData(CLIDoctorData.self, from: output) {
+            return report.pi.version
+        }
+        return output
             .split(separator: "\n")
             .first(where: { $0.contains("pi version:") })
             .map { $0.replacingOccurrences(of: "pi version:", with: "").trimmingCharacters(in: .whitespaces) }
     }
 
     private func parseUUID(from output: String) -> UUID? {
-        output
+        if let mutation = Self.decodeCLIData(CLIWorkspaceMutationData.self, from: output) {
+            return mutation.workspace.id
+        }
+        return output
             .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "(" || $0 == ")" })
             .compactMap { UUID(uuidString: String($0)) }
             .first
     }
 
     private func parseWorkspaces(from output: String) -> [WorkspaceItem] {
+        if let inventory = Self.decodeCLIData(CLIWorkspaceListData.self, from: output) {
+            return inventory.workspaces.map { workspace in
+                let path = URL(fileURLWithPath: workspace.path)
+                return WorkspaceItem(
+                    id: workspace.id,
+                    name: workspace.name,
+                    path: path,
+                    isAvailable: FileManager.default.fileExists(atPath: workspace.path)
+                )
+            }
+        }
         var result: [WorkspaceItem] = []
         var pending: (UUID, String)?
         for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -645,6 +663,19 @@ final class HostModel {
             }
         }
         return result
+    }
+
+    private func parseDevices(from output: String) -> [PairedDevice] {
+        guard let inventory = Self.decodeCLIData(CLIDeviceListData.self, from: output) else {
+            return HostTextInventory.devices(from: output)
+        }
+        return inventory.devices.map { device in
+            PairedDevice(
+                id: device.id,
+                name: device.name,
+                pairedAt: ISO8601DateFormatter().date(from: device.pairedAt) ?? .distantPast
+            )
+        }
     }
 
     /// Resolves the Pix CLI in the same order a user expects from a terminal:
@@ -799,6 +830,10 @@ final class HostModel {
         return url
     }
 
+    nonisolated static func headlessArguments(_ arguments: [String]) -> [String] {
+        ["--output", "json", "--no-input"] + arguments
+    }
+
     nonisolated static func hostProcessEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -836,6 +871,9 @@ final class HostModel {
     /// Parses the stable, human-readable output of `pix relay show` without
     /// exposing relay channel secrets to the UI model.
     nonisolated static func parseRelayConfiguration(from output: String) -> RelayConfiguration {
+        if let relay = decodeCLIData(CLIRelayData.self, from: output) {
+            return RelayConfiguration(url: relay.url, isEnabled: relay.enabled)
+        }
         guard let line = output
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map(String.init)
@@ -886,7 +924,10 @@ final class HostModel {
     }
 
     private func parsePiExecutable(from output: String) -> String? {
-        output
+        if let pi = Self.decodeCLIData(CLIPiData.self, from: output) {
+            return pi.executable
+        }
+        return output
             .split(separator: "\n")
             .first
             .map { line in
@@ -897,6 +938,99 @@ final class HostModel {
                 return text
             }
     }
+
+    private nonisolated static func decodeCLIData<T: Decodable>(
+        _ type: T.Type,
+        from output: String
+    ) -> T? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<T>.self, from: data),
+              envelope.ok,
+              envelope.schemaVersion == 1
+        else {
+            return nil
+        }
+        return envelope.data
+    }
+
+    private nonisolated static func parseCLIError(from output: String) -> String? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIErrorEnvelope.self, from: data),
+              !envelope.ok
+        else {
+            return nil
+        }
+        return envelope.error.message
+    }
+}
+
+private struct CLIEnvelope<Payload: Decodable>: Decodable {
+    let schemaVersion: Int
+    let ok: Bool
+    let data: Payload
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case ok
+        case data
+    }
+}
+
+private struct CLIErrorEnvelope: Decodable {
+    struct Body: Decodable {
+        let code: String
+        let message: String
+    }
+
+    let ok: Bool
+    let error: Body
+}
+
+private struct CLIDoctorData: Decodable {
+    struct Pi: Decodable {
+        let version: String
+    }
+
+    let pi: Pi
+}
+
+private struct CLIWorkspaceListData: Decodable {
+    struct Workspace: Decodable {
+        let id: UUID
+        let name: String
+        let path: String
+    }
+
+    let workspaces: [Workspace]
+}
+
+private struct CLIWorkspaceMutationData: Decodable {
+    let workspace: CLIWorkspaceListData.Workspace
+}
+
+private struct CLIDeviceListData: Decodable {
+    struct Device: Decodable {
+        let id: String
+        let name: String
+        let pairedAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case pairedAt = "paired_at"
+        }
+    }
+
+    let devices: [Device]
+}
+
+private struct CLIPiData: Decodable {
+    let executable: String?
+}
+
+private struct CLIRelayData: Decodable {
+    let url: String?
+    let enabled: Bool
 }
 
 /// Small POSIX Unix-domain socket wrapper used for the local Host service

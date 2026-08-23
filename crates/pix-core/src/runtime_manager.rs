@@ -14,6 +14,7 @@ use crate::session::{DiscoveredSession, SessionError, SessionSnapshot};
 use crate::session_lock::SessionId;
 
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const AUTHORIZATION_REVOCATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveRuntimeSummary {
@@ -338,6 +339,46 @@ impl RuntimeManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.release_inner(session_id)
+    }
+
+    /// Stops every runtime whose canonical workspace is no longer authorized.
+    ///
+    /// Configuration refresh first replaces the shared authorization view, so
+    /// new requests are denied immediately. This bounded retry then waits for
+    /// any short in-flight RPC operation and terminates the underlying Pi
+    /// process, ensuring an attached client cannot keep using a removed root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] if a selected runtime remains busy or
+    /// cannot be stopped.
+    pub fn release_outside_workspaces(
+        &self,
+        authorized: &HashSet<PathBuf>,
+    ) -> Result<Vec<SessionId>, RuntimeManagerError> {
+        let session_ids = self
+            .active_sessions()
+            .into_iter()
+            .filter(|session| !authorized.contains(&session.workspace))
+            .map(|session| session.session_id)
+            .collect::<Vec<_>>();
+        let mut released = Vec::with_capacity(session_ids.len());
+        let deadline = Instant::now() + AUTHORIZATION_REVOCATION_TIMEOUT;
+        for session_id in session_ids {
+            loop {
+                match self.release(session_id) {
+                    Ok(()) | Err(RuntimeManagerError::NotActive(_)) => {
+                        released.push(session_id);
+                        break;
+                    }
+                    Err(RuntimeManagerError::Busy(_)) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        Ok(released)
     }
 
     fn release_inner(&self, session_id: SessionId) -> Result<(), RuntimeManagerError> {

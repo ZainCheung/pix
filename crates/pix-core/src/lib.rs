@@ -34,18 +34,19 @@ pub use host_dispatcher::{DispatchError, HostProtocolDispatcher, HostState};
 pub use host_environment::{EnvironmentSource, HostEnvironment};
 pub use host_identity::{HostIdentityError, HostIdentityKey, HostIdentityStore};
 pub use host_service::{
-    ConnectionStage, HostService, HostServiceError, HostServiceEvent, HostServiceHandle,
-    PairingRequest,
+    ConfigRefreshReport, ConnectionStage, HostService, HostServiceError, HostServiceEvent,
+    HostServiceHandle, PairingRequest,
 };
 pub use pairing::{
-    ApprovedDevice, MAX_PENDING_PAIRING_OFFERS, PairingCoordinator, PairingOffer, PairingPending,
-    PairingToken,
+    ApprovedDevice, DeviceRevocation, MAX_PENDING_PAIRING_OFFERS, PairingCoordinator, PairingOffer,
+    PairingPending, PairingToken,
 };
 pub use pi::{PiInstallation, PiProbe};
 pub use pi_rpc::{PiCommand, PiEvent, PiResponse, RpcClient};
 pub use pix_wire::host_public_key_fingerprint;
 pub use relay_client::{
     RelayClientError, RelayManager, RelayServiceEvent, RelayStage, RemotePairingOffer,
+    validate_relay_url,
 };
 pub use runtime::{PiRuntime, PiRuntimeOptions, SessionLaunch};
 pub use runtime_manager::{ActiveRuntimeSummary, RuntimeManager, RuntimeManagerOptions};
