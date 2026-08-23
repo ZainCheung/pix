@@ -87,10 +87,8 @@ pub(crate) fn stop(store: &ConfigStore, announce: bool) -> Result<()> {
             if announce {
                 println!("Requested Pix host service shutdown.");
             }
-        } else {
-            if announce {
-                println!("Pix service is not running.");
-            }
+        } else if announce {
+            println!("Pix service is not running.");
         }
         return Ok(());
     }
@@ -98,10 +96,8 @@ pub(crate) fn stop(store: &ConfigStore, announce: bool) -> Result<()> {
         if announce {
             println!("Requested Pix host service shutdown.");
         }
-    } else {
-        if announce {
-            println!("Pix service is not installed or running.");
-        }
+    } else if announce {
+        println!("Pix service is not installed or running.");
     }
     Ok(())
 }
