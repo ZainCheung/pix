@@ -89,9 +89,14 @@ final class HostModel {
             let output = try await runPix(arguments: [
                 "--config",
                 configPath.path,
-                "doctor",
+                "status",
             ])
-            piVersion = parseVersion(from: output)
+            guard let version = parseVersion(from: output) else {
+                throw HostModelError.commandFailed(
+                    "Pi was not found on this host; install Pi or set its path with `pix pi set`."
+                )
+            }
+            piVersion = version
             launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
             try await startHostService()
             await loadHostInventory()
@@ -634,7 +639,7 @@ final class HostModel {
     }
 
     private func parseVersion(from output: String) -> String? {
-        if let report = Self.decodeCLIData(CLIDoctorData.self, from: output) {
+        if let report = Self.decodeCLIData(CLIStatusData.self, from: output) {
             return report.pi.version
         }
         return output
@@ -1050,7 +1055,7 @@ private struct CLIErrorEnvelope: Decodable {
     let error: Body
 }
 
-private struct CLIDoctorData: Decodable {
+private struct CLIStatusData: Decodable {
     struct Pi: Decodable {
         let version: String
     }

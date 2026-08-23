@@ -21,7 +21,6 @@ mod setup_ui;
 mod status;
 
 use crate::commands::device::device;
-use crate::commands::doctor::doctor;
 use crate::commands::pi::pi_command;
 use crate::commands::relay::relay_command;
 use crate::commands::session::session;
@@ -84,15 +83,6 @@ enum Command {
         #[arg(long)]
         non_interactive: bool,
         /// Show extra local diagnostics while setup runs.
-        #[arg(long)]
-        verbose: bool,
-    },
-    /// Check local configuration and Pi RPC prerequisites.
-    Doctor {
-        /// Use a specific Pi executable instead of searching PATH.
-        #[arg(long)]
-        pi: Option<PathBuf>,
-        /// Include local paths and implementation details useful for support.
         #[arg(long)]
         verbose: bool,
     },
@@ -341,7 +331,6 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             HomeAction::Devices => device(&store, None, output, true),
             HomeAction::Workspaces => workspace(&store, None, output, true),
             HomeAction::Status => status_command(&store, output),
-            HomeAction::Doctor => doctor(&store, None, false, output),
             HomeAction::Commands => {
                 let mut command = Cli::command();
                 command.print_long_help().context("printing Pix help")?;
@@ -365,7 +354,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
         } => {
             if output.is_json() {
                 return Err(usage_error(
-                    "the setup wizard is human-facing; use explicit `doctor`, `workspace`, `relay`, and `service` commands for JSON automation",
+                    "the setup wizard is human-facing; use explicit `status`, `workspace`, `relay`, and `service` commands for JSON automation",
                 ));
             }
             setup(
@@ -382,7 +371,6 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
                 },
             )
         }
-        Command::Doctor { pi, verbose } => doctor(&store, pi, verbose, output),
         Command::Workspace { command } => workspace(&store, command, output, interactive),
         Command::Device { command } => device(&store, command, output, interactive),
         Command::Session { command } => session(&store, command, output, interactive),

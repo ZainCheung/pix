@@ -484,7 +484,7 @@ pub(crate) fn prepare_setup_environment(
                 } else {
                     ui.error(
                         "Pix couldn't verify Pi",
-                        Some("Run `pix doctor --verbose` for more details."),
+                        Some("Run `pix status` for the resolved Pi executable and version."),
                     );
                 }
             }

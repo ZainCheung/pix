@@ -49,6 +49,31 @@ pub(crate) enum MenuResult {
     Quit,
 }
 
+/// One row of a list surface: a padded left column (name) and a trailing
+/// right column (path, date, or other detail).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ListRow<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) detail: &'a str,
+}
+
+impl<'a> ListRow<'a> {
+    #[must_use]
+    pub(crate) const fn new(label: &'a str, detail: &'a str) -> Self {
+        Self { label, detail }
+    }
+}
+
+/// The outcome of a list surface: the highlighted row was activated with
+/// Enter, or a shortcut key from the footer bar was pressed. Key carries the
+/// highlighted row so row-scoped actions (remove, revoke) know their target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PickerAction {
+    Select(usize),
+    Key { key: char, selected: usize },
+    Quit,
+}
+
 /// The one terminal surface used by the setup wizard.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SetupUi {
@@ -425,6 +450,170 @@ impl SetupUi {
         Ok(())
     }
 
+    /// A record list with shortcut keys, in the style of the product
+    /// reference pickers: rows render directly (no nested action menu) and
+    /// the footer names each key. Enter always reports [`PickerAction::Select`].
+    pub(crate) fn picker(
+        self,
+        rows: &[ListRow<'_>],
+        hints: &[(&str, &str)],
+        empty_note: &str,
+    ) -> Result<PickerAction> {
+        self.ensure_tty()?;
+        if self.interactive && std::env::var("TERM").is_ok_and(|term| term != "dumb") {
+            return self.picker_events(rows, hints, empty_note);
+        }
+        self.picker_line(rows, hints, empty_note)
+    }
+
+    fn picker_events(
+        self,
+        rows: &[ListRow<'_>],
+        hints: &[(&str, &str)],
+        empty_note: &str,
+    ) -> Result<PickerAction> {
+        let _raw_mode = RawModeGuard::enter()?;
+        let mut selected = 0_usize;
+        self.draw_picker(rows, hints, empty_note, selected, false)?;
+        loop {
+            let terminal_event = event::read().context("reading Pix list key event")?;
+            let Event::Key(key) = terminal_event else {
+                if matches!(terminal_event, Event::Resize(_, _)) {
+                    self.draw_picker(rows, hints, empty_note, selected, true)?;
+                }
+                continue;
+            };
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c' | 'C'))
+            {
+                Self::finish_prompt();
+                bail!("cancelled by user");
+            }
+            match key.code {
+                KeyCode::Up | KeyCode::Left => selected = selected.saturating_sub(1),
+                KeyCode::Down | KeyCode::Right => {
+                    if !rows.is_empty() {
+                        selected = (selected + 1).min(rows.len() - 1);
+                    }
+                }
+                KeyCode::Home => selected = 0,
+                KeyCode::End => selected = rows.len().saturating_sub(1),
+                KeyCode::Enter => {
+                    Self::finish_prompt();
+                    return Ok(PickerAction::Select(selected));
+                }
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') => {
+                    Self::finish_prompt();
+                    return Ok(PickerAction::Quit);
+                }
+                KeyCode::Char(character) if character.is_ascii_alphabetic() => {
+                    Self::finish_prompt();
+                    return Ok(PickerAction::Key {
+                        key: character.to_ascii_lowercase(),
+                        selected,
+                    });
+                }
+                _ => continue,
+            }
+            self.draw_picker(rows, hints, empty_note, selected, true)?;
+        }
+    }
+
+    fn picker_line(
+        self,
+        rows: &[ListRow<'_>],
+        hints: &[(&str, &str)],
+        empty_note: &str,
+    ) -> Result<PickerAction> {
+        if rows.is_empty() {
+            self.muted(empty_note);
+        } else {
+            let label_width = rows
+                .iter()
+                .map(|row| row.label.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (index, row) in rows.iter().enumerate() {
+                println!(
+                    "  {} {}",
+                    index + 1,
+                    format_two_columns(row.label, label_width, row.detail)
+                );
+            }
+        }
+        println!();
+        self.hint(&picker_footer(hints));
+        print!("  › ");
+        io::stdout().flush().context("flushing Pix list")?;
+        let mut line = String::new();
+        let read = io::stdin()
+            .read_line(&mut line)
+            .context("reading Pix list selection")?;
+        if read == 0 || line.trim().is_empty() {
+            return Ok(PickerAction::Quit);
+        }
+        let answer = line.trim();
+        if matches!(answer, "q" | "Q") {
+            return Ok(PickerAction::Quit);
+        }
+        if let Ok(index) = answer.parse::<usize>()
+            && let Some(index) = index.checked_sub(1).filter(|index| *index < rows.len())
+        {
+            return Ok(PickerAction::Select(index));
+        }
+        if let Some(character) = answer.chars().next().filter(char::is_ascii_alphabetic) {
+            return Ok(PickerAction::Key {
+                key: character.to_ascii_lowercase(),
+                selected: 0,
+            });
+        }
+        bail!("unknown list selection: {answer}")
+    }
+
+    fn draw_picker(
+        self,
+        rows: &[ListRow<'_>],
+        hints: &[(&str, &str)],
+        empty_note: &str,
+        selected: usize,
+        redraw: bool,
+    ) -> Result<()> {
+        let body_lines = rows.len().max(1);
+        if redraw {
+            print!("\x1b[{}A\r", body_lines + 2);
+        }
+        let terminal_width = size()
+            .ok()
+            .map(|(columns, _)| usize::from(columns))
+            .filter(|columns| *columns > 0)
+            .unwrap_or(80);
+        if rows.is_empty() {
+            print!("\x1b[2K  {}\r\n", self.paint(empty_note, DIM, false));
+        } else {
+            let label_width = rows
+                .iter()
+                .map(|row| row.label.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (index, row) in rows.iter().enumerate() {
+                let current = index == selected;
+                let marker = if current { "❯" } else { " " };
+                let color = if current { CYAN } else { WHITE };
+                let columns = format_two_columns(row.label, label_width, row.detail);
+                let columns = clamp_line(&columns, terminal_width.saturating_sub(4).max(20));
+                print!(
+                    "  {} {}\r\n",
+                    self.paint(marker, color, current),
+                    self.paint(&columns, color, current)
+                );
+            }
+        }
+        print!("\x1b[2K\r\n");
+        self.raw_hint(&picker_footer(hints));
+        io::stdout().flush().context("flushing Pix list")?;
+        Ok(())
+    }
+
     fn select_events(self, prompt: &str, options: &[String], default: usize) -> Result<usize> {
         let _raw_mode = RawModeGuard::enter()?;
         let mut selected = default.min(options.len() - 1);
@@ -780,6 +969,41 @@ impl SetupUi {
         print!("\r\x1b[2K\r\n");
         let _ = io::stdout().flush();
     }
+}
+
+/// Pads the label column so every detail starts at the same offset, in the
+/// style of the product reference lists: `name` column, two spaces, detail.
+#[must_use]
+pub(crate) fn format_two_columns(label: &str, label_width: usize, detail: &str) -> String {
+    let padding = label_width.saturating_sub(label.chars().count());
+    let mut row = String::with_capacity(label.len() + padding + 2 + detail.len());
+    row.push_str(label);
+    for _ in 0..padding {
+        row.push(' ');
+    }
+    row.push_str("  ");
+    row.push_str(detail);
+    row
+}
+
+/// Builds the `key action | key action` footer bar used by list surfaces.
+#[must_use]
+pub(crate) fn picker_footer(hints: &[(&str, &str)]) -> String {
+    let mut parts = vec!["↑↓ move".to_owned()];
+    parts.extend(hints.iter().map(|(key, action)| format!("{key} {action}")));
+    parts.push("Q quit".to_owned());
+    parts.join(" | ")
+}
+
+/// Truncates a rendered row to `max_chars` with an ellipsis marker.
+#[must_use]
+fn clamp_line(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+    let mut output: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    output.push('…');
+    output
 }
 
 /// A small helper used by tests and by the QR renderer to keep the terminal

@@ -13,7 +13,6 @@ pub(crate) enum HomeAction {
     Devices,
     Workspaces,
     Status,
-    Doctor,
     Commands,
     Quit,
 }
@@ -38,6 +37,10 @@ pub(crate) struct PiOverview {
     pub(crate) source: PiSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) executable: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) supported: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,16 +125,32 @@ impl HostOverview {
 
         match store.load() {
             Ok(config) => {
-                let pi = config.preferences.pi_executable.as_ref().map_or_else(
+                let mut pi = config.preferences.pi_executable.as_ref().map_or_else(
                     || PiOverview {
                         source: PiSource::Path,
                         executable: None,
+                        version: None,
+                        supported: None,
                     },
                     |path| PiOverview {
                         source: PiSource::Configured,
                         executable: Some(path.display().to_string()),
+                        version: None,
+                        supported: None,
                     },
                 );
+                // Status absorbs the doctor probe: the overview reports the
+                // Pi pix actually runs, not just what the config points at.
+                let environment = pix_core::HostEnvironment::resolve_for("pi");
+                if let Ok(installation) =
+                    pix_core::PiProbe::new(config.preferences.pi_executable.clone())
+                        .with_environment(environment)
+                        .inspect()
+                {
+                    pi.executable = Some(installation.executable.display().to_string());
+                    pi.version = Some(installation.version.to_string());
+                    pi.supported = Some(installation.supported);
+                }
                 let access = match &config.preferences.relay_url {
                     Some(url) if config.preferences.relay_enabled => AccessOverview {
                         mode: AccessMode::Relay,
@@ -172,6 +191,8 @@ impl HostOverview {
                     pi: PiOverview {
                         source: PiSource::Path,
                         executable: None,
+                        version: None,
+                        supported: None,
                     },
                     service,
                     access: AccessOverview {
@@ -191,6 +212,8 @@ impl HostOverview {
                 pi: PiOverview {
                     source: PiSource::Unknown,
                     executable: None,
+                    version: None,
+                    supported: None,
                 },
                 service,
                 access: AccessOverview {
@@ -227,10 +250,6 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                     MenuItem::new("Check status", "Show detailed host state"),
                 ),
                 (
-                    HomeAction::Doctor,
-                    MenuItem::new("Run doctor", "Check Pix and Pi prerequisites"),
-                ),
-                (
                     HomeAction::Quit,
                     MenuItem::new("Quit", "Return to the shell"),
                 ),
@@ -242,10 +261,6 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                 (
                     HomeAction::Setup,
                     MenuItem::new("Set up Pix", "Prepare this computer for remote Pi access"),
-                ),
-                (
-                    HomeAction::Doctor,
-                    MenuItem::new("Run doctor", "Check Pix and Pi prerequisites"),
                 ),
                 (
                     HomeAction::Commands,
@@ -261,8 +276,8 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
         ConfigState::Invalid => (
             vec![
                 (
-                    HomeAction::Doctor,
-                    MenuItem::new("Run doctor", "Inspect the invalid host configuration"),
+                    HomeAction::Status,
+                    MenuItem::new("Check status", "Inspect the invalid host configuration"),
                 ),
                 (
                     HomeAction::Setup,
@@ -313,6 +328,11 @@ pub(crate) fn render_overview(overview: &HostOverview, ui: SetupUi, detailed: bo
         (PiSource::Configured, _) => "configured executable".to_owned(),
         (PiSource::Path, _) => "PATH discovery".to_owned(),
         _ => "unknown".to_owned(),
+    };
+    let pi = match &overview.pi.version {
+        Some(version) if overview.pi.supported.unwrap_or(true) => format!("{pi} · {version}"),
+        Some(version) => format!("{pi} · {version} (unsupported)"),
+        None => pi,
     };
     ui.status_row("pi", &pi, UiTone::Muted);
     match overview.service.state {

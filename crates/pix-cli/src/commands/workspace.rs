@@ -7,7 +7,7 @@ use pix_core::{ConfigStore, PiSessionStore, WorkspaceRegistry};
 use serde::Serialize;
 
 use crate::output::CommandOutput;
-use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
+use crate::setup_ui::{ListRow, PickerAction, SetupUi};
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn add_workspace(
@@ -233,61 +233,70 @@ pub(crate) fn workspace(
 }
 
 pub(crate) fn workspace_menu(store: &ConfigStore, output: CommandOutput) -> Result<()> {
-    let config = load_or_ephemeral_config(store)?;
-    let ui = SetupUi::new(true, false);
-    ui.crumb_header("Workspaces");
-    ui.status_row(
-        "authorized",
-        &format!(
-            "{} workspace{}",
-            config.workspaces.len(),
-            plural(config.workspaces.len())
-        ),
-        if config.workspaces.is_empty() {
-            UiTone::Warning
+    loop {
+        let config = load_or_ephemeral_config(store)?;
+        let ui = SetupUi::new(true, false);
+        ui.crumb_header("Workspaces");
+        let columns: Vec<(String, String)> = config
+            .workspaces
+            .iter()
+            .map(|workspace| (workspace.name.clone(), workspace.path.display().to_string()))
+            .collect();
+        let rows: Vec<ListRow<'_>> = columns
+            .iter()
+            .map(|(name, path)| ListRow::new(name, path))
+            .collect();
+        let hints: &[(&str, &str)] = if rows.is_empty() {
+            &[("A", "add")]
         } else {
-            UiTone::Default
-        },
-    );
-    println!();
-    let mut actions = vec![(
-        0_u8,
-        MenuItem::new("Add a workspace", "Authorize a host folder for Pi"),
-    )];
-    if !config.workspaces.is_empty() {
-        actions.push((
-            1,
-            MenuItem::new("Remove a workspace", "Revoke access without deleting files"),
-        ));
-        actions.push((
-            2,
-            MenuItem::new("List workspaces", "Show authorized folders"),
-        ));
-    }
-    actions.push((3, MenuItem::new("Back", "Return to the shell")));
-    let items = actions.iter().map(|(_, item)| *item).collect::<Vec<_>>();
-    match ui.menu("Actions", &items, 0)? {
-        MenuResult::Selected(index) => match actions[index].0 {
-            0 => {
+            &[("A", "add"), ("R", "remove"), ("enter", "sessions")]
+        };
+        match ui.picker(&rows, hints, "No authorized workspaces yet.")? {
+            PickerAction::Quit => return Ok(()),
+            PickerAction::Key { key: 'a', .. } => {
                 let path = select_workspace_path(ui)?;
                 workspace(
                     store,
                     Some(WorkspaceCommand::Add { path, name: None }),
                     output,
                     true,
-                )
+                )?;
             }
-            1 => workspace(
-                store,
-                Some(WorkspaceCommand::Remove { id: None }),
-                output,
-                true,
-            ),
-            2 => workspace(store, Some(WorkspaceCommand::List), output, true),
-            _ => Ok(()),
-        },
-        MenuResult::Help => print_cli_help(),
-        MenuResult::Quit => Ok(()),
+            PickerAction::Key { key: 'r', selected } => {
+                let Some(record) = config.workspaces.get(selected) else {
+                    continue;
+                };
+                let id = record.id;
+                let name = record.name.clone();
+                let choices = vec!["Remove workspace".to_owned(), "Cancel".to_owned()];
+                if ui.select(
+                    &format!("Remove authorization for {}?", terminal_label(&name)),
+                    &choices,
+                    1,
+                )? != 0
+                {
+                    return Ok(());
+                }
+                workspace(
+                    store,
+                    Some(WorkspaceCommand::Remove { id: Some(id) }),
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Select(index) => {
+                let Some(record) = config.workspaces.get(index) else {
+                    continue;
+                };
+                workspace(
+                    store,
+                    Some(WorkspaceCommand::Sessions { id: record.id }),
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Key { .. } => {}
+        }
     }
 }
 
@@ -329,7 +338,7 @@ use crate::commands::shared::{
     default_host_name, display_workspace_path, load_or_ephemeral_config, plural,
     prepare_running_service_mutation, refresh_running_service, terminal_label,
 };
-use crate::{print_cli_help, usage_error};
+use crate::usage_error;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WorkspaceSessionOutput {

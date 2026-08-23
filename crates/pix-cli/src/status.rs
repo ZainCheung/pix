@@ -802,10 +802,10 @@ pub(crate) fn status_command(store: &ConfigStore, output: CommandOutput) -> Resu
         home::render_overview(&overview, SetupUi::new(true, false), true);
         return Ok(());
     }
-    legacy_status_command(store)
+    legacy_status_command(store, &overview)
 }
 
-pub(crate) fn legacy_status_command(store: &ConfigStore) -> Result<()> {
+pub(crate) fn legacy_status_command(store: &ConfigStore, overview: &HostOverview) -> Result<()> {
     println!("Pix status");
     println!("  config: {}", store.path().display());
     match store.load() {
@@ -825,10 +825,14 @@ pub(crate) fn legacy_status_command(store: &ConfigStore) -> Result<()> {
                 Some(url) => println!("  relay: {url} (disabled)"),
                 None => println!("  relay: not configured"),
             }
-            if let Some(pi) = &config.preferences.pi_executable {
-                println!("  pi: configured ({})", pi.display());
+            let pi_source = if config.preferences.pi_executable.is_some() {
+                "configured"
             } else {
-                println!("  pi: PATH discovery");
+                "PATH discovery"
+            };
+            match &overview.pi.version {
+                Some(version) => println!("  pi: {pi_source} ({version})"),
+                None => println!("  pi: {pi_source}"),
             }
         }
         Err(pix_core::config::ConfigError::Read { source, .. })

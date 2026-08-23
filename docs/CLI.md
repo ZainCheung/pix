@@ -55,7 +55,6 @@ command inventory lives in `skills/pix-cli/SKILL.md`.
 
 ```sh
 pix setup
-pix doctor
 pix status
 pix logs --tail 50
 ```
@@ -71,14 +70,9 @@ pix setup --no-pair --no-service --non-interactive \
   --workspace "$HOME/Projects/my-project"
 ```
 
-`pix doctor` checks the local configuration, Pi executable, version, and RPC
-capabilities. Use `--pi /path/to/pi` for a one-off probe or `pix pi set` to
-persist an explicit executable. Add `--verbose` when support needs local
-paths and environment details.
-
-`pix status` prints configuration and host-service state. `pix logs` prints
-payload-free host log entries; use `pix service logs` for the same log through
-the service subcommand.
+`pix status` prints configuration, host-service state, and the resolved Pi
+executable with its version. `pix logs` prints payload-free host log entries;
+use `pix service logs` for the same log through the service subcommand.
 
 ## Workspaces
 

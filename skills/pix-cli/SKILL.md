@@ -48,18 +48,22 @@ Read-only first. Most commands are safe; mutations are marked.
 
 | Command | JSON `command` | Notes |
 | --- | --- | --- |
-| `pix status` | `status` | Config state, Pi source, service state, relay mode, device/workspace counts. Does not create config. |
-| `pix doctor` | `doctor` | Checks config and Pi RPC prerequisites. |
+| `pix status` | `status` | Config state, resolved Pi executable/version/support, service state, relay mode, device/workspace counts. Does not create config. |
 | `pix logs [--tail N]` | `logs` | Recent host log entries (payload-free). |
 
 `status.data` example:
 
 ```json
-{"config_state": "ready", "host": "Zain's Mac", "pi": {"source": "path"},
+{"config_state": "ready", "host": "Zain's Mac",
+ "pi": {"source": "path", "executable": "/opt/homebrew/bin/pi",
+        "version": "1.2.3", "supported": true},
  "service": {"state": "running", "installed": true},
  "access": {"mode": "local", "relay_enabled": false},
  "devices": 2, "workspaces": 3}
 ```
+
+`pi.version` is absent when no Pi executable resolves; treat that as a
+setup gap, not an empty value.
 
 `config_state` is one of `missing`, `ready`, or a broken state that
 `pix doctor` explains.

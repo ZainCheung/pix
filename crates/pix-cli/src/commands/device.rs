@@ -9,7 +9,7 @@ use pix_core::ConfigStore;
 use serde::{Deserialize, Serialize};
 
 use crate::output::CommandOutput;
-use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
+use crate::setup_ui::{ListRow, PickerAction, SetupUi};
 use crate::status::HostServiceControl;
 
 pub(crate) fn approve_pairing(
@@ -507,63 +507,132 @@ pub(crate) fn normalize_confirmation_code(value: &str) -> Result<String> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn device_menu(store: &ConfigStore, output: CommandOutput) -> Result<()> {
-    let config = load_or_ephemeral_config(store)?;
-    let ui = SetupUi::new(true, false);
-    ui.crumb_header("Devices");
-    ui.status_row(
-        "paired",
-        &format!(
-            "{} device{}",
-            config.devices.len(),
-            plural(config.devices.len())
-        ),
-        if config.devices.is_empty() {
-            UiTone::Warning
+    loop {
+        let config = load_or_ephemeral_config(store)?;
+        let ui = SetupUi::new(true, false);
+        ui.crumb_header("Devices");
+        let columns: Vec<(String, String)> = config
+            .devices
+            .iter()
+            .map(|device| {
+                (
+                    device.name.clone(),
+                    format!("paired {}", device.paired_at.format("%Y-%m-%d")),
+                )
+            })
+            .collect();
+        let rows: Vec<ListRow<'_>> = columns
+            .iter()
+            .map(|(name, paired)| ListRow::new(name, paired))
+            .collect();
+        let hints: &[(&str, &str)] = if rows.is_empty() {
+            &[("P", "pair")]
         } else {
-            UiTone::Default
-        },
-    );
-    println!();
-    let mut actions = vec![
-        (
-            Some(DeviceCommand::Pair { remote: false }),
-            MenuItem::new("Pair a device", "Connect another iPhone"),
-        ),
-        (
-            Some(DeviceCommand::Approve {
-                request: None,
-                code: None,
-            }),
-            MenuItem::new("Approve pairing", "Review a waiting confirmation code"),
-        ),
-        (
-            Some(DeviceCommand::Reject {
-                request: None,
-                code: None,
-            }),
-            MenuItem::new("Reject pairing", "Deny a waiting pairing request"),
-        ),
-    ];
-    if !config.devices.is_empty() {
-        actions.push((
-            Some(DeviceCommand::Revoke { id: None }),
-            MenuItem::new("Revoke a device", "Remove host access immediately"),
-        ));
-        actions.push((
-            Some(DeviceCommand::List),
-            MenuItem::new("List devices", "Show paired device details"),
-        ));
-    }
-    actions.push((None, MenuItem::new("Back", "Return to the shell")));
-    let items = actions.iter().map(|(_, item)| *item).collect::<Vec<_>>();
-    match ui.menu("Actions", &items, 0)? {
-        MenuResult::Selected(index) => match actions.swap_remove(index).0 {
-            Some(command) => device(store, Some(command), output, true),
-            None => Ok(()),
-        },
-        MenuResult::Help => print_cli_help(),
-        MenuResult::Quit => Ok(()),
+            &[
+                ("P", "pair"),
+                ("R", "revoke"),
+                ("A", "approve"),
+                ("D", "deny"),
+            ]
+        };
+        match ui.picker(&rows, hints, "No paired devices yet.")? {
+            PickerAction::Quit => return Ok(()),
+            PickerAction::Key { key: 'p', .. } => {
+                device(
+                    store,
+                    Some(DeviceCommand::Pair { remote: false }),
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Key { key: 'r', selected } => {
+                let Some(record) = config.devices.get(selected) else {
+                    continue;
+                };
+                let choices = vec!["Revoke device".to_owned(), "Cancel".to_owned()];
+                if ui.select(
+                    &format!(
+                        "Revoke {} and close its connections?",
+                        terminal_label(&record.name)
+                    ),
+                    &choices,
+                    1,
+                )? != 0
+                {
+                    return Ok(());
+                }
+                device(
+                    store,
+                    Some(DeviceCommand::Revoke {
+                        id: Some(record.id.clone()),
+                    }),
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Key { key: 'a', .. } => {
+                ui.section("Pairing requests");
+                let requests = pending_pairings(store)?;
+                if requests.is_empty() {
+                    ui.muted("No pairing requests are waiting for approval.");
+                    continue;
+                }
+                let options = requests
+                    .iter()
+                    .map(|request| {
+                        format!(
+                            "{}   code {}",
+                            terminal_label(&request.device_name),
+                            format_confirmation_code(&request.confirmation_code)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let choice = ui.select("Approve which request?", &options, 0)?;
+                handle_pairing_request(
+                    store,
+                    Some(requests[choice].id),
+                    None,
+                    "approve",
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Key { key: 'd', .. } => {
+                ui.section("Pairing requests");
+                let requests = pending_pairings(store)?;
+                if requests.is_empty() {
+                    ui.muted("No pairing requests are waiting for approval.");
+                    continue;
+                }
+                let options = requests
+                    .iter()
+                    .map(|request| {
+                        format!(
+                            "{}   code {}",
+                            terminal_label(&request.device_name),
+                            format_confirmation_code(&request.confirmation_code)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let choice = ui.select("Deny which request?", &options, 0)?;
+                handle_pairing_request(
+                    store,
+                    Some(requests[choice].id),
+                    None,
+                    "reject",
+                    output,
+                    true,
+                )?;
+            }
+            PickerAction::Select(index) => {
+                if let Some(record) = config.devices.get(index) {
+                    ui.muted(&format!("id {}", record.id));
+                }
+            }
+            PickerAction::Key { .. } => {}
+        }
     }
 }
 
@@ -597,9 +666,9 @@ use crate::DeviceCommand;
 use crate::commands::setup::{SetupPairingOptions, run_setup_pairing};
 use crate::commands::shared::{
     default_host_name, format_confirmation_code, host_service_control_live,
-    load_or_ephemeral_config, plural, short_id, terminal_label,
+    load_or_ephemeral_config, short_id, terminal_label,
 };
 use crate::serve::DeviceEvent;
 use crate::serve::{HostLog, ServeEvent, ServeOutput, emit_command_error, emit_event};
-use crate::{print_cli_help, usage_error};
+use crate::usage_error;
 use crate::{service, service_client};

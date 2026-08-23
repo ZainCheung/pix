@@ -3,7 +3,6 @@
 //! JSON envelopes.
 
 pub(crate) mod device;
-pub(crate) mod doctor;
 pub(crate) mod pi;
 pub(crate) mod relay;
 pub(crate) mod session;
