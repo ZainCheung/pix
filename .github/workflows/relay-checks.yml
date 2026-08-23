@@ -2,12 +2,6 @@ name: Relay checks
 
 on:
   workflow_call:
-    inputs:
-      deploy:
-        description: Deploy the Worker after checks pass
-        required: false
-        default: false
-        type: boolean
 
 jobs:
   check:
@@ -27,30 +21,3 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run typecheck
-
-  deploy:
-    name: Deploy Pix Relay
-    if: inputs.deploy
-    needs: check
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: relay-production
-    concurrency:
-      group: relay-production
-      cancel-in-progress: false
-    defaults:
-      run:
-        working-directory: relay
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: relay/package-lock.json
-      - run: npm ci
-      - name: Deploy Worker
-        run: npm run deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

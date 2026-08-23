@@ -92,6 +92,9 @@ while IFS= read -r path; do
         crates/*)
             mark_all
             ;;
+        relay/README.md)
+            relay=true
+            ;;
         relay/*)
             relay=true
             relay_deploy=true

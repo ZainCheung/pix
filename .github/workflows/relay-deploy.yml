@@ -9,6 +9,41 @@ permissions:
 jobs:
   deploy:
     name: Validate and deploy Pix Relay
-    uses: ./.github/workflows/relay-checks.yml
-    with:
-      deploy: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: relay-production
+    concurrency:
+      group: relay-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - name: Validate Cloudflare deployment credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -eu
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error title=Missing Cloudflare API token::relay-production must provide CLOUDFLARE_API_TOKEN"
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error title=Missing Cloudflare account ID::relay-production must provide CLOUDFLARE_ACCOUNT_ID"
+            exit 1
+          fi
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy

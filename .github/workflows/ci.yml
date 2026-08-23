@@ -36,6 +36,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
+      - name: Test path classifier
+        run: .github/scripts/test-detect-ci-changes.sh
       - id: classify
         name: Classify changed paths
         env:
@@ -73,8 +75,51 @@ jobs:
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.relay == 'true'
     uses: ./.github/workflows/relay-checks.yml
-    with:
-      deploy: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.changes.outputs.relay_deploy == 'true' }}
+
+  relay-deploy:
+    name: Deploy Pix Relay
+    needs: [changes, relay]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.relay_deploy == 'true' &&
+      needs.relay.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: relay-production
+    concurrency:
+      group: relay-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+      - name: Validate Cloudflare deployment credentials
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -eu
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error title=Missing Cloudflare API token::relay-production must provide CLOUDFLARE_API_TOKEN"
+            exit 1
+          fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::error title=Missing Cloudflare account ID::relay-production must provide CLOUDFLARE_ACCOUNT_ID"
+            exit 1
+          fi
+      - name: Deploy Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run deploy
 
   apple-wire:
     name: Apple pix-wire
@@ -139,7 +184,7 @@ jobs:
   ci-gate:
     name: CI gate
     if: always()
-    needs: [changes, rust, relay, apple-wire, macos-app, linux-packaging]
+    needs: [changes, rust, relay, relay-deploy, apple-wire, macos-app, linux-packaging]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -148,6 +193,7 @@ jobs:
           CHANGES_RESULT: ${{ needs.changes.result }}
           RUST_RESULT: ${{ needs.rust.result }}
           RELAY_RESULT: ${{ needs.relay.result }}
+          RELAY_DEPLOY_RESULT: ${{ needs.relay-deploy.result }}
           APPLE_RESULT: ${{ needs.apple-wire.result }}
           MACOS_RESULT: ${{ needs.macos-app.result }}
           LINUX_RESULT: ${{ needs.linux-packaging.result }}
@@ -157,6 +203,7 @@ jobs:
             "$CHANGES_RESULT" \
             "$RUST_RESULT" \
             "$RELAY_RESULT" \
+            "$RELAY_DEPLOY_RESULT" \
             "$APPLE_RESULT" \
             "$MACOS_RESULT" \
             "$LINUX_RESULT"; do
