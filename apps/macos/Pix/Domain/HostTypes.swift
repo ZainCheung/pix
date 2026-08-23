@@ -11,7 +11,7 @@ enum HostStatus: Equatable {
         case .starting: String(localized: "Starting")
         case .ready: String(localized: "Ready")
         case .needsSetup: String(localized: "Setup needed")
-        case .failed: String(localized: "Unavailable")
+        case .failed: String(localized: "Error")
         }
     }
 
@@ -28,6 +28,15 @@ enum HostStatus: Equatable {
         case .ready: .success
         case .needsSetup: .warning
         case .failed: .danger
+        }
+    }
+
+    var menuSymbolName: String {
+        switch self {
+        case .starting: "clock"
+        case .ready: "checkmark.circle.fill"
+        case .needsSetup: "exclamationmark.triangle.fill"
+        case .failed: "xmark.circle.fill"
         }
     }
 }
@@ -61,6 +70,49 @@ struct ActiveSession: Identifiable, Equatable {
 
     var isRunning: Bool {
         state == "running"
+    }
+}
+
+struct WorkspaceSession: Identifiable, Equatable {
+    let id: String
+    let workspaceID: UUID
+    let title: String?
+    let modifiedAt: Date
+    let messageCount: Int
+    var activeSession: ActiveSession?
+
+    var displayTitle: String {
+        guard let title, !title.isEmpty else {
+            return String(localized: "Untitled Session")
+        }
+        return title
+    }
+
+    init(
+        id: String,
+        workspaceID: UUID,
+        title: String?,
+        modifiedAt: Date,
+        messageCount: Int,
+        activeSession: ActiveSession? = nil
+    ) {
+        self.id = id
+        self.workspaceID = workspaceID
+        self.title = title
+        self.modifiedAt = modifiedAt
+        self.messageCount = messageCount
+        self.activeSession = activeSession
+    }
+
+    init(activeSession: ActiveSession, workspaceID: UUID) {
+        self.init(
+            id: activeSession.id,
+            workspaceID: workspaceID,
+            title: nil,
+            modifiedAt: .distantPast,
+            messageCount: 0,
+            activeSession: activeSession
+        )
     }
 }
 
