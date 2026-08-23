@@ -418,12 +418,9 @@ pub(crate) fn prepare_setup_environment(
                     .preferences
                     .pi_executable
                     .as_deref()
-                    .map(|path| path.to_string_lossy().into_owned());
-                let path = ui.input("Pi executable", current.as_deref())?;
-                if path.trim().is_empty() {
-                    ui.warning("Pi executable is required", None);
-                } else {
-                    config.preferences.pi_executable = Some(PathBuf::from(path));
+                    .map(|path| path.display().to_string());
+                if let Some(path) = prompt_pi_executable(ui, current.as_deref())? {
+                    config.preferences.pi_executable = Some(path);
                 }
             }
             2 => bail!("setup cancelled"),
@@ -443,161 +440,160 @@ pub(crate) fn setup_advanced(
     let baseline = config.clone();
     ui.crumb_header("Advanced setup");
 
-    let host_name = ui.input("Host name", Some(&config.host.display_name))?;
-    if !host_name.trim().is_empty() {
-        config.host.display_name = host_name;
-    }
-
-    ui.section("Pi");
-    let mut pi_choices = vec!["Auto-detect from PATH".to_owned()];
-    if let Some(path) = &config.preferences.pi_executable {
-        pi_choices.push(path.display().to_string());
-    }
-    pi_choices.push("Choose another executable...".to_owned());
-    let pi_choice = ui.select("Pi executable", &pi_choices, 0)?;
-    if pi_choice == pi_choices.len() - 1 {
-        let current_pi = config
-            .preferences
-            .pi_executable
-            .as_deref()
-            .map(|value| value.to_string_lossy().into_owned());
-        let path = ui.input("Pi executable", current_pi.as_deref())?;
-        if !path.trim().is_empty() {
-            config.preferences.pi_executable = Some(PathBuf::from(path));
+    // "Go back" restarts the form with every earlier answer kept as the
+    // default, instead of discarding the draft and re-running quick setup.
+    let (install_service, relay) = loop {
+        let host_name = ui.input("Host name", Some(&config.host.display_name))?;
+        if !host_name.trim().is_empty() {
+            config.host.display_name = host_name;
         }
-    } else if pi_choice == 0 {
-        config.preferences.pi_executable = None;
-    }
 
-    ui.section("Connectivity");
-    let connectivity = ui.multiselect(
-        "Choose connection methods:",
-        &[
-            "Local network".to_owned(),
-            "Relay".to_owned(),
-            "Custom direct endpoint".to_owned(),
-        ],
-        &[true, true, false],
-    )?;
-    if connectivity.get(2).copied().unwrap_or(false) {
-        ui.warning(
-            "Custom direct endpoints are not available yet",
-            Some("Pix will continue with the selected local and relay methods."),
-        );
-    }
-    let relay = if connectivity.get(1).copied().unwrap_or(false) {
-        let default = config
-            .preferences
-            .active_relay_url()
-            .unwrap_or(DEFAULT_RELAY_URL);
-        let value = ui.input("Relay URL", Some(default))?;
-        let relay = validate_relay_url(&value)?;
-        config.preferences.relay_url = Some(relay.clone());
-        config.preferences.relay_enabled = true;
-        Some(relay)
-    } else {
-        config.preferences.relay_enabled = false;
-        None
-    };
-
-    ui.section("Workspace access");
-    let candidates = workspace_candidates();
-    let mut workspace_options = candidates
-        .iter()
-        .map(|(path, label)| format!("{}  {}", display_workspace_path(path), label))
-        .collect::<Vec<_>>();
-    workspace_options.push("Add another path...".to_owned());
-    let mut defaults = vec![false; workspace_options.len()];
-    if !candidates.is_empty() {
-        defaults[0] = true;
-    }
-    let selected = ui.multiselect(
-        "Select folders Pix can access:",
-        &workspace_options,
-        &defaults,
-    )?;
-    for (index, checked) in selected.iter().enumerate() {
-        if !checked {
-            continue;
+        ui.section("Pi");
+        let mut pi_choices = vec!["Auto-detect from PATH".to_owned()];
+        if let Some(path) = &config.preferences.pi_executable {
+            pi_choices.push(path.display().to_string());
         }
-        if index == candidates.len() {
-            let path = select_workspace_path(ui)?;
-            add_workspace(&mut config, path, None, ui)?;
-        } else if let Some((path, _)) = candidates.get(index) {
-            add_workspace(&mut config, path.clone(), None, ui)?;
+        pi_choices.push("Choose another executable...".to_owned());
+        let pi_choice = ui.select("Pi executable", &pi_choices, 0)?;
+        if pi_choice == pi_choices.len() - 1 {
+            let current_pi = config
+                .preferences
+                .pi_executable
+                .as_deref()
+                .map(|value| value.display().to_string());
+            if let Some(path) = prompt_pi_executable(ui, current_pi.as_deref())? {
+                config.preferences.pi_executable = Some(path);
+            }
+        } else if pi_choice == 0 {
+            config.preferences.pi_executable = None;
         }
-    }
-    if config.workspaces.is_empty() {
-        let path = select_workspace_path(ui)?;
-        add_workspace(&mut config, path, None, ui)?;
-    }
 
-    ui.section("Background service");
-    let service_choices = vec![
-        "Yes, recommended".to_owned(),
-        "No, I'll run Pix manually".to_owned(),
-    ];
-    let install_service = !options.no_service
-        && ui.select(
-            "Start Pix automatically when this computer boots?",
-            &service_choices,
-            0,
-        )? == 0;
-
-    ui.section("Review");
-    ui.hint(&format!(
-        "Host\n  {}",
-        terminal_label(&config.host.display_name)
-    ));
-    ui.hint(&format!(
-        "Pi\n  {}",
-        config
-            .preferences
-            .pi_executable
-            .as_deref()
-            .map_or("Auto-detect from PATH".to_owned(), |path| path
-                .display()
-                .to_string())
-    ));
-    ui.hint(&format!(
-        "Connectivity\n  {}",
-        if relay.is_some() {
-            "Local network\n  Pix Relay"
+        ui.section("Connectivity");
+        let connectivity = ui.multiselect(
+            "Choose connection methods:",
+            &[
+                "Local network".to_owned(),
+                "Relay".to_owned(),
+                "Custom direct endpoint".to_owned(),
+            ],
+            &[true, true, false],
+        )?;
+        if connectivity.get(2).copied().unwrap_or(false) {
+            ui.warning(
+                "Custom direct endpoints are not available yet",
+                Some("Pix will continue with the selected local and relay methods."),
+            );
+        }
+        let relay = if connectivity.get(1).copied().unwrap_or(false) {
+            let default = config
+                .preferences
+                .active_relay_url()
+                .unwrap_or(DEFAULT_RELAY_URL);
+            let value = ui.input("Relay URL", Some(default))?;
+            let relay = validate_relay_url(&value)?;
+            config.preferences.relay_url = Some(relay.clone());
+            config.preferences.relay_enabled = true;
+            Some(relay)
         } else {
-            "Local network"
-        }
-    ));
-    ui.hint(&format!(
-        "Workspaces\n  {}",
-        config
-            .workspaces
+            config.preferences.relay_enabled = false;
+            None
+        };
+
+        ui.section("Workspace access");
+        let candidates = workspace_candidates();
+        let mut workspace_options = candidates
             .iter()
-            .map(|item| display_workspace_path(&item.path))
-            .collect::<Vec<_>>()
-            .join("\n  ")
-    ));
-    ui.hint(&format!(
-        "Background service\n  {}",
-        if install_service {
-            "Enabled"
-        } else {
-            "Disabled"
+            .map(|(path, label)| format!("{}  {}", display_workspace_path(path), label))
+            .collect::<Vec<_>>();
+        workspace_options.push("Add another path...".to_owned());
+        let mut defaults = vec![false; workspace_options.len()];
+        if !candidates.is_empty() {
+            defaults[0] = true;
         }
-    ));
-    let review_choices = vec![
-        "Continue".to_owned(),
-        "Go back".to_owned(),
-        "Cancel".to_owned(),
-    ];
-    match ui.select("", &review_choices, 0)? {
-        1 => {
-            let mut quick_options = options.clone();
-            quick_options.no_service = !install_service;
-            return setup_quick(store, config, &quick_options, ui, started_at);
+        let selected = ui.multiselect(
+            "Select folders Pix can access:",
+            &workspace_options,
+            &defaults,
+        )?;
+        for (index, checked) in selected.iter().enumerate() {
+            if !checked {
+                continue;
+            }
+            if index == candidates.len() {
+                let path = select_workspace_path(ui, "Add a workspace:")?;
+                add_workspace(&mut config, path, None, ui)?;
+            } else if let Some((path, _)) = candidates.get(index) {
+                add_workspace(&mut config, path.clone(), None, ui)?;
+            }
         }
-        2 => bail!("setup cancelled"),
-        _ => {}
-    }
+        if config.workspaces.is_empty() {
+            let path = select_workspace_path(ui, "Choose your first workspace:")?;
+            add_workspace(&mut config, path, None, ui)?;
+        }
+
+        ui.section("Background service");
+        let service_choices = vec![
+            "Yes, recommended".to_owned(),
+            "No, I'll run Pix manually".to_owned(),
+        ];
+        let install_service = !options.no_service
+            && ui.select(
+                "Start Pix automatically when this computer boots?",
+                &service_choices,
+                0,
+            )? == 0;
+
+        ui.section("Review");
+        ui.hint(&format!(
+            "Host\n  {}",
+            terminal_label(&config.host.display_name)
+        ));
+        ui.hint(&format!(
+            "Pi\n  {}",
+            config
+                .preferences
+                .pi_executable
+                .as_deref()
+                .map_or("Auto-detect from PATH".to_owned(), |path| path
+                    .display()
+                    .to_string())
+        ));
+        ui.hint(&format!(
+            "Connectivity\n  {}",
+            if relay.is_some() {
+                "Local network\n  Pix Relay"
+            } else {
+                "Local network"
+            }
+        ));
+        ui.hint(&format!(
+            "Workspaces\n  {}",
+            config
+                .workspaces
+                .iter()
+                .map(|item| display_workspace_path(&item.path))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        ));
+        ui.hint(&format!(
+            "Background service\n  {}",
+            if install_service {
+                "Enabled"
+            } else {
+                "Disabled"
+            }
+        ));
+        let review_choices = vec![
+            "Continue".to_owned(),
+            "Go back".to_owned(),
+            "Cancel".to_owned(),
+        ];
+        match ui.select("", &review_choices, 0)? {
+            2 => bail!("setup cancelled"),
+            1 => {}
+            _ => break (install_service, relay),
+        }
+    };
 
     if ui.interactive() {
         ui.section("Checking this computer");
@@ -736,7 +732,7 @@ pub(crate) fn configure_setup_workspace(
 
     let path = match options.workspace.clone() {
         Some(path) => expand_home(path),
-        None if interactive => select_workspace_path(ui)?,
+        None if interactive => select_workspace_path(ui, "Choose your first workspace:")?,
         None => bail!("setup needs --workspace when no authorized workspace exists"),
     };
     let canonical = std::fs::canonicalize(&path)
@@ -771,14 +767,35 @@ pub(crate) fn configure_setup_workspace(
     Ok(Some(displayed))
 }
 
-pub(crate) fn select_workspace_path(ui: SetupUi) -> Result<PathBuf> {
+/// Prompts for a Pi executable with the same rigor as workspace paths:
+/// `~` expands, the file must exist, and an empty answer keeps the current
+/// setting instead of storing a literal `~` path that never resolves.
+pub(crate) fn prompt_pi_executable(ui: SetupUi, current: Option<&str>) -> Result<Option<PathBuf>> {
+    loop {
+        let value = ui.input("Pi executable", current)?;
+        if value.trim().is_empty() {
+            return Ok(None);
+        }
+        let path = expand_home(PathBuf::from(value));
+        match std::fs::canonicalize(&path) {
+            Ok(path) if path.is_file() => return Ok(Some(path)),
+            Ok(_) => ui.error("Pi executable must be a file", None),
+            Err(_) => ui.error(
+                "Pi executable was not found",
+                Some(&format!("resolved to {}", path.display())),
+            ),
+        }
+    }
+}
+
+pub(crate) fn select_workspace_path(ui: SetupUi, prompt: &str) -> Result<PathBuf> {
     let candidates = workspace_candidates();
     let mut options = candidates
         .iter()
         .map(|(path, label)| format!("{:<36} {}", display_workspace_path(path), label))
         .collect::<Vec<_>>();
     options.push("Enter another path...".to_owned());
-    let selected = ui.select("Choose your first workspace:", &options, 0)?;
+    let selected = ui.select(prompt, &options, 0)?;
     if selected < candidates.len() {
         return Ok(candidates[selected].0.clone());
     }
@@ -830,7 +847,11 @@ pub(crate) fn workspace_candidates() -> Vec<(PathBuf, &'static str)> {
     candidates
 }
 
-#[allow(clippy::needless_pass_by_value, clippy::unnecessary_wraps)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::unnecessary_wraps,
+    clippy::too_many_lines
+)]
 pub(crate) fn verify_setup(
     store: &ConfigStore,
     config: &pix_core::HostConfig,
@@ -900,16 +921,26 @@ pub(crate) fn verify_setup(
         }
     );
     ui.hint("Device");
-    let device = config.devices.first().map_or_else(
-        || "○ Offline".to_owned(),
-        |item| format!("✓ {}", terminal_label(&item.name)),
-    );
+    let device = match config.devices.len() {
+        0 => "○ None paired yet".to_owned(),
+        1 => format!("✓ {}", terminal_label(&config.devices[0].name)),
+        count => format!(
+            "✓ {} and {} more",
+            terminal_label(&config.devices[0].name),
+            count - 1
+        ),
+    };
     println!("  {}", ui.paint(&device, "\x1b[97m", false));
     ui.hint("Workspace");
-    let workspace = config.workspaces.first().map_or_else(
-        || "None".to_owned(),
-        |item| display_workspace_path(&item.path),
-    );
+    let workspace = match config.workspaces.len() {
+        0 => "None".to_owned(),
+        1 => display_workspace_path(&config.workspaces[0].path),
+        count => format!(
+            "{} (+{} more)",
+            display_workspace_path(&config.workspaces[0].path),
+            count - 1
+        ),
+    };
     println!("  {}", ui.paint(&workspace, "\x1b[97m", false));
     ui.hint("Remote access");
     println!(
@@ -928,9 +959,9 @@ pub(crate) fn verify_setup(
     ui.body("Open Pix on your iPhone to start.");
     println!();
     ui.hint("Useful commands");
-    println!("    pix status       Check this host");
-    println!("    pix pair         Pair another device");
-    println!("    pix workspace    Manage workspaces");
+    println!("  pix status         Check this host");
+    println!("  pix device pair    Pair another device");
+    println!("  pix workspace      Manage workspaces");
     println!();
     let seconds = elapsed.as_secs();
     ui.hint(&format!("Pi {pi_version}  •  Done in {seconds}s"));
@@ -1300,10 +1331,7 @@ pub(crate) fn install_setup_service(
                     ];
                     match ui.select("", &choices, 0)? {
                         1 => {}
-                        2 => {
-                            ui.hint(&format!("{error:#}"));
-                            return Ok(false);
-                        }
+                        2 => ui.hint(&format!("{error:#}")),
                         _ => return Ok(false),
                     }
                 }

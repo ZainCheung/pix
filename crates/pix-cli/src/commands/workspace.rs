@@ -254,7 +254,7 @@ pub(crate) fn workspace_menu(store: &ConfigStore, output: CommandOutput) -> Resu
         match ui.picker(&rows, hints, "No authorized workspaces yet.")? {
             PickerAction::Quit => return Ok(()),
             PickerAction::Key { key: 'a', .. } => {
-                let path = select_workspace_path(ui)?;
+                let path = select_workspace_path(ui, "Add a workspace:")?;
                 workspace(
                     store,
                     Some(WorkspaceCommand::Add { path, name: None }),
