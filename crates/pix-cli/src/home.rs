@@ -13,7 +13,6 @@ pub(crate) enum HomeAction {
     Devices,
     Workspaces,
     Status,
-    Update,
     Settings,
     Commands,
     Quit,
@@ -238,7 +237,8 @@ impl HostOverview {
 }
 
 pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
-    render_overview(overview, ui, false);
+    let update_available = latest_version_hint();
+    render_overview(overview, ui, false, update_available.as_deref());
     let (actions, default) = match overview.config_state {
         ConfigState::Ready => (
             vec![
@@ -255,16 +255,8 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                     MenuItem::new("Status", "Show detailed host state"),
                 ),
                 (
-                    HomeAction::Update,
-                    MenuItem::new("Update", "Upgrade pix from the latest release"),
-                ),
-                (
                     HomeAction::Settings,
                     MenuItem::new("Settings", "Configure remote access"),
-                ),
-                (
-                    HomeAction::Quit,
-                    MenuItem::new("Quit", "Return to the shell"),
                 ),
             ],
             0,
@@ -288,16 +280,8 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                     MenuItem::new("Status", "Show detailed host state"),
                 ),
                 (
-                    HomeAction::Update,
-                    MenuItem::new("Update", "Upgrade pix from the latest release"),
-                ),
-                (
                     HomeAction::Settings,
                     MenuItem::new("Settings", "Configure remote access"),
-                ),
-                (
-                    HomeAction::Quit,
-                    MenuItem::new("Quit", "Return to the shell"),
                 ),
             ],
             0,
@@ -313,16 +297,8 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                     MenuItem::new("Repair setup", "Review setup after diagnosing the error"),
                 ),
                 (
-                    HomeAction::Update,
-                    MenuItem::new("Update", "Upgrade pix from the latest release"),
-                ),
-                (
                     HomeAction::Commands,
                     MenuItem::new("Show commands", "Open the complete CLI reference"),
-                ),
-                (
-                    HomeAction::Quit,
-                    MenuItem::new("Quit", "Return to the shell"),
                 ),
             ],
             0,
@@ -336,7 +312,12 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
     }
 }
 
-pub(crate) fn render_overview(overview: &HostOverview, ui: SetupUi, detailed: bool) {
+pub(crate) fn render_overview(
+    overview: &HostOverview,
+    ui: SetupUi,
+    detailed: bool,
+    update_available: Option<&str>,
+) {
     if detailed {
         ui.crumb_header("Status");
     } else {
@@ -348,6 +329,12 @@ pub(crate) fn render_overview(overview: &HostOverview, ui: SetupUi, detailed: bo
             "  {}",
             ui.paint(concat!("pix ", env!("CARGO_PKG_VERSION")), DIM, false)
         );
+        if let Some(latest) = update_available {
+            ui.warning(
+                &format!("Pix {latest} is available"),
+                Some("run `pix update` to upgrade"),
+            );
+        }
         println!();
     }
 
@@ -427,6 +414,16 @@ pub(crate) fn render_overview(overview: &HostOverview, ui: SetupUi, detailed: bo
         }
     }
     println!();
+}
+
+/// A silent, fast-failing release check so the home screen can suggest an
+/// upgrade without ever delaying the product on a slow network.
+fn latest_version_hint() -> Option<String> {
+    if std::env::var_os("PIX_NO_UPDATE_CHECK").is_some() {
+        return None;
+    }
+    let latest = crate::commands::update::latest_version()?;
+    (latest != env!("CARGO_PKG_VERSION")).then_some(latest)
 }
 
 #[cfg(test)]

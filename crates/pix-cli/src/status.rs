@@ -808,7 +808,7 @@ pub(crate) fn status_command(store: &ConfigStore, output: CommandOutput) -> Resu
         return output.success("status", &overview);
     }
     if std::io::stdout().is_terminal() {
-        home::render_overview(&overview, SetupUi::new(true, false), true);
+        home::render_overview(&overview, SetupUi::new(true, false), true, None);
         return Ok(());
     }
     legacy_status_command(store, &overview)

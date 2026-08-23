@@ -334,7 +334,6 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             HomeAction::Devices => device(&store, None, output, true),
             HomeAction::Workspaces => workspace(&store, None, output, true),
             HomeAction::Status => status_command(&store, output),
-            HomeAction::Update => update(&store, output),
             HomeAction::Settings => relay_command(&store, None, output, true),
             HomeAction::Commands => {
                 let mut command = Cli::command();
