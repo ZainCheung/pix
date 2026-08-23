@@ -161,7 +161,6 @@
 			buildPhases = (
 				EE64490715A6FCE964349756 /* Sources */,
 				0A4F9690C25E328AADF2CEFE /* Resources */,
-				A179258D394221375D47D09B /* Embed matching Pix CLI for Debug runs */,
 			);
 			buildRules = (
 			);
@@ -222,28 +221,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
-/* Begin PBXShellScriptBuildPhase section */
-		A179258D394221375D47D09B /* Embed matching Pix CLI for Debug runs */ = {
-			isa = PBXShellScriptBuildPhase;
-			alwaysOutOfDate = 1;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Embed matching Pix CLI for Debug runs";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "if [ \"${CONFIGURATION}\" != \"Debug\" ]; then\n  exit 0\nfi\nset -eu\nrepository_root=\"$(cd \"${SRCROOT}/../..\" && pwd)\"\ncargo_binary=\"$(command -v cargo || true)\"\nif [ -z \"${cargo_binary}\" ]; then\n  for candidate in \"/Users/zain/.cargo/bin/cargo\" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do\n    if [ -x \"${candidate}\" ]; then\n      cargo_binary=\"${candidate}\"\n      break\n    fi\n  done\nfi\ntest -n \"${cargo_binary}\"\n\"${cargo_binary}\" build --manifest-path \"${repository_root}/Cargo.toml\" -p pix-cli --locked\ncli_binary=\"${repository_root}/target/debug/pix\"\ntest -x \"${cli_binary}\"\nresources_path=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${resources_path}\"\ninstall -m 0755 \"${cli_binary}\" \"${resources_path}/pix\"\n";
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		43E297D390A12AAC1A295E8B /* Sources */ = {

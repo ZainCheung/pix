@@ -22,31 +22,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.pix.macos
         INFOPLIST_FILE: Pix/Info.plist
         CODE_SIGN_STYLE: Automatic
-    postBuildScripts:
-      - name: Embed matching Pix CLI for Debug runs
-        basedOnDependencyAnalysis: false
-        script: |
-          if [ "${CONFIGURATION}" != "Debug" ]; then
-            exit 0
-          fi
-          set -eu
-          repository_root="$(cd "${SRCROOT}/../.." && pwd)"
-          cargo_binary="$(command -v cargo || true)"
-          if [ -z "${cargo_binary}" ]; then
-            for candidate in "${HOME}/.cargo/bin/cargo" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do
-              if [ -x "${candidate}" ]; then
-                cargo_binary="${candidate}"
-                break
-              fi
-            done
-          fi
-          test -n "${cargo_binary}"
-          "${cargo_binary}" build --manifest-path "${repository_root}/Cargo.toml" -p pix-cli --locked
-          cli_binary="${repository_root}/target/debug/pix"
-          test -x "${cli_binary}"
-          resources_path="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}"
-          mkdir -p "${resources_path}"
-          install -m 0755 "${cli_binary}" "${resources_path}/pix"
     scheme:
       testTargets:
         - PixTests

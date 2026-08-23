@@ -8,8 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use pix_core::{
     ConfigStore, HostEnvironment, HostIdentityStore, HostService, HostServiceEvent, HostState,
-    PairingCoordinator, PiProbe, PiSessionStore, RuntimeManager, RuntimeManagerOptions,
-    WorkspaceRegistry,
+    PairingCoordinator, PiProbe, RuntimeManager, RuntimeManagerOptions, WorkspaceRegistry,
 };
 use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
@@ -153,8 +152,6 @@ enum WorkspaceCommand {
     },
     /// List authorized folders. Full paths are printed only on the host.
     List,
-    /// List every native Pi session stored for one authorized folder.
-    Sessions { id: uuid::Uuid },
     /// Remove an explicitly authorized folder by ID, or choose one
     /// interactively when the ID is omitted.
     Remove { id: Option<uuid::Uuid> },
@@ -983,48 +980,6 @@ struct SessionEvent {
     workspace: String,
     clients: usize,
     state: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-struct WorkspaceSessionOutput {
-    id: String,
-    title: Option<String>,
-    modified_at: String,
-    message_count: usize,
-}
-
-impl WorkspaceSessionOutput {
-    fn from_summary(summary: &pix_core::SessionSummary) -> Self {
-        let title = summary
-            .name
-            .as_deref()
-            .and_then(compact_session_title)
-            .or_else(|| {
-                summary
-                    .first_user_message
-                    .as_deref()
-                    .and_then(compact_session_title)
-            });
-        Self {
-            id: summary.id.to_string(),
-            title,
-            modified_at: summary.modified_at.to_rfc3339(),
-            message_count: summary.message_count,
-        }
-    }
-}
-
-fn compact_session_title(value: &str) -> Option<String> {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return None;
-    }
-    let mut characters = normalized.chars();
-    let mut title = characters.by_ref().take(120).collect::<String>();
-    if characters.next().is_some() {
-        title.push('…');
-    }
-    Some(title)
 }
 
 impl From<HostServiceEvent> for ServeEvent {
@@ -2984,21 +2939,6 @@ fn workspace(store: &ConfigStore, command: WorkspaceCommand) -> Result<()> {
             }
             Ok(())
         }
-        WorkspaceCommand::Sessions { id } => {
-            let mut config = store.load().context("loading Pix configuration")?;
-            let workspace = WorkspaceRegistry::new(&mut config)
-                .authorized_root(id)
-                .with_context(|| format!("resolving workspace {id}"))?;
-            let sessions = PiSessionStore::for_workspace(&workspace)
-                .context("locating workspace sessions")?
-                .list()
-                .context("listing workspace sessions")?;
-            for session in sessions {
-                let summary = WorkspaceSessionOutput::from_summary(&session.summary);
-                println!("{}", serde_json::to_string(&summary)?);
-            }
-            Ok(())
-        }
         WorkspaceCommand::Remove { id } => {
             let mut config = store.load().context("loading Pix configuration")?;
             let id = select_workspace_id(&config, id)?;
@@ -3102,8 +3042,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        ServeEvent, compact_session_title, format_confirmation_code, human_event, loggable_event,
-        pairing_instructions, render_remote_pairing, validate_relay_url,
+        ServeEvent, format_confirmation_code, human_event, loggable_event, pairing_instructions,
+        render_remote_pairing, validate_relay_url,
     };
 
     #[test]
@@ -3176,19 +3116,6 @@ mod tests {
         );
         assert!(validate_relay_url("https://relay.example.com").is_err());
         assert!(validate_relay_url("wss://relay.example.com/with space").is_err());
-    }
-
-    #[test]
-    fn session_titles_are_compacted_for_menu_rows() {
-        assert_eq!(
-            compact_session_title("  fix   menu\nhover  "),
-            Some("fix menu hover".to_owned())
-        );
-        let long = "x".repeat(130);
-        let title = compact_session_title(&long).expect("title");
-        assert_eq!(title.chars().count(), 121);
-        assert!(title.ends_with('…'));
-        assert_eq!(compact_session_title(" \n\t"), None);
     }
 
     #[cfg(unix)]
