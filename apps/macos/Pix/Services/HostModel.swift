@@ -552,7 +552,7 @@ final class HostModel {
         }
     }
 
-    private func apply(_ event: ServiceEvent) {
+    func apply(_ event: ServiceEvent) {
         switch event {
         case .ready:
             status = .ready
@@ -579,13 +579,20 @@ final class HostModel {
                 isRequestingRemotePairing = false
             }
         case .deviceList(let devices):
+            // The menu bar renders a presentation snapshot keyed to this
+            // revision. Socket-driven inventory changes must advance it too,
+            // or a phone paired after launch never appears in the menu.
             self.devices = devices
+            inventoryRevision += 1
         case .deviceRevoked(let id):
             devices.removeAll { $0.id == id }
+            inventoryRevision += 1
         case .sessionList(let sessions):
             self.sessions = sessions
+            inventoryRevision += 1
         case .sessionReleased(let id):
             sessions.removeAll { $0.id == id }
+            inventoryRevision += 1
         case .relayConfigured(let url):
             relayConfiguration = RelayConfiguration(url: url, isEnabled: true)
         case .relayChannel:
@@ -1270,7 +1277,7 @@ private enum HostModelError: LocalizedError {
     }
 }
 
-private enum ServiceEvent: Decodable {
+enum ServiceEvent: Decodable {
     case ready
     case pairingRequested(PairingRequestEvent)
     case connectionEstablished
@@ -1399,7 +1406,7 @@ private struct WorkspaceSessionRecord: Decodable {
     }
 }
 
-private struct PairingRequestEvent {
+struct PairingRequestEvent {
     let id: UUID
     let deviceName: String
     let confirmationCode: String

@@ -307,3 +307,22 @@ func setupRecommendsProductRelay() {
     #expect(HostModel.normalizedRelayURL(HostModel.defaultRelayURL) != nil)
     #expect(HostModel.normalizedRelayURL("not a url") == nil)
 }
+
+@Test("socket device lists advance the menu inventory revision")
+@MainActor
+func socketDeviceListAdvancesMenuInventory() throws {
+    let model = HostModel()
+    let before = model.inventoryRevision
+    let event = try JSONDecoder().decode(
+        ServiceEvent.self,
+        from: Data(
+            """
+            {"type":"device_list","devices":[{"id":"abc","name":"iPhone","paired_at":"2026-08-24T00:00:00Z"}]}
+            """.utf8
+        )
+    )
+    model.apply(event)
+    #expect(model.devices.count == 1)
+    #expect(model.devices.first?.name == "iPhone")
+    #expect(model.inventoryRevision == before + 1)
+}
