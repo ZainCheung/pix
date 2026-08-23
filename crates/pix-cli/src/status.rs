@@ -343,12 +343,16 @@ impl HostServiceControl {
                     // accepted Unix sockets. This command path reads one
                     // complete line synchronously, so restore blocking mode
                     // before applying the bounded read timeout.
-                    stream
-                        .set_nonblocking(false)
-                        .context("configuring blocking host service control")?;
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(1)))
-                        .context("configuring host service control client")?;
+                    // A client that already closed (probe-style connect and
+                    // drop) can make socket setup fail on macOS with EINVAL.
+                    // Its connection is dropped; the host keeps serving.
+                    if stream.set_nonblocking(false).is_err()
+                        || stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                            .is_err()
+                    {
+                        return Ok(None);
+                    }
                     let mut reader = BufReader::new(stream);
                     let mut line = String::new();
                     match reader
@@ -727,6 +731,11 @@ pub fn request_control_rpc(
             "the running Pix host predates versioned control responses; restart it with `pix service restart` and retry"
         );
     }
+    if response.trim().is_empty() {
+        bail!(
+            "the running Pix host closed the control connection without a response; it is likely older than this CLI — restart it with `pix service restart` and retry"
+        );
+    }
     if response.len() as u64 > MAX_CONTROL_REQUEST_BYTES {
         bail!("host control response is too large");
     }
@@ -945,6 +954,33 @@ mod tests {
         assert_eq!(line.trim(), r#"{"type":"ready"}"#);
         assert!(!HostServiceStatus::event_socket_path_for(&config_path).is_file());
         assert!(HostServiceStatus::event_socket_path_for(&config_path).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_clients_never_kill_the_host() {
+        use std::os::unix::net::UnixStream;
+        use std::time::{Duration, Instant};
+
+        // `host_service_control_live` probes liveness by connecting and
+        // dropping immediately. On macOS the daemon may accept that socket
+        // after the peer vanished; socket setup must degrade to dropping
+        // the connection instead of failing the whole host.
+        let directory = tempdir().expect("temp dir");
+        let config_path = directory.path().join("config.json");
+        let control =
+            super::HostServiceControl::bind(&config_path).expect("bind host service sockets");
+        for _ in 0..8 {
+            drop(
+                UnixStream::connect(HostServiceStatus::control_socket_path_for(&config_path))
+                    .expect("probe connect"),
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            // The loop must keep accepting after each dead peer.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let _ = control.try_next_command().expect("poll after probe");
+            let _ = deadline;
+        }
     }
 
     #[cfg(unix)]
