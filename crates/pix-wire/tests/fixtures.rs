@@ -40,7 +40,11 @@ fn named_fixtures(prefix: &str, suffix: &str) -> Vec<PathBuf> {
 #[test]
 fn every_client_request_fixture_is_canonical() {
     let fixtures = named_fixtures("client-", ".json");
-    assert_eq!(fixtures.len(), 17, "one golden file per client request");
+    assert_eq!(
+        fixtures.len(),
+        22,
+        "one golden file per client request, plus capability, attachment, and attachment-bearing prompt variants"
+    );
     for path in fixtures {
         let bytes = fixture_bytes(&path);
         let decoded = ClientEnvelope::decode(&bytes)
@@ -59,8 +63,8 @@ fn every_server_event_fixture_is_canonical() {
     let fixtures = named_fixtures("server-", ".json");
     assert_eq!(
         fixtures.len(),
-        19,
-        "one golden file per server event, plus the relay-bearing host snapshot"
+        21,
+        "one golden file per server event, plus relay, enriched snapshot, and queue variants"
     );
     for path in fixtures {
         let bytes = fixture_bytes(&path);

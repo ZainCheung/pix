@@ -177,7 +177,9 @@ fn remote_pairing_end_to_end_over_a_real_relay() {
     let link = Link::connect_relay(&relay_url, &device_secret).expect("device channel reachable");
     let (mut session, _) = phone.reconnect(link).expect("IK over the device channel");
     session
-        .request(pix_wire::ClientRequest::HostSnapshot)
+        .request(pix_wire::ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        })
         .expect("authenticated snapshot over the device channel");
 
     // A dropped route must come back with IK on the same durable channel.

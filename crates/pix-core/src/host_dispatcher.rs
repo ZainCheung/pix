@@ -4,10 +4,12 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use pix_wire::{
-    ClientEnvelope, ClientRequest, ErrorCode, HostSnapshot, HostSummary, PROTOCOL_MAJOR,
-    RelayAccess, ServerEnvelope, ServerEvent, SessionState, SessionSummary as WireSessionSummary,
-    WorkspaceAvailability, WorkspaceSummary,
+    ClientEnvelope, ClientRequest, ErrorCode, HOST_CAPABILITIES, HostSnapshot, HostSummary,
+    PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
+    SessionSummary as WireSessionSummary, WorkspaceAvailability, WorkspaceSummary,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -15,7 +17,8 @@ use uuid::Uuid;
 use crate::config::{ConfigError, HostConfig};
 use crate::pi_bridge::{self, PiBridgeError};
 use crate::pi_rpc::{
-    ExtensionUiAnswer as PiExtensionUiAnswer, PiCommand, PiEvent, ThinkingLevel as PiThinkingLevel,
+    ExtensionUiAnswer as PiExtensionUiAnswer, PiCommand, PiEvent, PiImage,
+    ThinkingLevel as PiThinkingLevel,
 };
 use crate::runtime_manager::{RuntimeManager, RuntimeManagerError};
 use crate::session::{DiscoveredSession, PiSessionStore, SessionError, SessionMetadataIndex};
@@ -24,6 +27,18 @@ use crate::workspace::{WorkspaceError, WorkspaceRegistry};
 
 const WORKSPACE_AVAILABILITY_TTL: Duration = Duration::from_secs(10);
 const MAX_SESSION_LIST: u32 = 200;
+/// Idle lifetime of a not-yet-consumed attachment upload.
+const ATTACHMENT_IDLE_TTL: Duration = Duration::from_secs(600);
+/// Attachment uploads buffered per connection.
+const MAX_PENDING_ATTACHMENTS: usize = 4;
+/// Ceiling on total base64 image bytes in one Pi prompt command; keeps the
+/// Pi RPC JSONL record comfortably below its 16 MiB limit.
+const MAX_PROMPT_IMAGE_BASE64_BYTES: usize = 12 * 1024 * 1024;
+const CAPABILITY_COMMANDS: &str = "commands.v1";
+const CAPABILITY_QUEUE: &str = "queue.v1";
+const CAPABILITY_ATTACHMENTS: &str = "attachments.v1";
+const CAPABILITY_USAGE: &str = "usage.v1";
+const CAPABILITY_THINKING_LEVELS: &str = "thinking_levels.v1";
 
 /// Shared, conversation-free host configuration visible to all connections.
 pub struct HostState {
@@ -90,6 +105,23 @@ pub struct HostProtocolDispatcher {
     device_id: Option<String>,
     attached_sessions: HashSet<SessionId>,
     event_receivers: HashMap<SessionId, mpsc::Receiver<PiEvent>>,
+    /// Optional protocol extensions the connected client declared. Every
+    /// gated field and event is omitted until the declaration arrives.
+    client_capabilities: HashSet<String>,
+    /// In-memory attachment uploads staged on this connection. Dropped on
+    /// disconnect, expiry, or the prompt that consumes them.
+    attachments: HashMap<String, PendingAttachment>,
+}
+
+/// One assembling attachment upload. Bytes exist only between `begin` and the
+/// prompt that consumes them; nothing is written to durable storage.
+struct PendingAttachment {
+    session_id: SessionId,
+    mime_type: String,
+    expected_size: usize,
+    buffer: Vec<u8>,
+    ready: bool,
+    updated: Instant,
 }
 
 impl HostProtocolDispatcher {
@@ -101,6 +133,8 @@ impl HostProtocolDispatcher {
             device_id: None,
             attached_sessions: HashSet::new(),
             event_receivers: HashMap::new(),
+            client_capabilities: HashSet::new(),
+            attachments: HashMap::new(),
         }
     }
 
@@ -162,6 +196,14 @@ impl HostProtocolDispatcher {
                 ServerEvent::SessionState { state, .. } => {
                     self.runtimes.mark_state(session_id, *state);
                 }
+                ServerEvent::SessionQueue { queue, .. } => {
+                    // Cache unconditionally so a reconnect that declares
+                    // `queue.v1` still recovers the live queue text.
+                    self.runtimes.record_queue(session_id, queue.clone());
+                    if !self.client_capabilities.contains(CAPABILITY_QUEUE) {
+                        return Ok(None);
+                    }
+                }
                 ServerEvent::Compaction { .. } => self
                     .runtimes
                     .mark_state(session_id, SessionState::Compacting),
@@ -217,9 +259,11 @@ impl HostProtocolDispatcher {
             let _ = self.runtimes.detach(session_id);
         }
         self.event_receivers.clear();
+        self.attachments.clear();
     }
 
     pub(crate) fn prepare_dispatch(&mut self, envelope: ClientEnvelope) -> Vec<PendingResponse> {
+        self.sweep_expired_attachments();
         let request_id = envelope.request_id;
         match self.handle(envelope.request) {
             Ok(events) => events
@@ -256,9 +300,12 @@ impl HostProtocolDispatcher {
     fn handle(&mut self, request: ClientRequest) -> Result<Vec<PendingEvent>, DispatchError> {
         self.ensure_device_authorized()?;
         match request {
-            ClientRequest::HostSnapshot => Ok(vec![ready(ServerEvent::HostSnapshot {
-                snapshot: self.host_snapshot(),
-            })]),
+            ClientRequest::HostSnapshot { capabilities } => {
+                self.client_capabilities = capabilities.into_iter().collect();
+                Ok(vec![ready(ServerEvent::HostSnapshot {
+                    snapshot: self.host_snapshot(),
+                })])
+            }
             ClientRequest::HostDefaults => {
                 let defaults = self.runtimes.pi_model_defaults();
                 crate::diagnostics::record(
@@ -316,21 +363,46 @@ impl HostProtocolDispatcher {
             ClientRequest::SessionPrompt {
                 session_id,
                 content,
-            } => self.command_ack(
-                &session_id,
-                &PiCommand::Prompt {
-                    message: content,
-                    streaming_behavior: None,
-                },
-            ),
+                attachments,
+            } => {
+                let images = self.take_attachment_images(&session_id, &attachments)?;
+                self.command_ack(
+                    &session_id,
+                    &PiCommand::Prompt {
+                        message: content,
+                        streaming_behavior: None,
+                        images,
+                    },
+                )
+            }
             ClientRequest::SessionSteer {
                 session_id,
                 content,
-            } => self.command_ack(&session_id, &PiCommand::Steer { message: content }),
+                attachments,
+            } => {
+                let images = self.take_attachment_images(&session_id, &attachments)?;
+                self.command_ack(
+                    &session_id,
+                    &PiCommand::Steer {
+                        message: content,
+                        images,
+                    },
+                )
+            }
             ClientRequest::SessionFollowUp {
                 session_id,
                 content,
-            } => self.command_ack(&session_id, &PiCommand::FollowUp { message: content }),
+                attachments,
+            } => {
+                let images = self.take_attachment_images(&session_id, &attachments)?;
+                self.command_ack(
+                    &session_id,
+                    &PiCommand::FollowUp {
+                        message: content,
+                        images,
+                    },
+                )
+            }
             ClientRequest::SessionAbort { session_id } => {
                 self.command_ack(&session_id, &PiCommand::Abort)
             }
@@ -375,6 +447,81 @@ impl HostProtocolDispatcher {
                     response: extension_answer(answer),
                 },
             ),
+            ClientRequest::AttachmentBegin {
+                session_id,
+                attachment_id,
+                mime_type,
+                size,
+            } => {
+                let session_id = self.require_attached(&session_id)?;
+                self.require_capability(CAPABILITY_ATTACHMENTS)?;
+                if self.attachments.contains_key(&attachment_id) {
+                    return Err(DispatchError::InvalidAttachment(
+                        "Attachment ID is already in use",
+                    ));
+                }
+                if self.attachments.len() >= MAX_PENDING_ATTACHMENTS {
+                    return Err(DispatchError::InvalidAttachment(
+                        "Too many pending attachments on this connection",
+                    ));
+                }
+                let expected_size = usize::try_from(size).map_err(|_| {
+                    DispatchError::InvalidAttachment("Attachment size is invalid for this host")
+                })?;
+                self.attachments.insert(
+                    attachment_id,
+                    PendingAttachment {
+                        session_id,
+                        mime_type,
+                        expected_size,
+                        buffer: Vec::new(),
+                        ready: false,
+                        updated: Instant::now(),
+                    },
+                );
+                Ok(vec![ready(ServerEvent::RequestAck)])
+            }
+            ClientRequest::AttachmentChunk {
+                attachment_id,
+                data,
+            } => {
+                self.require_capability(CAPABILITY_ATTACHMENTS)?;
+                let attachment = self.attachments.get_mut(&attachment_id).ok_or(
+                    DispatchError::InvalidAttachment("Attachment upload was not found"),
+                )?;
+                if attachment.ready {
+                    return Err(DispatchError::InvalidAttachment(
+                        "Attachment upload is already finished",
+                    ));
+                }
+                let bytes = STANDARD.decode(&data).map_err(|_| {
+                    DispatchError::InvalidAttachment("Attachment chunk is not canonical base64")
+                })?;
+                if attachment.buffer.len() + bytes.len() > attachment.expected_size {
+                    self.attachments.remove(&attachment_id);
+                    return Err(DispatchError::InvalidAttachment(
+                        "Attachment chunks exceed the declared size",
+                    ));
+                }
+                attachment.buffer.extend_from_slice(&bytes);
+                attachment.updated = Instant::now();
+                Ok(vec![ready(ServerEvent::RequestAck)])
+            }
+            ClientRequest::AttachmentFinish { attachment_id } => {
+                self.require_capability(CAPABILITY_ATTACHMENTS)?;
+                let attachment = self.attachments.get_mut(&attachment_id).ok_or(
+                    DispatchError::InvalidAttachment("Attachment upload was not found"),
+                )?;
+                if attachment.buffer.len() != attachment.expected_size {
+                    self.attachments.remove(&attachment_id);
+                    return Err(DispatchError::InvalidAttachment(
+                        "Attachment byte count does not match the declared size",
+                    ));
+                }
+                attachment.ready = true;
+                attachment.updated = Instant::now();
+                Ok(vec![ready(ServerEvent::RequestAck)])
+            }
         }
     }
 
@@ -388,6 +535,10 @@ impl HostProtocolDispatcher {
             },
             workspaces: self.cached_workspace_summaries(&config),
             relay: self.relay_access(&config),
+            capabilities: HOST_CAPABILITIES
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
         };
         let response_bytes = serde_json::to_vec(&snapshot)
             .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
@@ -613,9 +764,99 @@ impl HostProtocolDispatcher {
         self.ensure_device_authorized()?;
         self.ensure_active_session_authorized(session_id)?;
         let snapshot = self.runtimes.snapshot(session_id)?;
-        Ok(ServerEvent::SessionSnapshot {
-            snapshot: pi_bridge::session_snapshot(session_id, snapshot)?,
-        })
+        let mut snapshot = pi_bridge::session_snapshot(session_id, snapshot)?;
+        if self.client_capabilities.contains(CAPABILITY_COMMANDS) {
+            match self.runtimes.request(session_id, &PiCommand::GetCommands) {
+                Ok(response) => match pi_bridge::commands(&response) {
+                    Ok(commands) => snapshot.commands = commands,
+                    Err(_) => {
+                        crate::diagnostics::record("session.commands", &[("failed", 1)]);
+                    }
+                },
+                Err(_) => {
+                    crate::diagnostics::record("session.commands", &[("failed", 1)]);
+                }
+            }
+        }
+        if self.client_capabilities.contains(CAPABILITY_QUEUE) {
+            snapshot.queue = self.runtimes.queue(session_id);
+        }
+        if self.client_capabilities.contains(CAPABILITY_USAGE)
+            && let Ok(response) = self
+                .runtimes
+                .request(session_id, &PiCommand::GetSessionStats)
+            && let Ok(usage) = pi_bridge::usage(&response)
+        {
+            snapshot.usage = Some(usage);
+        }
+        if self
+            .client_capabilities
+            .contains(CAPABILITY_THINKING_LEVELS)
+            && let Some(model) = snapshot.model.as_mut()
+            && let Ok(response) = self
+                .runtimes
+                .request(session_id, &PiCommand::GetAvailableThinkingLevels)
+            && let Ok(levels) = pi_bridge::thinking_levels(&response)
+        {
+            model.thinking_levels = levels;
+        }
+        Ok(ServerEvent::SessionSnapshot { snapshot })
+    }
+
+    /// Resolves finished attachment uploads into Pi images and consumes them.
+    /// An empty reference list needs no capability and changes nothing.
+    fn take_attachment_images(
+        &mut self,
+        session_id: &str,
+        attachments: &[String],
+    ) -> Result<Vec<PiImage>, DispatchError> {
+        if attachments.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.require_capability(CAPABILITY_ATTACHMENTS)?;
+        let session_id = self.require_attached(session_id)?;
+        let mut images = Vec::with_capacity(attachments.len());
+        let mut total_base64 = 0_usize;
+        for attachment_id in attachments {
+            let attachment =
+                self.attachments
+                    .remove(attachment_id)
+                    .ok_or(DispatchError::InvalidAttachment(
+                        "Attachment upload was not found",
+                    ))?;
+            if !attachment.ready {
+                return Err(DispatchError::InvalidAttachment(
+                    "Attachment upload is not finished",
+                ));
+            }
+            if attachment.session_id != session_id {
+                return Err(DispatchError::InvalidAttachment(
+                    "Attachment belongs to a different session",
+                ));
+            }
+            let data = STANDARD.encode(&attachment.buffer);
+            total_base64 += data.len() + attachment.mime_type.len();
+            images.push(PiImage::new(attachment.mime_type, data));
+        }
+        if total_base64 > MAX_PROMPT_IMAGE_BASE64_BYTES {
+            return Err(DispatchError::InvalidAttachment(
+                "Attachment payload is too large for one Pi prompt",
+            ));
+        }
+        Ok(images)
+    }
+
+    fn require_capability(&self, capability: &'static str) -> Result<(), DispatchError> {
+        if self.client_capabilities.contains(capability) {
+            Ok(())
+        } else {
+            Err(DispatchError::MissingCapability(capability))
+        }
+    }
+
+    fn sweep_expired_attachments(&mut self) {
+        self.attachments
+            .retain(|_, attachment| attachment.updated.elapsed() < ATTACHMENT_IDLE_TTL);
     }
 
     fn subscribe_session(&mut self, session_id: SessionId) -> Result<(), DispatchError> {
@@ -826,6 +1067,10 @@ pub enum DispatchError {
     UnauthorizedSession(SessionId),
     #[error("authenticated device is no longer authorized")]
     DeviceRevoked,
+    #[error("attachment transfer is invalid: {0}")]
+    InvalidAttachment(&'static str),
+    #[error("connection did not declare capability {0}")]
+    MissingCapability(&'static str),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
@@ -853,6 +1098,12 @@ impl DispatchError {
             Self::DeviceRevoked => (
                 ErrorCode::Unauthorized,
                 "Device authorization is no longer valid",
+                false,
+            ),
+            Self::InvalidAttachment(message) => (ErrorCode::InvalidRequest, *message, false),
+            Self::MissingCapability(_) => (
+                ErrorCode::InvalidRequest,
+                "This client did not declare the capability this request requires",
                 false,
             ),
             Self::UnauthorizedSession(_)

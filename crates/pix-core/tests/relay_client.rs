@@ -486,7 +486,12 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
         transport: handshake.into_transport().expect("phone transport"),
         request_id: 0,
     };
-    let snapshot = secure.request(&mut phone, ClientRequest::HostSnapshot);
+    let snapshot = secure.request(
+        &mut phone,
+        ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
+    );
     let ServerEvent::HostSnapshot { snapshot } = snapshot.event else {
         panic!("expected host snapshot, got {:?}", snapshot.event);
     };
@@ -521,7 +526,12 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
         transport: probe_ik.into_transport().expect("probe transport"),
         request_id: 0,
     };
-    let response = probe_secure.request(&mut probe, ClientRequest::HostSnapshot);
+    let response = probe_secure.request(
+        &mut probe,
+        ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
+    );
     assert!(matches!(response.event, ServerEvent::HostSnapshot { .. }));
     probe.close();
 
@@ -557,7 +567,12 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
         transport: ik.into_transport().expect("IK transport"),
         request_id: 0,
     };
-    let response = secure.request(&mut phone, ClientRequest::HostSnapshot);
+    let response = secure.request(
+        &mut phone,
+        ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
+    );
     assert!(matches!(response.event, ServerEvent::HostSnapshot { .. }));
     phone.close();
     wait_for_relay_event(
@@ -581,7 +596,12 @@ fn relay_bridges_pairing_ik_reconnect_and_stays_ciphertext_only() {
         transport: ik.into_transport().expect("IK transport"),
         request_id: 0,
     };
-    let response = secure.request(&mut phone, ClientRequest::HostSnapshot);
+    let response = secure.request(
+        &mut phone,
+        ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
+    );
     assert!(matches!(response.event, ServerEvent::HostSnapshot { .. }));
     phone.close();
 

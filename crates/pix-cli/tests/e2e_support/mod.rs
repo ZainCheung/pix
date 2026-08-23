@@ -707,7 +707,9 @@ impl Phone {
         let request = ClientEnvelope {
             protocol: PROTOCOL_MAJOR,
             request_id: 1,
-            request: ClientRequest::HostSnapshot,
+            request: ClientRequest::HostSnapshot {
+                capabilities: Vec::new(),
+            },
         }
         .encode()
         .expect("encode snapshot request");
@@ -752,7 +754,9 @@ impl Phone {
             transport: handshake.into_transport().expect("IK transport"),
             next_request_id: 0,
         };
-        let response = session.request(ClientRequest::HostSnapshot)?;
+        let response = session.request(ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        })?;
         let info = snapshot_info(&response);
         self.relay_access = info.relay.clone().or(self.relay_access.take());
         Ok((session, info))

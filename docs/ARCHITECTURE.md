@@ -68,3 +68,14 @@ session storage.
 - Relay loss changes reachability only; Pi continues locally.
 - Logs are payload-free and never contain prompts, files, model output, keys,
   tokens, or relay secrets.
+- Wire extensions are capability-gated per connection: a host never emits a
+  gated event or field to a client that did not declare it
+  (`protocol/schema/v1.md`).
+- Image attachments assemble in host memory only, bounded per connection, and
+  are consumed by the prompt that references them; nothing is persisted.
+
+## Pi RPC coverage
+
+`docs/PI_RPC_COVERAGE.md` tracks which Pi RPC commands and events are
+exposed, capability-gated, or intentionally omitted. Pi-specific field names
+stop at `pix-core/src/pi_bridge.rs`.

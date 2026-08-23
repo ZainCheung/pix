@@ -54,7 +54,9 @@ fn host_and_relay_survive_restarts_and_stalled_readers() {
     let (_session_two, _) = phone.reconnect(second).expect("second IK supersedes");
     assert!(
         session_one
-            .request(pix_wire::ClientRequest::HostSnapshot)
+            .request(pix_wire::ClientRequest::HostSnapshot {
+                capabilities: Vec::new()
+            })
             .is_err(),
         "the superseded route must be closed"
     );

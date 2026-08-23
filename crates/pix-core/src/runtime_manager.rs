@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
-use pix_wire::{HostModelDefaults, SessionState};
+use pix_wire::{HostModelDefaults, SessionQueue, SessionState};
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
@@ -64,6 +64,9 @@ struct ManagedRuntime {
     last_used: Instant,
     completed: bool,
     phase: RuntimePhase,
+    /// Last `queue_update` contents. Ephemeral reconnect state: it dies with
+    /// the runtime and never reaches durable storage.
+    queue: Option<SessionQueue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,6 +610,29 @@ impl RuntimeManager {
         );
     }
 
+    /// Records the latest steering and follow-up queue reported by Pi so a
+    /// reconnecting client can recover queue text without a Pi round trip.
+    pub fn record_queue(&self, session_id: SessionId, queue: SessionQueue) {
+        if let Some(managed) = self
+            .runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&session_id)
+        {
+            managed.queue = Some(queue);
+        }
+    }
+
+    /// Returns the last recorded queue for an active runtime.
+    #[must_use]
+    pub fn queue(&self, session_id: SessionId) -> Option<SessionQueue> {
+        self.runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .and_then(|managed| managed.queue.clone())
+    }
+
     #[must_use]
     pub fn client_count(&self, session_id: SessionId) -> Option<usize> {
         self.runtimes
@@ -655,6 +681,7 @@ impl RuntimeManager {
                     last_used: Instant::now(),
                     completed: false,
                     phase: RuntimePhase::Starting,
+                    queue: None,
                 },
             );
         Ok(())
