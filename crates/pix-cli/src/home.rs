@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::commands::shared::terminal_label;
 use crate::service;
-use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
+use crate::setup_ui::{DIM, MenuItem, MenuResult, SetupUi, UiTone};
 use crate::status::HostServiceStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,9 +13,18 @@ pub(crate) enum HomeAction {
     Devices,
     Workspaces,
     Status,
+    Update,
+    Settings,
     Commands,
     Quit,
 }
+
+const LOGO: &str = r"  _____ _
+ |  __ (_)
+ | |__) |__  __
+ |  ___/ \ \/ /
+ | |   | |>  <
+ |_|   |_/_/\_";
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HostOverview {
@@ -234,10 +243,6 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
         ConfigState::Ready => (
             vec![
                 (
-                    HomeAction::Setup,
-                    MenuItem::new("Manage Pix", "Setup, relay, and host options"),
-                ),
-                (
                     HomeAction::Devices,
                     MenuItem::new("Devices", "Pair, approve, or revoke a phone"),
                 ),
@@ -247,7 +252,15 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
                 ),
                 (
                     HomeAction::Status,
-                    MenuItem::new("Check status", "Show detailed host state"),
+                    MenuItem::new("Status", "Show detailed host state"),
+                ),
+                (
+                    HomeAction::Update,
+                    MenuItem::new("Update", "Upgrade pix from the latest release"),
+                ),
+                (
+                    HomeAction::Settings,
+                    MenuItem::new("Settings", "Configure remote access"),
                 ),
                 (
                     HomeAction::Quit,
@@ -260,11 +273,27 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
             vec![
                 (
                     HomeAction::Setup,
-                    MenuItem::new("Set up Pix", "Prepare this computer for remote Pi access"),
+                    MenuItem::new("Setup", "Prepare this computer for remote Pi access"),
                 ),
                 (
-                    HomeAction::Commands,
-                    MenuItem::new("Show commands", "Open the complete CLI reference"),
+                    HomeAction::Devices,
+                    MenuItem::new("Devices", "Pair, approve, or revoke a phone"),
+                ),
+                (
+                    HomeAction::Workspaces,
+                    MenuItem::new("Workspaces", "Authorize or remove host folders"),
+                ),
+                (
+                    HomeAction::Status,
+                    MenuItem::new("Status", "Show detailed host state"),
+                ),
+                (
+                    HomeAction::Update,
+                    MenuItem::new("Update", "Upgrade pix from the latest release"),
+                ),
+                (
+                    HomeAction::Settings,
+                    MenuItem::new("Settings", "Configure remote access"),
                 ),
                 (
                     HomeAction::Quit,
@@ -277,11 +306,15 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
             vec![
                 (
                     HomeAction::Status,
-                    MenuItem::new("Check status", "Inspect the invalid host configuration"),
+                    MenuItem::new("Status", "Inspect the invalid host configuration"),
                 ),
                 (
                     HomeAction::Setup,
                     MenuItem::new("Repair setup", "Review setup after diagnosing the error"),
+                ),
+                (
+                    HomeAction::Update,
+                    MenuItem::new("Update", "Upgrade pix from the latest release"),
                 ),
                 (
                     HomeAction::Commands,
@@ -307,7 +340,15 @@ pub(crate) fn render_overview(overview: &HostOverview, ui: SetupUi, detailed: bo
     if detailed {
         ui.crumb_header("Status");
     } else {
-        ui.brand_header(Some("Remote access for Pi"));
+        println!();
+        for line in LOGO.lines() {
+            println!("  {}", ui.cyan(line, true));
+        }
+        println!(
+            "  {}",
+            ui.paint(concat!("pix ", env!("CARGO_PKG_VERSION")), DIM, false)
+        );
+        println!();
     }
 
     match overview.config_state {

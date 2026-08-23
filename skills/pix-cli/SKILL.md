@@ -50,6 +50,7 @@ Read-only first. Most commands are safe; mutations are marked.
 | --- | --- | --- |
 | `pix status` | `status` | Config state, resolved Pi executable/version/support, service state, relay mode, device/workspace counts. Does not create config. |
 | `pix logs [--tail N]` | `logs` | Recent host log entries (payload-free). |
+| `pix update` | `update` | Self-update from the latest GitHub release; reports `current`, `latest`, `updated`, `service_restart_required`. |
 
 `status.data` example:
 

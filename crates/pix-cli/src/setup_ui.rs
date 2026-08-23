@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, size};
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
+pub(crate) const RESET: &str = "\x1b[0m";
+pub(crate) const BOLD: &str = "\x1b[1m";
+pub(crate) const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
@@ -442,10 +442,6 @@ impl SetupUi {
         }
         print!("\r\n");
         self.raw_hint("↑↓ move   enter select   q quit   ? commands");
-        if redraw {
-            print!("\x1b[2K\r");
-        }
-        print!("  › ");
         io::stdout().flush().context("flushing Pix menu")?;
         Ok(())
     }
@@ -742,10 +738,6 @@ impl SetupUi {
         }
         print!("\r\n");
         self.raw_hint("↑↓ move   enter select");
-        if redraw {
-            print!("\x1b[2K\r");
-        }
-        print!("  › ");
         io::stdout().flush().context("flushing setup selection")?;
         Ok(())
     }
@@ -899,10 +891,6 @@ impl SetupUi {
         }
         print!("\r\n");
         self.raw_hint("↑↓ move   space toggle   enter continue");
-        if redraw {
-            print!("\x1b[2K\r");
-        }
-        print!("  › ");
         io::stdout()
             .flush()
             .context("flushing setup multi-select")?;

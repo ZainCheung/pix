@@ -74,6 +74,11 @@ pix setup --no-pair --no-service --non-interactive \
 executable with its version. `pix logs` prints payload-free host log entries;
 use `pix service logs` for the same log through the service subcommand.
 
+`pix update` upgrades the running executable (and the macOS app bundle) from
+the repository's latest GitHub release, mirroring the first-party installer.
+On a configured host, `pix setup` runs a health verification directly; relay
+settings live in `pix relay` (the home screen's Settings entry).
+
 ## Workspaces
 
 Pix never browses arbitrary paths. Add a canonical folder before a client can

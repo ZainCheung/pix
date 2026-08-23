@@ -25,6 +25,7 @@ use crate::commands::pi::pi_command;
 use crate::commands::relay::relay_command;
 use crate::commands::session::session;
 use crate::commands::setup::{SetupOptions, default_setup_options, setup};
+use crate::commands::update::update;
 use crate::commands::workspace::workspace;
 use crate::diagnostics::diagnostics_command;
 use crate::home::{HomeAction, HostOverview};
@@ -119,6 +120,8 @@ enum Command {
     },
     /// Show configuration and host-service runtime status.
     Status,
+    /// Update the pix executable from the latest GitHub release.
+    Update,
     /// Install, control, and inspect the platform user service.
     Service {
         #[command(subcommand)]
@@ -331,6 +334,8 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             HomeAction::Devices => device(&store, None, output, true),
             HomeAction::Workspaces => workspace(&store, None, output, true),
             HomeAction::Status => status_command(&store, output),
+            HomeAction::Update => update(&store, output),
+            HomeAction::Settings => relay_command(&store, None, output, true),
             HomeAction::Commands => {
                 let mut command = Cli::command();
                 command.print_long_help().context("printing Pix help")?;
@@ -378,6 +383,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
         Command::Relay { command } => relay_command(&store, command, output, interactive),
         Command::Logs { tail } => show_logs(&store, tail, output),
         Command::Status => status_command(&store, output),
+        Command::Update => update(&store, output),
         Command::Service { command } => service_command(&store, command, output, interactive),
         Command::Diagnostics { command } => diagnostics_command(&store, command, output),
         Command::Serve {

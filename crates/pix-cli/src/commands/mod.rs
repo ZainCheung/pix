@@ -8,4 +8,5 @@ pub(crate) mod relay;
 pub(crate) mod session;
 pub(crate) mod setup;
 pub(crate) mod shared;
+pub(crate) mod update;
 pub(crate) mod workspace;

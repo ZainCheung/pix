@@ -75,7 +75,7 @@ pub(crate) fn setup(store: &ConfigStore, options: &SetupOptions) -> Result<()> {
         && !options.no_pair
         && !options.no_service
     {
-        return setup_existing(store, config, options, ui);
+        return setup_existing(store, &config, options, ui);
     }
 
     let started_at = std::time::Instant::now();
@@ -130,14 +130,14 @@ pub(crate) fn setup_is_already_configured(
 #[allow(clippy::too_many_lines)]
 pub(crate) fn setup_existing(
     store: &ConfigStore,
-    config: pix_core::HostConfig,
-    options: &SetupOptions,
+    config: &pix_core::HostConfig,
+    _options: &SetupOptions,
     ui: SetupUi,
 ) -> Result<()> {
     ui.brand_header(None);
     ui.section("Pix is already set up on this computer");
     ui.success(
-        &format!("Pi {}", configured_pi_version(store, &config)),
+        &format!("Pi {}", configured_pi_version(store, config)),
         None,
     );
     ui.success(
@@ -168,105 +168,27 @@ pub(crate) fn setup_existing(
     if !ui.interactive() {
         return verify_setup(
             store,
-            &config,
+            config,
             ui,
-            configured_pi_version(store, &config),
+            configured_pi_version(store, config),
             config.preferences.active_relay_url().map(str::to_owned),
             false,
             std::time::Duration::ZERO,
         );
     }
 
-    let choices = vec![
-        "Check setup".to_owned(),
-        "Pair another device".to_owned(),
-        "Add workspace".to_owned(),
-        "Reconfigure Pix".to_owned(),
-        "Exit".to_owned(),
-    ];
-    let selected = ui.select("What would you like to do?", &choices, 0)?;
-    match selected {
-        1 => {
-            let mut config = config;
-            let relay = config.preferences.active_relay_url().map(str::to_owned);
-            let _relay = run_setup_pairing_with_recovery(
-                store,
-                &mut config,
-                relay,
-                options.yes,
-                true,
-                ui,
-                !options.no_service,
-            )?;
-            let service = install_setup_service(store, options.no_service, ui)?;
-            let final_config = store.load().context("reloading setup configuration")?;
-            verify_setup(
-                store,
-                &final_config,
-                ui,
-                configured_pi_version(store, &final_config),
-                final_config
-                    .preferences
-                    .active_relay_url()
-                    .map(str::to_owned),
-                service,
-                std::time::Duration::ZERO,
-            )
-        }
-        2 => {
-            let mut config = config;
-            let baseline = config.clone();
-            let mut existing_options = SetupOptions {
-                relay: None,
-                workspace: None,
-                workspace_name: None,
-                no_pair: true,
-                no_service: true,
-                yes: false,
-                non_interactive: false,
-                verbose: options.verbose,
-            };
-            configure_setup_workspace(&mut config, &existing_options, ui, true, true)?;
-            commit_setup_draft(store, &baseline, &mut config)?;
-            existing_options.no_pair = false;
-            existing_options.no_service = false;
-            verify_setup(
-                store,
-                &config,
-                ui,
-                configured_pi_version(store, &config),
-                config.preferences.active_relay_url().map(str::to_owned),
-                false,
-                std::time::Duration::ZERO,
-            )
-        }
-        3 => {
-            let mut config = config;
-            let baseline = config.clone();
-            let relay = configure_setup_relay(&mut config, options, ui, true)?;
-            configure_setup_workspace(&mut config, options, ui, true, true)?;
-            commit_setup_draft(store, &baseline, &mut config)?;
-            verify_setup(
-                store,
-                &config,
-                ui,
-                configured_pi_version(store, &config),
-                relay,
-                false,
-                std::time::Duration::ZERO,
-            )
-        }
-        0 => verify_setup(
-            store,
-            &config,
-            ui,
-            configured_pi_version(store, &config),
-            config.preferences.active_relay_url().map(str::to_owned),
-            false,
-            std::time::Duration::ZERO,
-        ),
-        _ => Ok(()),
-    }
+    // The Manage Pix menu is gone: pairing and workspaces live in their own
+    // list views, relay in Settings, and a configured host only needs the
+    // health verification when `pix setup` is run explicitly.
+    verify_setup(
+        store,
+        config,
+        ui,
+        configured_pi_version(store, config),
+        config.preferences.active_relay_url().map(str::to_owned),
+        false,
+        std::time::Duration::ZERO,
+    )
 }
 
 /// Commits setup's explicit host/preference choices and newly added
