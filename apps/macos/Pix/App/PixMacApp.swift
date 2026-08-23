@@ -21,7 +21,8 @@ struct PixMacApp: App {
             HostMenuView()
                 .environment(model)
         } label: {
-            StatusLabel(status: model.status)
+            StatusItemLabel()
+                .environment(model)
         }
         .menuBarExtraStyle(.menu)
 

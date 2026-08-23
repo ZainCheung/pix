@@ -18,7 +18,6 @@ struct SettingsView: View {
         .frame(width: 560, height: 360)
     }
 }
-
 private struct GeneralSettingsView: View {
     @Environment(HostModel.self) private var model
     @Environment(\.openWindow) private var openWindow
@@ -68,6 +67,15 @@ private struct GeneralSettingsView: View {
                         set: { model.setLaunchAtLogin($0) }
                     )
                 )
+            }
+            Section(String(localized: "Diagnostics")) {
+                Button(String(localized: "Refresh Diagnostics")) {
+                    model.refresh()
+                }
+                Text(String(localized: "Restarts the managed Host service and reloads its status and inventory."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section(String(localized: "Privacy")) {
                 Text(String(localized: "Pix keeps Pi sessions and conversation history on this Mac. The iPhone receives only authorized workspace and session data."))
