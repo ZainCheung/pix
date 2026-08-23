@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::commands::shared::terminal_label;
 use crate::service;
-use crate::setup_ui::{DIM, MenuItem, MenuResult, SetupUi, UiTone, YELLOW};
+use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
 use crate::status::HostServiceStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,13 +17,6 @@ pub(crate) enum HomeAction {
     Commands,
     Quit,
 }
-
-const LOGO: &str = r"  _____ _
- |  __ (_)
- | |__) |__  __
- |  ___/ \ \/ /
- | |   | |>  <
- |_|   |_/_/\_";
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HostOverview {
@@ -322,44 +315,9 @@ pub(crate) fn render_overview(
     if detailed {
         ui.crumb_header("Status");
     } else {
-        println!();
-        let banner = [
-            ("https://pix.deepoke.com", true),
-            ("Remote access for the Pi agent", false),
-        ];
-        let logo_lines: Vec<&str> = LOGO.lines().collect();
-        let banner_offset = logo_lines.len().saturating_sub(banner.len());
-        for (index, line) in logo_lines.iter().enumerate() {
-            let mut row = format!("  {line}");
-            if let Some((text, accent)) = index
-                .checked_sub(banner_offset)
-                .and_then(|slot| banner.get(slot))
-            {
-                let padded = format!("{line:<20}");
-                row = format!("  {padded}");
-                if *accent {
-                    row.push_str(&ui.cyan(text, false));
-                } else {
-                    row.push_str(&ui.paint(text, DIM, false));
-                }
-            }
-            println!("{row}");
-        }
-        println!(
-            "  {}",
-            ui.paint(concat!("pix ", env!("CARGO_PKG_VERSION")), DIM, false)
-        );
-        if let Some(latest) = update_available {
-            println!(
-                "  {}",
-                ui.paint(
-                    &format!("Update {latest} available, run pix update"),
-                    YELLOW,
-                    false
-                )
-            );
-        }
-        println!();
+        let hint =
+            update_available.map(|latest| format!("Update {latest} available, run pix update"));
+        ui.logo_header(hint.as_deref());
     }
 
     match overview.config_state {

@@ -86,6 +86,9 @@ enum Command {
         /// Show extra local diagnostics while setup runs.
         #[arg(long)]
         verbose: bool,
+        /// Expose every option instead of the recommended quick path.
+        #[arg(long)]
+        advanced: bool,
     },
     /// Manage explicitly authorized host folders.
     Workspace {
@@ -354,6 +357,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             no_service,
             yes,
             non_interactive,
+            advanced,
             verbose,
         } => {
             if output.is_json() {
@@ -371,6 +375,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
                     no_service,
                     yes,
                     non_interactive: non_interactive || cli.no_input,
+                    advanced,
                     verbose,
                 },
             )

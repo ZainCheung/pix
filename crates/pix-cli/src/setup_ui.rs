@@ -10,6 +10,13 @@ use anyhow::{Context, Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, is_raw_mode_enabled, size};
 
+pub(crate) const LOGO: &str = r"  _____ _
+ |  __ (_)
+ | |__) |__  __
+ |  ___/ \ \/ /
+ | |   | |>  <
+ |_|   |_/_/\_";
+
 pub(crate) const RESET: &str = "\x1b[0m";
 pub(crate) const BOLD: &str = "\x1b[1m";
 pub(crate) const DIM: &str = "\x1b[2m";
@@ -129,11 +136,36 @@ impl SetupUi {
         self.verbose
     }
 
-    pub(crate) fn brand_header(self, subtitle: Option<&str>) {
+    /// The product banner shared by the home screen and the setup wizard:
+    /// ASCII logo with a bottom-aligned right column (site, tagline) and the
+    /// CLI version, plus an optional one-line update hint.
+    pub(crate) fn logo_header(self, update_hint: Option<&str>) {
         println!();
-        println!("  {}", self.paint("pix", CYAN, true));
-        if let Some(subtitle) = subtitle {
-            println!("  {}", self.paint(subtitle, DIM, false));
+        let banner = [
+            ("https://pix.deepoke.com", true),
+            ("Remote access for the Pi agent", false),
+        ];
+        let lines: Vec<&str> = LOGO.lines().collect();
+        let offset = lines.len().saturating_sub(banner.len());
+        for (index, line) in lines.iter().enumerate() {
+            let mut row = format!("  {line:<20}");
+            if let Some((text, accent)) =
+                index.checked_sub(offset).and_then(|slot| banner.get(slot))
+            {
+                if *accent {
+                    row.push_str(&self.cyan(text, false));
+                } else {
+                    row.push_str(&self.paint(text, DIM, false));
+                }
+            }
+            println!("{row}");
+        }
+        println!(
+            "  {}",
+            self.paint(concat!("pix ", env!("CARGO_PKG_VERSION")), DIM, false)
+        );
+        if let Some(hint) = update_hint {
+            println!("  {}", self.paint(hint, YELLOW, false));
         }
         println!();
     }
@@ -675,7 +707,7 @@ impl SetupUi {
             );
         }
         println!();
-        self.hint("↑↓ move   enter select");
+        self.hint("↑↓ move   enter select   q quit");
         print!("  › ");
         io::stdout().flush().context("flushing setup selection")?;
 
@@ -737,7 +769,7 @@ impl SetupUi {
             print!("\x1b[2K\r");
         }
         print!("\r\n");
-        self.raw_hint("↑↓ move   enter select");
+        self.raw_hint("↑↓ move   enter select   q quit");
         io::stdout().flush().context("flushing setup selection")?;
         Ok(())
     }

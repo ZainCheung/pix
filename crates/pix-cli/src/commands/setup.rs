@@ -18,6 +18,7 @@ pub(crate) fn default_setup_options() -> SetupOptions {
         no_service: false,
         yes: false,
         non_interactive: false,
+        advanced: false,
         verbose: false,
     }
 }
@@ -32,6 +33,7 @@ pub(crate) struct SetupOptions {
     pub(crate) no_service: bool,
     pub(crate) yes: bool,
     pub(crate) non_interactive: bool,
+    pub(crate) advanced: bool,
     pub(crate) verbose: bool,
 }
 
@@ -85,42 +87,11 @@ pub(crate) fn setup(store: &ConfigStore, options: &SetupOptions) -> Result<()> {
     }
 
     let started_at = std::time::Instant::now();
-    let mode =
-        if interactive && options.relay.is_none() && options.workspace.is_none() && !options.yes {
-            setup_welcome(ui)?
-        } else {
-            SetupMode::Quick
-        };
-
-    match mode {
-        SetupMode::Quick => setup_quick(store, config, options, ui, started_at),
-        SetupMode::Advanced => setup_advanced(store, config, options, ui, started_at),
-        SetupMode::Exit => Ok(()),
+    if options.advanced {
+        setup_advanced(store, config, options, ui, started_at)
+    } else {
+        setup_quick(store, config, options, ui, started_at)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SetupMode {
-    Quick,
-    Advanced,
-    Exit,
-}
-
-pub(crate) fn setup_welcome(ui: SetupUi) -> Result<SetupMode> {
-    ui.brand_header(None);
-    ui.hint("Remote access for Pi");
-    ui.body("Set up this computer so you can use Pi from your phone.");
-    let options = vec![
-        "Quick setup".to_owned(),
-        "Advanced setup".to_owned(),
-        "Exit".to_owned(),
-    ];
-    let selected = ui.select("How would you like to set up Pix?", &options, 0)?;
-    Ok(match selected {
-        1 => SetupMode::Advanced,
-        2 => SetupMode::Exit,
-        _ => SetupMode::Quick,
-    })
 }
 
 pub(crate) fn setup_is_already_configured(
@@ -140,28 +111,36 @@ pub(crate) fn setup_existing(
     _options: &SetupOptions,
     ui: SetupUi,
 ) -> Result<()> {
-    ui.brand_header(None);
+    ui.logo_header(None);
     ui.section("Pix is already set up on this computer");
     ui.success(
         &format!("Pi {}", configured_pi_version(store, config)),
         None,
     );
-    ui.success(
-        &format!(
-            "{} paired device{}",
-            config.devices.len(),
-            plural(config.devices.len())
-        ),
-        None,
-    );
-    ui.success(
-        &format!(
-            "{} workspace{}",
-            config.workspaces.len(),
-            plural(config.workspaces.len())
-        ),
-        None,
-    );
+    if config.devices.is_empty() {
+        ui.muted("○ No paired devices yet");
+    } else {
+        ui.success(
+            &format!(
+                "{} paired device{}",
+                config.devices.len(),
+                plural(config.devices.len())
+            ),
+            None,
+        );
+    }
+    if config.workspaces.is_empty() {
+        ui.muted("○ No authorized workspaces yet");
+    } else {
+        ui.success(
+            &format!(
+                "{} workspace{}",
+                config.workspaces.len(),
+                plural(config.workspaces.len())
+            ),
+            None,
+        );
+    }
     if let Some(relay) = config.preferences.active_relay_url() {
         ui.success("Relay configured", Some(&display_relay_url(relay)));
     } else {
@@ -287,7 +266,8 @@ pub(crate) fn setup_quick(
 ) -> Result<()> {
     let baseline = config.clone();
     if ui.interactive() {
-        ui.crumb_header("Setup");
+        ui.logo_header(None);
+        ui.hint("Tip: `pix setup --advanced` exposes every option.");
         ui.section("Checking this computer");
     }
     let pi_version = prepare_setup_environment(store, &mut config, options, ui)?;
@@ -295,43 +275,11 @@ pub(crate) fn setup_quick(
     configure_setup_workspace(&mut config, options, ui, ui.interactive(), false)?;
     commit_setup_draft(store, &baseline, &mut config)?;
 
-    let relay = if config.devices.is_empty() && !options.no_pair {
-        run_setup_pairing_with_recovery(
-            store,
-            &mut config,
-            relay,
-            options.yes,
-            ui.interactive(),
-            ui,
-            !options.no_service,
-        )?
-    } else if config.devices.is_empty() {
-        if ui.interactive() {
-            ui.muted("○ Device pairing skipped");
-        } else {
-            println!("Pairing... skipped");
-        }
-        relay
-    } else if ui.interactive() {
-        ui.success(
-            &format!(
-                "{} paired device{} already configured",
-                config.devices.len(),
-                plural(config.devices.len())
-            ),
-            None,
-        );
-        relay
-    } else {
-        println!(
-            "Pairing... {} device{} already configured",
-            config.devices.len(),
-            plural(config.devices.len())
-        );
-        relay
-    };
-
+    // The service is installed before pairing so a cancelled or failed
+    // pairing can no longer discard the installation work.
     let service = install_setup_service(store, options.no_service, ui)?;
+    let relay = maybe_pair_phone(store, &mut config, relay, options, ui, service)?;
+
     let final_config = store.load().context("reloading setup configuration")?;
     verify_setup(
         store,
@@ -341,6 +289,73 @@ pub(crate) fn setup_quick(
         relay,
         service,
         started_at.elapsed(),
+    )
+}
+
+/// Pairing is optional: the phone may simply not be at hand. Devices that
+/// are already paired or an explicit `--no-pair` skip the wait; interactive
+/// users choose between pairing now and a later `pix device pair`.
+fn maybe_pair_phone(
+    store: &ConfigStore,
+    config: &mut pix_core::HostConfig,
+    relay: Option<String>,
+    options: &SetupOptions,
+    ui: SetupUi,
+    keep_service: bool,
+) -> Result<Option<String>> {
+    if !config.devices.is_empty() {
+        if ui.interactive() {
+            ui.success(
+                &format!(
+                    "{} paired device{} already configured",
+                    config.devices.len(),
+                    plural(config.devices.len())
+                ),
+                None,
+            );
+        } else {
+            println!(
+                "Pairing... {} device{} already configured",
+                config.devices.len(),
+                plural(config.devices.len())
+            );
+        }
+        return Ok(relay);
+    }
+    if options.no_pair {
+        if ui.interactive() {
+            ui.muted("○ Device pairing skipped");
+        } else {
+            println!("Pairing... skipped");
+        }
+        return Ok(relay);
+    }
+    let pair_now = if options.yes || !ui.interactive() {
+        true
+    } else {
+        ui.section("Pair your phone");
+        ui.select(
+            "Pair your phone now?",
+            &["Pair now".to_owned(), "Pair later".to_owned()],
+            0,
+        )? == 0
+    };
+    if !pair_now {
+        if ui.interactive() {
+            ui.muted("○ Pair later with `pix device pair`");
+        } else {
+            println!("Pairing... skipped");
+        }
+        return Ok(relay);
+    }
+    run_setup_pairing_with_recovery(
+        store,
+        config,
+        relay,
+        options.yes,
+        ui.interactive(),
+        ui,
+        keep_service,
     )
 }
 
@@ -438,6 +453,7 @@ pub(crate) fn setup_advanced(
     started_at: std::time::Instant,
 ) -> Result<()> {
     let baseline = config.clone();
+    ui.logo_header(None);
     ui.crumb_header("Advanced setup");
 
     // "Go back" restarts the form with every earlier answer kept as the
@@ -600,24 +616,12 @@ pub(crate) fn setup_advanced(
     }
     let pi_version = prepare_setup_environment(store, &mut config, options, ui)?;
     commit_setup_draft(store, &baseline, &mut config)?;
-    let relay = if config.devices.is_empty() && !options.no_pair {
-        run_setup_pairing_with_recovery(
-            store,
-            &mut config,
-            relay.clone(),
-            options.yes,
-            true,
-            ui,
-            install_service,
-        )?
-    } else {
-        relay
-    };
     let service = if install_service {
         install_setup_service(store, false, ui)?
     } else {
         install_setup_service(store, true, ui)?
     };
+    let relay = maybe_pair_phone(store, &mut config, relay, options, ui, service)?;
     let final_config = store.load().context("reloading setup configuration")?;
     verify_setup(
         store,
@@ -907,8 +911,7 @@ pub(crate) fn verify_setup(
         );
     }
 
-    ui.brand_header(None);
-    ui.success("Setup complete", None);
+    ui.section("Setup complete");
     ui.body("This computer is ready for remote Pi access.");
     println!();
     ui.hint("Host");
@@ -1055,6 +1058,7 @@ pub(crate) fn run_setup_pairing(store: &ConfigStore, pairing: SetupPairingOption
         ui.crumb_header("Setup");
         ui.section("Pair your phone");
         ui.body(pairing_instructions(remote));
+        ui.hint("Press Ctrl+C at any time to cancel pairing.");
         if !remote {
             ui.hint("Keep your iPhone and Mac on the same network and allow local discovery.");
             ui.hint("To pair by QR code instead, configure Pix Relay first.");

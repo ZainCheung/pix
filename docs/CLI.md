@@ -68,7 +68,14 @@ pix setup --workspace "$HOME/Projects/my-project"
 pix setup --relay wss://relay.example.com
 pix setup --no-pair --no-service --non-interactive \
   --workspace "$HOME/Projects/my-project"
+pix setup --advanced
 ```
+
+Interactive setup goes straight to the recommended path; `--advanced`
+exposes host name, Pi selection, connectivity, workspaces, and the
+service question with a review step. Pairing is optional during setup
+(`pix device pair` works any time), and abandoning the wizard before it
+commits leaves no config file behind.
 
 `pix status` prints configuration, host-service state, and the resolved Pi
 executable with its version. `pix logs` prints payload-free host log entries;
