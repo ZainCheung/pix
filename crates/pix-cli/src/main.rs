@@ -175,6 +175,8 @@ enum WorkspaceCommand {
     },
     /// List authorized folders. Full paths are printed only on the host.
     List,
+    /// List every native Pi session stored for one authorized folder.
+    Sessions { id: uuid::Uuid },
     /// Remove an explicitly authorized folder by ID, or choose one
     /// interactively when the ID is omitted.
     Remove { id: Option<uuid::Uuid> },

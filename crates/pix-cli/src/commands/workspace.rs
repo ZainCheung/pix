@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use pix_core::{ConfigStore, WorkspaceRegistry};
+use pix_core::{ConfigStore, PiSessionStore, WorkspaceRegistry};
+use serde::Serialize;
 
 use crate::output::CommandOutput;
 use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
@@ -117,6 +118,55 @@ pub(crate) fn workspace(
                     "  {}",
                     terminal_label(&workspace.path.display().to_string())
                 );
+            }
+            Ok(())
+        }
+        WorkspaceCommand::Sessions { id } => {
+            let mut config = store.load().context("loading Pix configuration")?;
+            let workspace_record = config
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown workspace: {id}"))?;
+            let root = WorkspaceRegistry::new(&mut config)
+                .authorized_root(id)
+                .with_context(|| format!("resolving workspace {id}"))?;
+            let discovered = PiSessionStore::for_workspace(&root)
+                .context("locating workspace sessions")?
+                .list()
+                .context("listing workspace sessions")?;
+            let sessions = discovered
+                .iter()
+                .map(|session| WorkspaceSessionOutput::from_summary(&session.summary))
+                .collect::<Vec<_>>();
+            if output.is_json() {
+                return output.success(
+                    "workspace.sessions",
+                    &serde_json::json!({
+                        "workspace": {
+                            "id": workspace_record.id,
+                            "name": workspace_record.name,
+                        },
+                        "sessions": sessions,
+                    }),
+                );
+            }
+            if sessions.is_empty() {
+                println!("No Pi sessions stored in this workspace yet.");
+                return Ok(());
+            }
+            for session in sessions {
+                println!(
+                    "{}  {}  {} message{}",
+                    session.id,
+                    session.modified_at,
+                    session.message_count,
+                    plural(session.message_count)
+                );
+                if let Some(title) = session.title {
+                    println!("  {}", terminal_label(&title));
+                }
             }
             Ok(())
         }
@@ -280,3 +330,64 @@ use crate::commands::shared::{
     prepare_running_service_mutation, refresh_running_service, terminal_label,
 };
 use crate::{print_cli_help, usage_error};
+
+#[derive(Debug, Serialize)]
+pub(crate) struct WorkspaceSessionOutput {
+    pub(crate) id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) modified_at: String,
+    pub(crate) message_count: usize,
+}
+
+impl WorkspaceSessionOutput {
+    pub(crate) fn from_summary(summary: &pix_core::SessionSummary) -> Self {
+        let title = summary
+            .name
+            .as_deref()
+            .and_then(compact_session_title)
+            .or_else(|| {
+                summary
+                    .first_user_message
+                    .as_deref()
+                    .and_then(compact_session_title)
+            });
+        Self {
+            id: summary.id.to_string(),
+            title,
+            modified_at: summary.modified_at.to_rfc3339(),
+            message_count: summary.message_count,
+        }
+    }
+}
+
+/// Collapses session titles to single-line menu rows capped at 120 chars.
+pub(crate) fn compact_session_title(value: &str) -> Option<String> {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    let mut characters = normalized.chars();
+    let mut title = characters.by_ref().take(120).collect::<String>();
+    if characters.next().is_some() {
+        title.push('…');
+    }
+    Some(title)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compact_session_title;
+
+    #[test]
+    fn session_titles_are_compacted_for_menu_rows() {
+        assert_eq!(
+            compact_session_title("  fix   menu\nhover  "),
+            Some("fix menu hover".to_owned())
+        );
+        assert_eq!(compact_session_title("   \n\t "), None);
+        let long = "x".repeat(140);
+        let compact = compact_session_title(&long).expect("compacted");
+        assert_eq!(compact.chars().count(), 121);
+        assert!(compact.ends_with('…'));
+    }
+}

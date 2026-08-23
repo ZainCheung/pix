@@ -91,6 +91,7 @@ interactive `pix serve` stdin command replaces the old channel.
 | --- | --- | --- |
 | `pix workspace add <PATH> [--name NAME]` | `workspace.add` | yes |
 | `pix workspace list` | `workspace.list` | no |
+| `pix workspace sessions <ID>` | `workspace.sessions` | no — native Pi sessions stored in one workspace |
 | `pix workspace remove <ID>` | `workspace.remove` | yes — refreshes the running service and evicts sessions in that folder |
 
 Full paths appear only in `workspace.*` output; treat them as host-local

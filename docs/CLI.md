@@ -88,6 +88,7 @@ use it:
 ```sh
 pix workspace add "$HOME/Projects/my-project" --name my-project
 pix workspace list
+pix workspace sessions <workspace-id>
 pix workspace remove <workspace-id>
 ```
 
