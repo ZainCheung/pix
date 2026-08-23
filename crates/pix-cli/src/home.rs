@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::commands::shared::terminal_label;
 use crate::service;
-use crate::setup_ui::{DIM, MenuItem, MenuResult, SetupUi, UiTone};
+use crate::setup_ui::{DIM, MenuItem, MenuResult, SetupUi, UiTone, YELLOW};
 use crate::status::HostServiceStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,19 +244,19 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
             vec![
                 (
                     HomeAction::Devices,
-                    MenuItem::new("Devices", "Pair, approve, or revoke a phone"),
+                    MenuItem::new("1. Devices", "Pair, approve, or revoke a phone"),
                 ),
                 (
                     HomeAction::Workspaces,
-                    MenuItem::new("Workspaces", "Authorize or remove host folders"),
-                ),
-                (
-                    HomeAction::Status,
-                    MenuItem::new("Status", "Show detailed host state"),
+                    MenuItem::new("2. Workspaces", "Authorize or remove host folders"),
                 ),
                 (
                     HomeAction::Settings,
-                    MenuItem::new("Settings", "Configure remote access"),
+                    MenuItem::new("3. Settings", "Configure remote access"),
+                ),
+                (
+                    HomeAction::Status,
+                    MenuItem::new("4. Status", "Show detailed host state"),
                 ),
             ],
             0,
@@ -265,23 +265,23 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
             vec![
                 (
                     HomeAction::Setup,
-                    MenuItem::new("Setup", "Prepare this computer for remote Pi access"),
+                    MenuItem::new("1. Setup", "Prepare this computer for remote Pi access"),
                 ),
                 (
                     HomeAction::Devices,
-                    MenuItem::new("Devices", "Pair, approve, or revoke a phone"),
+                    MenuItem::new("2. Devices", "Pair, approve, or revoke a phone"),
                 ),
                 (
                     HomeAction::Workspaces,
-                    MenuItem::new("Workspaces", "Authorize or remove host folders"),
-                ),
-                (
-                    HomeAction::Status,
-                    MenuItem::new("Status", "Show detailed host state"),
+                    MenuItem::new("3. Workspaces", "Authorize or remove host folders"),
                 ),
                 (
                     HomeAction::Settings,
-                    MenuItem::new("Settings", "Configure remote access"),
+                    MenuItem::new("4. Settings", "Configure remote access"),
+                ),
+                (
+                    HomeAction::Status,
+                    MenuItem::new("5. Status", "Show detailed host state"),
                 ),
             ],
             0,
@@ -290,15 +290,15 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
             vec![
                 (
                     HomeAction::Status,
-                    MenuItem::new("Status", "Inspect the invalid host configuration"),
+                    MenuItem::new("1. Status", "Inspect the invalid host configuration"),
                 ),
                 (
                     HomeAction::Setup,
-                    MenuItem::new("Repair setup", "Review setup after diagnosing the error"),
+                    MenuItem::new("2. Repair setup", "Review setup after diagnosing the error"),
                 ),
                 (
                     HomeAction::Commands,
-                    MenuItem::new("Show commands", "Open the complete CLI reference"),
+                    MenuItem::new("3. Show commands", "Open the complete CLI reference"),
                 ),
             ],
             0,
@@ -312,6 +312,7 @@ pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn render_overview(
     overview: &HostOverview,
     ui: SetupUi,
@@ -322,17 +323,40 @@ pub(crate) fn render_overview(
         ui.crumb_header("Status");
     } else {
         println!();
-        for line in LOGO.lines() {
-            println!("  {}", ui.cyan(line, true));
+        let banner = [
+            ("https://pix.deepoke.com", true),
+            ("Remote access for the Pi agent", false),
+        ];
+        let logo_lines: Vec<&str> = LOGO.lines().collect();
+        let banner_offset = logo_lines.len().saturating_sub(banner.len());
+        for (index, line) in logo_lines.iter().enumerate() {
+            let mut row = format!("  {line}");
+            if let Some((text, accent)) = index
+                .checked_sub(banner_offset)
+                .and_then(|slot| banner.get(slot))
+            {
+                let padded = format!("{line:<20}");
+                row = format!("  {padded}");
+                if *accent {
+                    row.push_str(&ui.cyan(text, false));
+                } else {
+                    row.push_str(&ui.paint(text, DIM, false));
+                }
+            }
+            println!("{row}");
         }
         println!(
             "  {}",
             ui.paint(concat!("pix ", env!("CARGO_PKG_VERSION")), DIM, false)
         );
         if let Some(latest) = update_available {
-            ui.warning(
-                &format!("Pix {latest} is available"),
-                Some("run `pix update` to upgrade"),
+            println!(
+                "  {}",
+                ui.paint(
+                    &format!("Update {latest} available, run pix update"),
+                    YELLOW,
+                    false
+                )
             );
         }
         println!();

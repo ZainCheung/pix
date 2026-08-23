@@ -15,7 +15,7 @@ pub(crate) const BOLD: &str = "\x1b[1m";
 pub(crate) const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
+pub(crate) const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
 const WHITE: &str = "\x1b[97m";
 
