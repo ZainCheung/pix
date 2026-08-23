@@ -9,6 +9,24 @@ persists, or logs application payloads. Losing the relay affects
 reachability only; the Pix secure channel (Noise, implemented in `pix-wire`)
 never terminates here.
 
+## Deploy your own Relay
+
+<p align="center">
+  <a href="https://deploy.workers.cloudflare.com/?url=https://github.com/ZainCheung/pix/tree/main/relay"><img src="https://deploy.workers.cloudflare.com/button" alt="Deploy to Cloudflare"></a>
+</p>
+
+The button creates a copy of this isolated `relay/` Worker in your GitHub and
+Cloudflare accounts, including its Durable Object binding. After deployment,
+configure Pix with the returned WebSocket endpoint:
+
+```sh
+pix relay set wss://worker-name.subdomain.workers.dev
+```
+
+This deploys to your account; it does not modify Pix's hosted relay. See
+[`docs/REMOTE_ACCESS.md`](../docs/REMOTE_ACCESS.md) for the pairing flow and
+self-hosting notes.
+
 ## Contract
 
 Join request:
