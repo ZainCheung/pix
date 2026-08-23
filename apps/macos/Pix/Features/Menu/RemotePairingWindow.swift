@@ -89,14 +89,23 @@ struct AddDeviceWindow: View {
     }
 
     private var connectionPicker: some View {
-        Picker(String(localized: "Connection"), selection: $path) {
-            Text(String(localized: "Local network"))
-                .tag(PairingPath.local)
-            Text(String(localized: "Remote QR"))
-                .tag(PairingPath.remote)
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(String(localized: "Connection"), selection: $path) {
+                Text(String(localized: "Local network"))
+                    .tag(PairingPath.local)
+                Text(String(localized: "Remote QR"))
+                    .tag(PairingPath.remote)
+            }
+            .pickerStyle(.segmented)
+            .accessibilityLabel(String(localized: "Pairing connection"))
+            Text(
+                String(
+                    localized: "Tip: pairing over the local network also teaches this phone the relay route, so it can connect from anywhere. The reverse is not true."
+                )
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
-        .pickerStyle(.segmented)
-        .accessibilityLabel(String(localized: "Pairing connection"))
     }
 
     private var localConnection: some View {

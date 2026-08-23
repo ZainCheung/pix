@@ -97,9 +97,41 @@ pub(crate) enum AccessMode {
     Unknown,
 }
 
+type PiProbeResult = Option<(String, String, bool)>;
+
+/// Resolves the Pi pix would run right now. Shared by every config state so
+/// the first-run overview and setup guide see the same environment.
+fn probe_pi(store: &ConfigStore) -> PiProbeResult {
+    let configured = store
+        .load()
+        .ok()
+        .and_then(|config| config.preferences.pi_executable.clone());
+    let environment = pix_core::HostEnvironment::resolve_for("pi");
+    pix_core::PiProbe::new(configured)
+        .with_environment(environment)
+        .inspect()
+        .ok()
+        .map(|installation| {
+            (
+                installation.executable.display().to_string(),
+                installation.version.to_string(),
+                installation.supported,
+            )
+        })
+}
+
+fn merge_pi_probe(pi: &mut PiOverview, probe: &PiProbeResult) {
+    if let Some((executable, version, supported)) = probe {
+        pi.executable = Some(executable.clone());
+        pi.version = Some(version.clone());
+        pi.supported = Some(*supported);
+    }
+}
+
 impl HostOverview {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn collect(store: &ConfigStore) -> Self {
+        let pi_probe = probe_pi(store);
         let current_service = HostServiceStatus::current(store.path());
         let service_installed =
             current_service.is_some() || service::managed_service_installed(store).unwrap_or(false);
@@ -189,11 +221,17 @@ impl HostOverview {
                     config_state: ConfigState::Missing,
                     config_error: None,
                     host: None,
-                    pi: PiOverview {
-                        source: PiSource::Path,
-                        executable: None,
-                        version: None,
-                        supported: None,
+                    pi: {
+                        // First run still reports the Pi the setup wizard
+                        // would find, so the guide can verify it up front.
+                        let mut pi = PiOverview {
+                            source: PiSource::Path,
+                            executable: None,
+                            version: None,
+                            supported: None,
+                        };
+                        merge_pi_probe(&mut pi, &pi_probe);
+                        pi
                     },
                     service,
                     access: AccessOverview {

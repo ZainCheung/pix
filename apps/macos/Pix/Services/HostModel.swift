@@ -12,6 +12,7 @@ final class HostModel {
     /// CLI home screen's first-run state: setup guidance appears only then.
     private(set) var isConfigured = true
     private(set) var piVersion: String?
+    private(set) var piExecutablePath: String?
     private(set) var piExecutable: String?
     private(set) var workspaces: [WorkspaceItem] = []
     private(set) var devices: [PairedDevice] = []
@@ -172,6 +173,7 @@ final class HostModel {
         ])
         isConfigured = Self.isConfiguredStatus(from: output) ?? isConfigured
         piVersion = parseVersion(from: output)
+        piExecutablePath = Self.parsePiExecutable(from: output)
     }
 
     func updatePairingRequests(_ requests: [PairingRequest]) {
@@ -961,6 +963,14 @@ final class HostModel {
             return nil
         }
         return url
+    }
+
+    nonisolated static func parsePiExecutable(from output: String) -> String? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<CLIStatusData>.self, from: data),
+              envelope.ok
+        else { return nil }
+        return envelope.data.pi.executable ?? nil
     }
 
     /// True when the CLI reports an existing host configuration. Nil when

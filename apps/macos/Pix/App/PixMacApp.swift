@@ -31,7 +31,7 @@ struct PixMacApp: App {
                 .environment(model)
         }
         .windowResizability(.contentSize)
-        .defaultSize(width: 460, height: 640)
+        .defaultSize(width: 480, height: 480)
         .defaultPosition(.center)
 
         Window(String(localized: "Add Device"), id: "add-device") {
