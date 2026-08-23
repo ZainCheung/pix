@@ -129,10 +129,12 @@ impl HostProtocolDispatcher {
     /// Returns [`DispatchError`] when the connection is not attached or the
     /// runtime has stopped.
     pub fn subscribe(&self, session_id: &str) -> Result<mpsc::Receiver<PiEvent>, DispatchError> {
+        self.ensure_device_authorized()?;
         let session_id = parse_session_id(session_id)?;
         if !self.attached_sessions.contains(&session_id) {
             return Err(DispatchError::NotAttached(session_id));
         }
+        self.ensure_active_session_authorized(session_id)?;
         Ok(self.runtimes.subscribe(session_id)?)
     }
 
@@ -148,10 +150,12 @@ impl HostProtocolDispatcher {
         session_id: &str,
         event: PiEvent,
     ) -> Result<Option<ServerEnvelope>, DispatchError> {
+        self.ensure_device_authorized()?;
         let session_id = parse_session_id(session_id)?;
         if !self.attached_sessions.contains(&session_id) {
             return Err(DispatchError::NotAttached(session_id));
         }
+        self.ensure_active_session_authorized(session_id)?;
         let mapped = pi_bridge::event(session_id, event)?;
         if let Some(event) = &mapped {
             match event {
@@ -174,6 +178,10 @@ impl HostProtocolDispatcher {
     /// events become payload-free public errors rather than tearing down an
     /// otherwise healthy phone connection.
     pub fn drain_events(&mut self) -> Vec<ServerEnvelope> {
+        if let Err(error) = self.ensure_device_authorized() {
+            self.disconnect();
+            return vec![unsolicited(error.public_event())];
+        }
         let mut raw_events = Vec::new();
         let mut disconnected = Vec::new();
         for (&session_id, receiver) in &self.event_receivers {
@@ -246,6 +254,7 @@ impl HostProtocolDispatcher {
 
     #[allow(clippy::too_many_lines)]
     fn handle(&mut self, request: ClientRequest) -> Result<Vec<PendingEvent>, DispatchError> {
+        self.ensure_device_authorized()?;
         match request {
             ClientRequest::HostSnapshot => Ok(vec![ready(ServerEvent::HostSnapshot {
                 snapshot: self.host_snapshot(),
@@ -546,7 +555,9 @@ impl HostProtocolDispatcher {
         let session_id = parse_session_id(value)?;
         let already_attached = self.attached_sessions.contains(&session_id);
         let mut opened_runtime = false;
-        if !already_attached {
+        if already_attached {
+            self.ensure_active_session_authorized(session_id)?;
+        } else {
             if self.runtimes.is_active(session_id) {
                 self.ensure_active_session_authorized(session_id)?;
                 self.runtimes.attach(session_id)?;
@@ -599,6 +610,8 @@ impl HostProtocolDispatcher {
     }
 
     fn session_snapshot_event(&self, session_id: SessionId) -> Result<ServerEvent, DispatchError> {
+        self.ensure_device_authorized()?;
+        self.ensure_active_session_authorized(session_id)?;
         let snapshot = self.runtimes.snapshot(session_id)?;
         Ok(ServerEvent::SessionSnapshot {
             snapshot: pi_bridge::session_snapshot(session_id, snapshot)?,
@@ -634,6 +647,7 @@ impl HostProtocolDispatcher {
         if !self.attached_sessions.contains(&session_id) {
             return Err(DispatchError::NotAttached(session_id));
         }
+        self.ensure_active_session_authorized(session_id)?;
         Ok(session_id)
     }
 
@@ -667,6 +681,25 @@ impl HostProtocolDispatcher {
             .ok_or(DispatchError::UnauthorizedSession(session_id))?;
         WorkspaceRegistry::new(&mut config).authorized_root(workspace_id)?;
         Ok(())
+    }
+
+    fn ensure_device_authorized(&self) -> Result<(), DispatchError> {
+        let Some(device_id) = self.device_id.as_deref() else {
+            // Standalone dispatcher tests and internal tooling do not attach a
+            // device identity. Every network connection sets one before use.
+            return Ok(());
+        };
+        if self
+            .host
+            .snapshot()
+            .devices
+            .iter()
+            .any(|device| device.id == device_id)
+        {
+            Ok(())
+        } else {
+            Err(DispatchError::DeviceRevoked)
+        }
     }
 
     fn find_authorized_session(
@@ -791,6 +824,8 @@ pub enum DispatchError {
     NotAttached(SessionId),
     #[error("active session is no longer in an authorized workspace: {0}")]
     UnauthorizedSession(SessionId),
+    #[error("authenticated device is no longer authorized")]
+    DeviceRevoked,
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
@@ -813,6 +848,11 @@ impl DispatchError {
             Self::NotAttached(_) => (
                 ErrorCode::Conflict,
                 "Attach the session before sending this request",
+                false,
+            ),
+            Self::DeviceRevoked => (
+                ErrorCode::Unauthorized,
+                "Device authorization is no longer valid",
                 false,
             ),
             Self::UnauthorizedSession(_)

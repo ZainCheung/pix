@@ -16,11 +16,27 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
     let executable = std::env::current_exe().context("locating current pix executable")?;
     let config_path = absolute_config_path(store.path())?;
     let path = unit_file_path()?;
+    if path.is_file() && !installed(store)? {
+        bail!(
+            "a Pix systemd user service is already installed for another configuration; use its --config path to uninstall it before replacing the service"
+        );
+    }
+    let desired_definition = render_unit(&executable, &config_path);
+    let definition_changed =
+        fs::read_to_string(&path).map_or(true, |current| current != desired_definition);
     write_unit_file(&path, &executable, &config_path)?;
     run_systemctl(&["daemon-reload"])?;
     run_systemctl(&["enable", UNIT_NAME])?;
-    if !no_start && crate::status::HostServiceStatus::current(store.path()).is_none() {
-        run_systemctl(&["start", UNIT_NAME])?;
+    let host_running = crate::status::HostServiceStatus::current(store.path()).is_some();
+    let manager_active = active(store)?;
+    let control_upgrade_required =
+        host_running && crate::service_client::verify_control_compatibility(store).is_err();
+    if !no_start {
+        if manager_active && (definition_changed || control_upgrade_required) {
+            run_systemctl(&["restart", UNIT_NAME])?;
+        } else if !manager_active && !host_running {
+            run_systemctl(&["start", UNIT_NAME])?;
+        }
     }
     if announce {
         println!("Installed Pix systemd user service ({}).", path.display());
@@ -47,7 +63,7 @@ pub(crate) fn start(store: &ConfigStore, announce: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn stop(store: &ConfigStore) -> Result<()> {
+pub(crate) fn stop(store: &ConfigStore, announce: bool) -> Result<()> {
     require_systemctl()?;
     // systemd invokes this same subcommand from ExecStop. In that context,
     // request a clean host shutdown instead of starting a nested systemctl
@@ -56,47 +72,59 @@ pub(crate) fn stop(store: &ConfigStore) -> Result<()> {
         let _ = crate::status::request_control_command(store.path(), "quit")?;
         return Ok(());
     }
+    refuse_other_configuration(store)?;
     if installed(store)? {
         if active(store)? {
             run_systemctl(&["stop", UNIT_NAME])?;
-            println!("Pix service stopped.");
+            if announce {
+                println!("Pix service stopped.");
+            }
         } else if crate::status::request_control_command(store.path(), "quit")? {
             // A user-level unit can be installed but inactive while a
             // manually launched service instance is still serving this
             // config. Prefer the instance's private control socket before
             // reporting that the service is stopped.
-            println!("Requested Pix host service shutdown.");
-        } else {
+            if announce {
+                println!("Requested Pix host service shutdown.");
+            }
+        } else if announce {
             println!("Pix service is not running.");
         }
         return Ok(());
     }
     if crate::status::request_control_command(store.path(), "quit")? {
-        println!("Requested Pix host service shutdown.");
-    } else {
+        if announce {
+            println!("Requested Pix host service shutdown.");
+        }
+    } else if announce {
         println!("Pix service is not installed or running.");
     }
     Ok(())
 }
 
-pub(crate) fn restart(store: &ConfigStore) -> Result<()> {
+pub(crate) fn restart(store: &ConfigStore, announce: bool) -> Result<()> {
     require_systemctl()?;
     if !installed(store)? {
         bail!("Pix systemd user service is not installed; run `pix service install` first");
     }
     run_systemctl(&["restart", UNIT_NAME])?;
-    println!("Pix service restart requested.");
+    if announce {
+        println!("Pix service restart requested.");
+    }
     Ok(())
 }
 
-pub(crate) fn uninstall(store: &ConfigStore) -> Result<()> {
+pub(crate) fn uninstall(store: &ConfigStore, announce: bool) -> Result<()> {
     require_systemctl()?;
+    refuse_other_configuration(store)?;
     let path = unit_file_path()?;
     if !path.exists() {
-        println!(
-            "No Pix systemd user service is installed at {}.",
-            path.display()
-        );
+        if announce {
+            println!(
+                "No Pix systemd user service is installed at {}.",
+                path.display()
+            );
+        }
         return Ok(());
     }
     run_systemctl(&["disable", "--now", UNIT_NAME])?;
@@ -108,20 +136,35 @@ pub(crate) fn uninstall(store: &ConfigStore) -> Result<()> {
         );
     }
     fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-    println!("Removed {}.", path.display());
+    if announce {
+        println!("Removed {}.", path.display());
+    }
     Ok(())
 }
 
-pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
-    Ok(unit_file_path()?.is_file())
+pub(crate) fn installed(store: &ConfigStore) -> Result<bool> {
+    let path = unit_file_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let config = quote_systemd_exec_arg(&absolute_config_path(store.path())?);
+    Ok(contents.contains(&format!("--config {config} serve --service")))
 }
 
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
     require_systemctl()?;
-    // systemd --user is global to the login session and cannot distinguish a
-    // different Pix config. The config-scoped status record is the source of
-    // truth used by `pix status` and native clients.
-    Ok(crate::status::HostServiceStatus::current(store.path()).is_some())
+    if !installed(store)? {
+        return Ok(false);
+    }
+    Ok(Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", UNIT_NAME])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .context("inspecting the Pix systemd user service")?
+        .success())
 }
 
 pub(crate) fn unit_file_path() -> Result<PathBuf> {
@@ -146,8 +189,8 @@ pub(crate) fn render_unit(executable: &Path, config_path: &Path) -> String {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={executable} --config {config_path} serve --service\n\
-         ExecStop={executable} --config {config_path} service stop\n\
+         ExecStart={executable} --output human --no-input --config {config_path} serve --service\n\
+         ExecStop={executable} --output human --no-input --config {config_path} service stop\n\
          Environment=PIX_SERVICE_STOP_HOOK=1\n\
          Restart=on-failure\n\
          RestartSec=3\n\
@@ -197,19 +240,33 @@ fn require_systemctl() -> Result<()> {
 }
 
 fn run_systemctl(arguments: &[&str]) -> Result<()> {
-    let status = Command::new("systemctl")
+    let output = Command::new("systemctl")
         .arg("--user")
         .args(arguments)
-        .status()
+        .output()
         .with_context(|| format!("running systemctl --user {}", arguments.join(" ")))?;
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
+        let detail = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "systemctl --user {} exited with {status}",
-            arguments.join(" ")
+            "systemctl --user {} exited with {}: {}",
+            arguments.join(" "),
+            output.status,
+            detail.trim()
         )
     }
+}
+
+fn refuse_other_configuration(store: &ConfigStore) -> Result<()> {
+    let path = unit_file_path()?;
+    if path.is_file() && !installed(store)? {
+        bail!(
+            "the installed Pix systemd user service belongs to another configuration; refusing to control it with --config {}",
+            store.path().display()
+        );
+    }
+    Ok(())
 }
 
 fn quote_systemd_exec_arg(path: &Path) -> String {
@@ -254,14 +311,14 @@ mod tests {
             std::path::Path::new("/tmp/custom config/100%/config.json"),
         );
         assert!(unit.contains(
-            "ExecStart=\"/usr/bin/Pix Host/pix%%bin\" --config \"/tmp/custom config/100%%/config.json\" serve --service"
+            "ExecStart=\"/usr/bin/Pix Host/pix%%bin\" --output human --no-input --config \"/tmp/custom config/100%%/config.json\" serve --service"
         ));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("StandardInput=null"));
         assert!(unit.contains("StandardOutput=null"));
         assert!(unit.contains(
-            "ExecStop=\"/usr/bin/Pix Host/pix%%bin\" --config \"/tmp/custom config/100%%/config.json\" service stop"
+            "ExecStop=\"/usr/bin/Pix Host/pix%%bin\" --output human --no-input --config \"/tmp/custom config/100%%/config.json\" service stop"
         ));
         assert!(unit.contains("Environment=PIX_SERVICE_STOP_HOOK=1"));
         assert!(!unit.contains('\r'));

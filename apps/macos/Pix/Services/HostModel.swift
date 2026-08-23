@@ -8,11 +8,20 @@ import ServiceManagement
 @MainActor
 final class HostModel {
     private(set) var status: HostStatus = .starting
+    /// False until the CLI reports a host configuration file. Mirrors the
+    /// CLI home screen's first-run state: setup guidance appears only then.
+    private(set) var isConfigured = true
     private(set) var piVersion: String?
+    private(set) var piExecutablePath: String?
     private(set) var piExecutable: String?
     private(set) var workspaces: [WorkspaceItem] = []
     private(set) var devices: [PairedDevice] = []
     private(set) var sessions: [ActiveSession] = []
+    private(set) var workspaceSessions: [WorkspaceSession] = []
+    /// Increments after the initial CLI-backed workspace/device reconciliation
+    /// completes. Menu surfaces use this boundary instead of the host service's
+    /// early `ready` event, which can arrive before the CLI inventory finishes.
+    private(set) var inventoryRevision = 0
     private(set) var pairingRequests: [PairingRequest] = []
     private(set) var launchAtLoginEnabled = false
     private(set) var lastDiagnostic: String?
@@ -24,7 +33,6 @@ final class HostModel {
     /// Active remote pairing offer awaiting QR presentation.
     private(set) var remotePairing: RemotePairingOffer?
     private(set) var remotePairingError: String?
-
     var relayURL: String? {
         relayConfiguration.url
     }
@@ -85,9 +93,21 @@ final class HostModel {
             let output = try await runPix(arguments: [
                 "--config",
                 configPath.path,
-                "doctor",
+                "status",
             ])
+            isConfigured = Self.isConfiguredStatus(from: output) ?? true
             piVersion = parseVersion(from: output)
+            guard isConfigured else {
+                // First run: hold in setup state without touching the
+                // service or inventories; the setup guide drives the rest.
+                status = .needsSetup(String(localized: "Pix is not set up on this computer."))
+                return
+            }
+            guard piVersion != nil else {
+                throw HostModelError.commandFailed(
+                    "Pi was not found on this host; install Pi or set its path with `pix pi set`."
+                )
+            }
             launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
             try await startHostService()
             await loadHostInventory()
@@ -99,6 +119,61 @@ final class HostModel {
                 isUpdatingRelay = false
             }
         }
+    }
+
+    enum SetupRelayChoice {
+        case recommended
+        case localOnly
+        case custom(String)
+    }
+
+    /// The product relay the CLI setup offers by default.
+    static let defaultRelayURL = "wss://pix-relay.zaincheung-255.workers.dev"
+
+    /// Applies the guided first-run choices through the same headless CLI
+    /// commands the terminal wizard commits, then adopts the running host.
+    func applySetup(
+        relay: SetupRelayChoice,
+        workspaceURL: URL,
+        installService: Bool
+    ) async throws {
+        switch relay {
+        case .recommended:
+            _ = try await runPix(arguments: ["relay", "set", Self.defaultRelayURL])
+        case .custom(let url):
+            _ = try await runPix(arguments: ["relay", "set", url])
+        case .localOnly:
+            break
+        }
+        _ = try await runPix(arguments: ["workspace", "add", workspaceURL.path])
+        isConfigured = true
+        if installService {
+            try await startHostService()
+        }
+        await loadHostInventory()
+        status = .ready
+    }
+
+    /// Pins an explicit Pi executable (`pix pi set`) and refreshes the
+    /// resolved version for the setup guide.
+    func setPiExecutable(_ url: URL) async throws {
+        _ = try await runPix(arguments: ["pi", "set", url.path])
+        if let output = try? await runPix(arguments: ["status"]) {
+            piVersion = parseVersion(from: output)
+        }
+    }
+
+    /// Re-reads `pix status` without touching the service. The setup guide
+    /// uses it after choosing a Pi executable.
+    func refreshStatusOnly() async throws {
+        let output = try await runPix(arguments: [
+            "--config",
+            configPath.path,
+            "status",
+        ])
+        isConfigured = Self.isConfiguredStatus(from: output) ?? isConfigured
+        piVersion = parseVersion(from: output)
+        piExecutablePath = Self.parsePiExecutable(from: output)
     }
 
     func updatePairingRequests(_ requests: [PairingRequest]) {
@@ -151,14 +226,15 @@ final class HostModel {
                 guard let id = parseUUID(from: output) else {
                     throw HostModelError.invalidWorkspaceResponse
                 }
-                workspaces.append(
-                    WorkspaceItem(
-                        id: id,
-                        name: url.lastPathComponent,
-                        path: standardizedURL,
-                        isAvailable: true
-                    )
+                let workspace = WorkspaceItem(
+                    id: id,
+                    name: url.lastPathComponent,
+                    path: standardizedURL,
+                    isAvailable: true
                 )
+                workspaces.append(workspace)
+                workspaceSessions.append(contentsOf: await loadWorkspaceSessions(for: [workspace]))
+                inventoryRevision += 1
                 sendServiceCommand("refresh")
             } catch {
                 status = .failed(error.localizedDescription)
@@ -177,6 +253,7 @@ final class HostModel {
                     workspace.id.uuidString,
                 ])
                 workspaces.removeAll { $0.id == workspace.id }
+                workspaceSessions.removeAll { $0.workspaceID == workspace.id }
                 sendServiceCommand("refresh")
             } catch {
                 status = .failed(error.localizedDescription)
@@ -475,7 +552,7 @@ final class HostModel {
         }
     }
 
-    private func apply(_ event: ServiceEvent) {
+    func apply(_ event: ServiceEvent) {
         switch event {
         case .ready:
             status = .ready
@@ -502,13 +579,20 @@ final class HostModel {
                 isRequestingRemotePairing = false
             }
         case .deviceList(let devices):
+            // The menu bar renders a presentation snapshot keyed to this
+            // revision. Socket-driven inventory changes must advance it too,
+            // or a phone paired after launch never appears in the menu.
             self.devices = devices
+            inventoryRevision += 1
         case .deviceRevoked(let id):
             devices.removeAll { $0.id == id }
+            inventoryRevision += 1
         case .sessionList(let sessions):
             self.sessions = sessions
+            inventoryRevision += 1
         case .sessionReleased(let id):
             sessions.removeAll { $0.id == id }
+            inventoryRevision += 1
         case .relayConfigured(let url):
             relayConfiguration = RelayConfiguration(url: url, isEnabled: true)
         case .relayChannel:
@@ -530,6 +614,7 @@ final class HostModel {
             "list",
         ]) {
             workspaces = parseWorkspaces(from: workspaceOutput)
+            workspaceSessions = await loadWorkspaceSessions(for: workspaces)
         }
         if let deviceOutput = try? await runPix(arguments: [
             "--config",
@@ -537,7 +622,7 @@ final class HostModel {
             "device",
             "list",
         ]) {
-            devices = HostTextInventory.devices(from: deviceOutput)
+            devices = parseDevices(from: deviceOutput)
         }
         if let piOutput = try? await runPix(arguments: [
             "--config",
@@ -555,6 +640,24 @@ final class HostModel {
         ]) {
             relayConfiguration = Self.parseRelayConfiguration(from: relayOutput)
         }
+        inventoryRevision += 1
+    }
+
+    private func loadWorkspaceSessions(for workspaces: [WorkspaceItem]) async -> [WorkspaceSession] {
+        var result: [WorkspaceSession] = []
+        for workspace in workspaces {
+            guard let output = try? await runPix(arguments: [
+                "--config",
+                configPath.path,
+                "workspace",
+                "sessions",
+                workspace.id.uuidString,
+            ]) else {
+                continue
+            }
+            result.append(contentsOf: Self.parseWorkspaceSessions(from: output, workspaceID: workspace.id))
+        }
+        return result
     }
 
     private func updateRelay(arguments: [String]) {
@@ -591,7 +694,7 @@ final class HostModel {
             let output = Pipe()
             let errors = Pipe()
             process.executableURL = executable
-            process.arguments = arguments
+            process.arguments = Self.headlessArguments(arguments)
             process.environment = environment
             process.standardOutput = output
             process.standardError = errors
@@ -600,7 +703,8 @@ final class HostModel {
             let stdout = output.fileHandleForReading.readDataToEndOfFile()
             let stderr = errors.fileHandleForReading.readDataToEndOfFile()
             guard process.terminationStatus == 0 else {
-                let message = String(data: stderr, encoding: .utf8) ?? "Pix Core failed"
+                let rawMessage = String(data: stderr, encoding: .utf8) ?? "Pix Core failed"
+                let message = Self.parseCLIError(from: rawMessage) ?? rawMessage
                 throw HostModelError.commandFailed(message.trimmingCharacters(in: .whitespacesAndNewlines))
             }
             return String(data: stdout, encoding: .utf8) ?? ""
@@ -608,20 +712,37 @@ final class HostModel {
     }
 
     private func parseVersion(from output: String) -> String? {
-        output
+        if let report = Self.decodeCLIData(CLIStatusData.self, from: output) {
+            return report.pi.version ?? nil
+        }
+        return output
             .split(separator: "\n")
             .first(where: { $0.contains("pi version:") })
             .map { $0.replacingOccurrences(of: "pi version:", with: "").trimmingCharacters(in: .whitespaces) }
     }
 
     private func parseUUID(from output: String) -> UUID? {
-        output
+        if let mutation = Self.decodeCLIData(CLIWorkspaceMutationData.self, from: output) {
+            return mutation.workspace.id
+        }
+        return output
             .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "(" || $0 == ")" })
             .compactMap { UUID(uuidString: String($0)) }
             .first
     }
 
     private func parseWorkspaces(from output: String) -> [WorkspaceItem] {
+        if let inventory = Self.decodeCLIData(CLIWorkspaceListData.self, from: output) {
+            return inventory.workspaces.map { workspace in
+                let path = URL(fileURLWithPath: workspace.path)
+                return WorkspaceItem(
+                    id: workspace.id,
+                    name: workspace.name,
+                    path: path,
+                    isAvailable: FileManager.default.fileExists(atPath: workspace.path)
+                )
+            }
+        }
         var result: [WorkspaceItem] = []
         var pending: (UUID, String)?
         for line in output.split(separator: "\n", omittingEmptySubsequences: true) {
@@ -645,6 +766,58 @@ final class HostModel {
             }
         }
         return result
+    }
+
+    private func parseDevices(from output: String) -> [PairedDevice] {
+        guard let inventory = Self.decodeCLIData(CLIDeviceListData.self, from: output) else {
+            return HostTextInventory.devices(from: output)
+        }
+        return inventory.devices.map { device in
+            PairedDevice(
+                id: device.id,
+                name: device.name,
+                pairedAt: ISO8601DateFormatter().date(from: device.pairedAt) ?? .distantPast
+            )
+        }
+    }
+
+    nonisolated static func parseWorkspaceSessions(
+        from output: String,
+        workspaceID: UUID
+    ) -> [WorkspaceSession] {
+        let decoder = JSONDecoder()
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions.insert(.withFractionalSeconds)
+        let standardFormatter = ISO8601DateFormatter()
+
+        func session(from record: WorkspaceSessionRecord) -> WorkspaceSession? {
+            guard let modifiedAt = fractionalFormatter.date(from: record.modifiedAt)
+                ?? standardFormatter.date(from: record.modifiedAt)
+            else { return nil }
+            return WorkspaceSession(
+                id: record.id,
+                workspaceID: workspaceID,
+                title: record.title,
+                modifiedAt: modifiedAt,
+                messageCount: record.messageCount
+            )
+        }
+
+        // Versioned envelope first; one-record-per-line output is the legacy
+        // format produced by CLIs before the machine-readable contract.
+        if let data = decodeCLIData(CLIWorkspaceSessionsData.self, from: output) {
+            return data.sessions.compactMap { session(from: $0) }
+        }
+        return output
+            .split(separator: "\n", omittingEmptySubsequences: true)
+            .compactMap { line in
+                let data = Data(line.utf8)
+                guard let record = try? decoder.decode(WorkspaceSessionRecord.self, from: data)
+                else {
+                    return nil
+                }
+                return session(from: record)
+            }
     }
 
     /// Resolves the Pix CLI in the same order a user expects from a terminal:
@@ -799,6 +972,28 @@ final class HostModel {
         return url
     }
 
+    nonisolated static func parsePiExecutable(from output: String) -> String? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<CLIStatusData>.self, from: data),
+              envelope.ok
+        else { return nil }
+        return envelope.data.pi.executable ?? nil
+    }
+
+    /// True when the CLI reports an existing host configuration. Nil when
+    /// the output is not a recognizable status envelope.
+    nonisolated static func isConfiguredStatus(from output: String) -> Bool? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<CLIStatusData>.self, from: data),
+              envelope.ok
+        else { return nil }
+        return envelope.data.configState != "missing"
+    }
+
+    nonisolated static func headlessArguments(_ arguments: [String]) -> [String] {
+        ["--output", "json", "--no-input"] + arguments
+    }
+
     nonisolated static func hostProcessEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -836,6 +1031,9 @@ final class HostModel {
     /// Parses the stable, human-readable output of `pix relay show` without
     /// exposing relay channel secrets to the UI model.
     nonisolated static func parseRelayConfiguration(from output: String) -> RelayConfiguration {
+        if let relay = decodeCLIData(CLIRelayData.self, from: output) {
+            return RelayConfiguration(url: relay.url, isEnabled: relay.enabled)
+        }
         guard let line = output
             .split(separator: "\n", omittingEmptySubsequences: true)
             .map(String.init)
@@ -886,7 +1084,10 @@ final class HostModel {
     }
 
     private func parsePiExecutable(from output: String) -> String? {
-        output
+        if let pi = Self.decodeCLIData(CLIPiData.self, from: output) {
+            return pi.executable
+        }
+        return output
             .split(separator: "\n")
             .first
             .map { line in
@@ -897,6 +1098,110 @@ final class HostModel {
                 return text
             }
     }
+
+    private nonisolated static func decodeCLIData<T: Decodable>(
+        _ type: T.Type,
+        from output: String
+    ) -> T? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIEnvelope<T>.self, from: data),
+              envelope.ok,
+              envelope.schemaVersion == 1
+        else {
+            return nil
+        }
+        return envelope.data
+    }
+
+    private nonisolated static func parseCLIError(from output: String) -> String? {
+        guard let data = output.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(CLIErrorEnvelope.self, from: data),
+              !envelope.ok
+        else {
+            return nil
+        }
+        return envelope.error.message
+    }
+}
+
+private struct CLIEnvelope<Payload: Decodable>: Decodable {
+    let schemaVersion: Int
+    let ok: Bool
+    let data: Payload
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case ok
+        case data
+    }
+}
+
+private struct CLIErrorEnvelope: Decodable {
+    struct Body: Decodable {
+        let code: String
+        let message: String
+    }
+
+    let ok: Bool
+    let error: Body
+}
+
+private struct CLIStatusData: Decodable {
+    struct Pi: Decodable {
+        let version: String?
+        let executable: String?
+    }
+
+    let configState: String?
+    let pi: Pi
+
+    enum CodingKeys: String, CodingKey {
+        case configState = "config_state"
+        case pi
+    }
+}
+
+private struct CLIWorkspaceListData: Decodable {
+    struct Workspace: Decodable {
+        let id: UUID
+        let name: String
+        let path: String
+    }
+
+    let workspaces: [Workspace]
+}
+
+private struct CLIWorkspaceMutationData: Decodable {
+    let workspace: CLIWorkspaceListData.Workspace
+}
+
+private struct CLIWorkspaceSessionsData: Decodable {
+    let sessions: [WorkspaceSessionRecord]
+}
+
+private struct CLIDeviceListData: Decodable {
+    struct Device: Decodable {
+        let id: String
+        let name: String
+        let pairedAt: String
+
+        enum CodingKeys: String, CodingKey {
+            case id
+            case name
+            case pairedAt = "paired_at"
+        }
+    }
+
+    let devices: [Device]
+}
+
+private struct CLIPiData: Decodable {
+    let executable: String?
+}
+
+private struct CLIRelayData: Decodable {
+    let url: String?
+    let enabled: Bool
 }
 
 /// Small POSIX Unix-domain socket wrapper used for the local Host service
@@ -972,7 +1277,7 @@ private enum HostModelError: LocalizedError {
     }
 }
 
-private enum ServiceEvent: Decodable {
+enum ServiceEvent: Decodable {
     case ready
     case pairingRequested(PairingRequestEvent)
     case connectionEstablished
@@ -1087,7 +1392,21 @@ private struct ServiceSession: Decodable {
     }
 }
 
-private struct PairingRequestEvent {
+private struct WorkspaceSessionRecord: Decodable {
+    let id: String
+    let title: String?
+    let modifiedAt: String
+    let messageCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case modifiedAt = "modified_at"
+        case messageCount = "message_count"
+    }
+}
+
+struct PairingRequestEvent {
     let id: UUID
     let deviceName: String
     let confirmationCode: String

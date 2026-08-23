@@ -17,6 +17,7 @@ const PAIRING_TTL: Duration = Duration::from_secs(120);
 const STATIC_PUBLIC_KEY_BYTES: usize = 32;
 pub const MAX_PENDING_PAIRING_OFFERS: usize = 64;
 const RELAY_CHANNEL_BYTES: usize = 32;
+const MAX_DEVICE_NAME_CHARS: usize = 80;
 
 /// Secret, short-lived bearer value presented by a local/QR pairing flow.
 #[derive(Clone, PartialEq, Eq)]
@@ -70,6 +71,13 @@ pub struct ApprovedDevice {
     pub paired_at: DateTime<Utc>,
 }
 
+/// Durable device revocation plus best-effort live socket cleanup.
+pub struct DeviceRevocation {
+    pub device: ApprovedDevice,
+    pub closed_connections: usize,
+    pub connection_cleanup_failed: bool,
+}
+
 #[derive(Clone)]
 struct PendingState {
     summary: PairingPending,
@@ -115,7 +123,7 @@ impl PairingCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         purge_expired(&mut state, now);
-        if state.offers.len() >= MAX_PENDING_PAIRING_OFFERS {
+        if state.offers.len().saturating_add(state.pending.len()) >= MAX_PENDING_PAIRING_OFFERS {
             return Err(PairingError::OfferCapacity);
         }
         state
@@ -165,7 +173,18 @@ impl PairingCoordinator {
         }
         let device_name = device_name.into();
         let device_name = device_name.trim();
-        if device_name.is_empty() {
+        if device_name.is_empty()
+            || device_name.chars().count() > MAX_DEVICE_NAME_CHARS
+            || device_name.chars().any(|character| {
+                character.is_control()
+                    || matches!(
+                        character,
+                        '\u{202a}'..='\u{202e}'
+                            | '\u{2066}'..='\u{2069}'
+                            | '\u{200b}'..='\u{200f}'
+                    )
+            })
+        {
             return Err(PairingError::InvalidDeviceName);
         }
         if remote_static_public_key.len() != STATIC_PUBLIC_KEY_BYTES {
@@ -224,7 +243,8 @@ impl PairingCoordinator {
             .persistence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut config = self.config_store.load()?;
+        let transaction = self.config_store.transaction()?;
+        let mut config = transaction.load()?;
         if let Some(existing) = config.devices.iter().find(|device| device.id == device_id) {
             let public_key = STANDARD
                 .decode(&existing.public_key)
@@ -247,7 +267,7 @@ impl PairingCoordinator {
             paired_at,
             unknown: serde_json::Map::new(),
         });
-        self.config_store.save(&config)?;
+        transaction.save(&config)?;
         Ok(ApprovedDevice {
             id: device_id,
             name: pending.summary.device_name,
@@ -341,7 +361,8 @@ impl PairingCoordinator {
             .persistence
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut config = self.config_store.load()?;
+        let transaction = self.config_store.transaction()?;
+        let mut config = transaction.load()?;
         let index = config
             .devices
             .iter()
@@ -351,7 +372,7 @@ impl PairingCoordinator {
         let public_key = STANDARD
             .decode(&record.public_key)
             .map_err(PairingError::InvalidStoredPublicKey)?;
-        self.config_store.save(&config)?;
+        transaction.save(&config)?;
         Ok(ApprovedDevice {
             id: record.id,
             name: record.name,
@@ -376,11 +397,18 @@ impl PairingCoordinator {
         &self,
         device_id: &str,
         registry: &ConnectionRegistry,
-    ) -> Result<(ApprovedDevice, usize), PairingError> {
+    ) -> Result<DeviceRevocation, PairingError> {
         let disconnect_result = registry.revoke_device(device_id);
         let device = self.revoke(device_id)?;
-        let closed = disconnect_result?;
-        Ok((device, closed))
+        let (closed_connections, connection_cleanup_failed) = match disconnect_result {
+            Ok(closed) => (closed, false),
+            Err(_) => (0, true),
+        };
+        Ok(DeviceRevocation {
+            device,
+            closed_connections,
+            connection_cleanup_failed,
+        })
     }
 }
 

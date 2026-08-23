@@ -19,7 +19,9 @@ use crate::connection_manager::{ConnectionId, ConnectionRegistry};
 use crate::direct_tcp::{DirectTcpError, DirectTcpListener, EncryptedConnection};
 use crate::discovery::{LanEndpoint, LanEndpointError};
 use crate::host_dispatcher::{HostProtocolDispatcher, HostState};
-use crate::pairing::{PairingCoordinator, PairingError, PairingPending};
+use crate::pairing::{
+    MAX_PENDING_PAIRING_OFFERS, PairingCoordinator, PairingError, PairingPending,
+};
 use crate::runtime_manager::{ActiveRuntimeSummary, RuntimeManager, RuntimeManagerError};
 use crate::secure_connection::{
     AuthenticatedConnection, PendingPairingConnection, SecureConnectionError,
@@ -39,6 +41,19 @@ pub struct PairingRequest {
     pub confirmation_code: String,
     pub expires_at: SystemTime,
     pub peer_addr: std::net::SocketAddr,
+}
+
+/// Result of reconciling durable configuration with the running host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigRefreshReport {
+    pub authorization_changed: bool,
+    pub released_sessions: usize,
+    /// Authorization is already fail-closed; background reconciliation will
+    /// retry termination of a runtime that was briefly busy.
+    pub cleanup_pending: bool,
+    /// Revoked device dispatch is already denied even when an OS socket close
+    /// reported an error.
+    pub connection_cleanup_failed: bool,
 }
 
 impl From<&PairingPending> for PairingRequest {
@@ -109,6 +124,7 @@ impl HostServiceHandle {
     /// Returns a snapshot of pairing requests currently waiting for approval.
     #[must_use]
     pub fn pending_requests(&self) -> Vec<PairingRequest> {
+        self.expire_pending_requests();
         self.shared
             .pending
             .lock()
@@ -122,6 +138,33 @@ impl HostServiceHandle {
             .collect()
     }
 
+    /// Drops expired unapproved pairing sockets and their coordinator state.
+    ///
+    /// This bounds unauthenticated resources even when no host UI is open.
+    pub fn expire_pending_requests(&self) -> usize {
+        let now = SystemTime::now();
+        let expired = {
+            let mut pending = self
+                .shared
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids = pending
+                .iter()
+                .filter(|(_, connection)| now >= connection.connection.pending().expires_at)
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        let count = expired.len();
+        for pending in expired {
+            let _ = pending.connection.reject(&self.shared.coordinator);
+        }
+        count
+    }
+
     /// Approves a pending phone and starts its authenticated protocol loop.
     ///
     /// # Errors
@@ -129,6 +172,7 @@ impl HostServiceHandle {
     /// Returns [`HostServiceError`] when the request expired, was already
     /// handled, or durable device trust could not be written.
     pub fn approve(&self, request_id: Uuid) -> Result<(), HostServiceError> {
+        self.expire_pending_requests();
         let pending = self
             .shared
             .pending
@@ -155,6 +199,7 @@ impl HostServiceHandle {
     ///
     /// Returns [`HostServiceError`] when the request is unknown or expired.
     pub fn reject(&self, request_id: Uuid) -> Result<(), HostServiceError> {
+        self.expire_pending_requests();
         let pending = self
             .shared
             .pending
@@ -185,13 +230,46 @@ impl HostServiceHandle {
     ///
     /// Returns [`HostServiceError`] when the durable configuration cannot be
     /// loaded or fails `HostState` validation.
-    pub fn refresh_config(&self) -> Result<(), HostServiceError> {
+    pub fn refresh_config(&self) -> Result<ConfigRefreshReport, HostServiceError> {
         let config = self.shared.coordinator.current_config()?;
-        self.shared
-            .host_state
-            .replace(config)
-            .map_err(PairingError::Config)
-            .map_err(HostServiceError::Pairing)
+        let previous = self.shared.host_state.snapshot();
+        let changed = config != previous;
+        let authorized = config
+            .workspaces
+            .iter()
+            .filter_map(|workspace| {
+                std::fs::canonicalize(&workspace.path)
+                    .ok()
+                    .filter(|canonical| canonical == &workspace.path && canonical.is_dir())
+            })
+            .collect();
+        let mut connection_error = None;
+        if changed {
+            for device in &previous.devices {
+                if !config.devices.iter().any(|current| current.id == device.id)
+                    && let Err(error) = self.shared.registry.revoke_device(&device.id)
+                    && connection_error.is_none()
+                {
+                    connection_error = Some(error);
+                }
+            }
+            self.shared
+                .host_state
+                .replace(config)
+                .map_err(PairingError::Config)
+                .map_err(HostServiceError::Pairing)?;
+        }
+        let (released_sessions, cleanup_pending) =
+            match self.shared.runtimes.release_outside_workspaces(&authorized) {
+                Ok(released) => (released.len(), false),
+                Err(_) => (0, true),
+            };
+        Ok(ConfigRefreshReport {
+            authorization_changed: changed,
+            released_sessions,
+            cleanup_pending,
+            connection_cleanup_failed: connection_error.is_some(),
+        })
     }
 
     /// Revokes a paired device and closes every matching live connection.
@@ -203,12 +281,11 @@ impl HostServiceHandle {
     pub fn revoke_device(
         &self,
         device_id: &str,
-    ) -> Result<crate::pairing::ApprovedDevice, HostServiceError> {
+    ) -> Result<crate::pairing::DeviceRevocation, HostServiceError> {
         let revoked = self
             .shared
             .coordinator
-            .revoke_and_disconnect(device_id, &self.shared.registry)?
-            .0;
+            .revoke_and_disconnect(device_id, &self.shared.registry)?;
         self.shared.refresh_host_state();
         Ok(revoked)
     }
@@ -447,17 +524,24 @@ fn classify_connection(mut connection: EncryptedConnection, shared: &Arc<HostSer
                 let mut summary = PairingRequest::from(pending.pending());
                 summary.peer_addr = peer_addr;
                 let id = summary.id;
-                shared
+                let mut pending_connections = shared
                     .pending
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(
-                        id,
-                        PendingConnection {
-                            connection: pending,
-                            peer_addr,
-                        },
-                    );
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if pending_connections.len() >= MAX_PENDING_PAIRING_OFFERS {
+                    drop(pending_connections);
+                    let _ = pending.reject(&shared.coordinator);
+                    emit_failure(shared, peer_addr, ConnectionStage::PairingApproval);
+                    return;
+                }
+                pending_connections.insert(
+                    id,
+                    PendingConnection {
+                        connection: pending,
+                        peer_addr,
+                    },
+                );
+                drop(pending_connections);
                 let _ = shared
                     .events
                     .send(HostServiceEvent::PairingRequested(summary));

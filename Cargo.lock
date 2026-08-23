@@ -1032,6 +1032,7 @@ dependencies = [
  "fs2",
  "getrandom 0.3.4",
  "hostname",
+ "libc",
  "mdns-sd",
  "pix-wire",
  "rustls",

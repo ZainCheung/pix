@@ -21,9 +21,18 @@ struct PixMacApp: App {
             HostMenuView()
                 .environment(model)
         } label: {
-            StatusLabel(status: model.status)
+            StatusItemLabel()
+                .environment(model)
         }
         .menuBarExtraStyle(.menu)
+
+        Window(String(localized: "Set Up Pix"), id: "setup") {
+            SetupWindow()
+                .environment(model)
+        }
+        .windowResizability(.contentSize)
+        .defaultSize(width: 480, height: 480)
+        .defaultPosition(.center)
 
         Window(String(localized: "Add Device"), id: "add-device") {
             AddDeviceWindow()

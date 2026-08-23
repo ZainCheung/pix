@@ -79,11 +79,12 @@ fn persisted_revocation_and_disconnect_are_one_host_operation() {
         .register(&device, server.control().expect("control"))
         .expect("register connection");
 
-    let (revoked, closed) = coordinator
+    let revocation = coordinator
         .revoke_and_disconnect(&device.id, &registry)
         .expect("revoke and disconnect");
-    assert_eq!(revoked.id, device.id);
-    assert_eq!(closed, 1);
+    assert_eq!(revocation.device.id, device.id);
+    assert_eq!(revocation.closed_connections, 1);
+    assert!(!revocation.connection_cleanup_failed);
     assert!(store.load().expect("config").devices.is_empty());
     assert!(coordinator.authenticate_peer(&[8_u8; 32]).is_err());
 }

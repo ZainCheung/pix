@@ -10,6 +10,7 @@
 		09AD247B6B3D963ABFE3EE01 /* RemotePairingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 539F44CAD653A676ED57A0D6 /* RemotePairingWindow.swift */; };
 		41BD093D6D697C5DE3DE2597 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFE54B32065C3BB5A052FA6C /* Assets.xcassets */; };
 		5E9F60AA0C2B70F57600AF88 /* HostModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C266F2440693B4A72B52E81C /* HostModel.swift */; };
+		64D13222AE1D82EEF9F9BAC2 /* SetupWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347E9029B54B0DADB10A4C90 /* SetupWindow.swift */; };
 		66F2387BDF8EF31ABD27986B /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 4FFE7256A50D7E91C2BC2C9A /* PrivacyInfo.xcprivacy */; };
 		6F63368CBCE05E2C40C75961 /* HostModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F68FA8482D3A2E602D4EDCE0 /* HostModelTests.swift */; };
 		B429572875E2CE995C3A8934 /* HostTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBE4AEBF08911680D2EF8A48 /* HostTypes.swift */; };
@@ -32,6 +33,7 @@
 		0384C80514D2C09EB80520E9 /* PixMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixMacApp.swift; sourceTree = "<group>"; };
 		0F48ECAC26CE672B8BE703FF /* PixTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PixTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		272FCE8BB5450CE6A22C2A97 /* HostMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostMenuView.swift; sourceTree = "<group>"; };
+		347E9029B54B0DADB10A4C90 /* SetupWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SetupWindow.swift; sourceTree = "<group>"; };
 		454A1E7C8E168D128CF48DBF /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4FFE7256A50D7E91C2BC2C9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		539F44CAD653A676ED57A0D6 /* RemotePairingWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePairingWindow.swift; sourceTree = "<group>"; };
@@ -80,6 +82,7 @@
 			children = (
 				54304B7BD949FAD041D38702 /* Menu */,
 				06FA80575B5321DF73C4A354 /* Settings */,
+				9F2AD8184ADCB018674181A3 /* Setup */,
 			);
 			path = Features;
 			sourceTree = "<group>";
@@ -99,6 +102,14 @@
 				C266F2440693B4A72B52E81C /* HostModel.swift */,
 			);
 			path = Services;
+			sourceTree = "<group>";
+		};
+		9F2AD8184ADCB018674181A3 /* Setup */ = {
+			isa = PBXGroup;
+			children = (
+				347E9029B54B0DADB10A4C90 /* SetupWindow.swift */,
+			);
+			path = Setup;
 			sourceTree = "<group>";
 		};
 		A9000F517E090E752833D7BA = {
@@ -161,6 +172,7 @@
 			buildPhases = (
 				EE64490715A6FCE964349756 /* Sources */,
 				0A4F9690C25E328AADF2CEFE /* Resources */,
+				A179258D394221375D47D09B /* Embed matching Pix CLI for Debug runs */,
 			);
 			buildRules = (
 			);
@@ -222,6 +234,28 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		A179258D394221375D47D09B /* Embed matching Pix CLI for Debug runs */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Embed matching Pix CLI for Debug runs";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Debug\" ]; then\n  exit 0\nfi\nset -eu\nrepository_root=\"$(cd \"${SRCROOT}/../..\" && pwd)\"\ncargo_binary=\"$(command -v cargo || true)\"\nif [ -z \"${cargo_binary}\" ]; then\n  for candidate in \"/Users/zain/.cargo/bin/cargo\" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do\n    if [ -x \"${candidate}\" ]; then\n      cargo_binary=\"${candidate}\"\n      break\n    fi\n  done\nfi\ntest -n \"${cargo_binary}\"\n\"${cargo_binary}\" build --manifest-path \"${repository_root}/Cargo.toml\" -p pix-cli --locked\ncli_binary=\"${repository_root}/target/debug/pix\"\ntest -x \"${cli_binary}\"\nresources_path=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${resources_path}\"\ninstall -m 0755 \"${cli_binary}\" \"${resources_path}/pix\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		43E297D390A12AAC1A295E8B /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -241,6 +275,7 @@
 				E2CBB9C29B1D11D0B4FD7EEB /* PixMacApp.swift in Sources */,
 				09AD247B6B3D963ABFE3EE01 /* RemotePairingWindow.swift in Sources */,
 				C9557AE69B2EA6BA7B09DC97 /* SettingsView.swift in Sources */,
+				64D13222AE1D82EEF9F9BAC2 /* SetupWindow.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -9,6 +9,28 @@ func hostModelStartsInSetupState() {
     #expect(model.status == .starting)
     #expect(model.workspaces.isEmpty)
     #expect(model.devices.isEmpty)
+    #expect(model.inventoryRevision == 0)
+}
+
+@Test("menu lifecycle status can advance independently of its inventory snapshot")
+func menuStatusPresentationReflectsReadyState() {
+    let starting = HostMenuStatusPresentation(status: .starting, detail: nil)
+    let ready = HostMenuStatusPresentation(status: .ready, detail: nil)
+
+    #expect(starting.status == .starting)
+    #expect(ready.status == .ready)
+    #expect(ready.status.title == "Ready")
+    #expect(starting.status.menuSymbolName == "clock")
+    #expect(ready.status.menuSymbolName == "checkmark.circle.fill")
+    #expect(HostStatus.failed("boom").tint == .danger)
+    #expect(HostStatus.failed("boom").title == "Error")
+    #expect(HostStatus.failed("boom").menuSymbolName == "xmark.circle.fill")
+}
+
+@Test("menu inventory hydrates only after reconciliation advances its revision")
+func menuInventoryHydratesAfterInventoryRevision() {
+    #expect(!HostMenuSnapshot.shouldHydrate(forInventoryRevision: 0))
+    #expect(HostMenuSnapshot.shouldHydrate(forInventoryRevision: 1))
 }
 
 @Test("pairing requests preserve the six digit confirmation code")
@@ -78,6 +100,24 @@ func activeSessionUsesWorkspaceName() {
     #expect(session.isRunning)
 }
 
+@Test("workspace session inventory decodes menu-safe summaries")
+func parsesWorkspaceSessionInventory() {
+    let workspaceID = UUID()
+    let sessions = HostModel.parseWorkspaceSessions(
+        from: """
+        {"id":"session-1","title":"Fix menu hover","modified_at":"2026-08-23T10:00:00.123Z","message_count":4}
+        {"id":"session-2","title":null,"modified_at":"2026-08-22T10:00:00Z","message_count":0}
+        """,
+        workspaceID: workspaceID
+    )
+
+    #expect(sessions.count == 2)
+    #expect(sessions.first?.workspaceID == workspaceID)
+    #expect(sessions.first?.displayTitle == "Fix menu hover")
+    #expect(sessions.last?.displayTitle == "Untitled Session")
+    #expect(sessions.first?.messageCount == 4)
+}
+
 @Test("CLI resolver finds a Pix binary in the GUI-visible PATH")
 func resolvesPixFromPathWithoutShellEnvironment() throws {
     let root = FileManager.default.temporaryDirectory
@@ -100,6 +140,52 @@ func resolvesPixFromPathWithoutShellEnvironment() throws {
         searchLoginShell: false
     )
     #expect(resolved.standardizedFileURL == executable.standardizedFileURL)
+}
+
+@Test("CLI resolver prefers the embedded binary over a stale PATH install")
+func resolvesEmbeddedPixBeforePath() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pix-host-model-\(UUID().uuidString)")
+    let bundleURL = root.appendingPathComponent("Pix.bundle")
+    let resources = bundleURL.appendingPathComponent("Contents/Resources")
+    let staleBin = root.appendingPathComponent("stale-bin")
+    try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: staleBin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try Data(
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.pix.tests</string></dict></plist>
+        """.utf8
+    ).write(to: bundleURL.appendingPathComponent("Contents/Info.plist"))
+
+    let embedded = resources.appendingPathComponent("pix")
+    try Data("#!/bin/sh\n".utf8).write(to: embedded)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o755))],
+        ofItemAtPath: embedded.path
+    )
+
+    let stale = staleBin.appendingPathComponent("pix")
+    try Data("#!/bin/sh\n".utf8).write(to: stale)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o755))],
+        ofItemAtPath: stale.path
+    )
+
+    guard let bundle = Bundle(path: bundleURL.path) else {
+        Issue.record("Could not load the temporary test bundle")
+        return
+    }
+    let resolved = try HostModel.resolvePixExecutable(
+        environment: ["PATH": staleBin.path],
+        homeDirectory: root.appendingPathComponent("home"),
+        bundle: bundle,
+        searchLoginShell: false
+    )
+    #expect(resolved.standardizedFileURL == embedded.standardizedFileURL)
 }
 
 @Test("CLI resolver includes the mise shim fallback")
@@ -167,6 +253,22 @@ func parsesRelayStatus() {
     #expect(!disabled.isActive)
 
     #expect(HostModel.parseRelayConfiguration(from: "relay: not configured\n") == .none)
+
+    let json = HostModel.parseRelayConfiguration(
+        from: """
+        {"schema_version":1,"ok":true,"command":"relay.show","data":{"url":"wss://relay.example.com","enabled":true,"configured":true,"service_restart_required":false}}
+        """
+    )
+    #expect(json.url == "wss://relay.example.com")
+    #expect(json.isActive)
+}
+
+@Test("native app always invokes the machine-readable non-interactive CLI")
+func buildsHeadlessCLIArguments() {
+    #expect(
+        HostModel.headlessArguments(["workspace", "list"])
+            == ["--output", "json", "--no-input", "workspace", "list"]
+    )
 }
 
 @Test("relay URL validation only accepts credential-free WebSocket endpoints")
@@ -178,4 +280,49 @@ func validatesRelayURL() {
     #expect(HostModel.normalizedRelayURL("wss://user:secret@relay.example.com") == nil)
     #expect(HostModel.normalizedRelayURL("wss://relay.example.com/with space") == nil)
     #expect(HostModel.normalizedRelayURL("not a URL") == nil)
+}
+
+@Test("first-run detection follows the status envelope's config state")
+func firstRunDetectionFollowsConfigState() {
+    let missing = HostModel.isConfiguredStatus(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"missing","pi":{"source":"path"},"devices":0,"workspaces":0}}
+        """
+    )
+    #expect(missing == false)
+
+    let ready = HostModel.isConfiguredStatus(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"source":"path","version":"0.84.2"},"devices":1,"workspaces":2}}
+        """
+    )
+    #expect(ready == true)
+
+    #expect(HostModel.isConfiguredStatus(from: "Pix status\n  config: missing") == nil)
+}
+
+@Test("guided setup recommends the product relay")
+func setupRecommendsProductRelay() {
+    #expect(HostModel.defaultRelayURL == "wss://pix-relay.zaincheung-255.workers.dev")
+    #expect(HostModel.normalizedRelayURL(HostModel.defaultRelayURL) != nil)
+    #expect(HostModel.normalizedRelayURL("not a url") == nil)
+}
+
+@Test("socket device lists advance the menu inventory revision")
+@MainActor
+func socketDeviceListAdvancesMenuInventory() throws {
+    let model = HostModel()
+    let before = model.inventoryRevision
+    let event = try JSONDecoder().decode(
+        ServiceEvent.self,
+        from: Data(
+            """
+            {"type":"device_list","devices":[{"id":"abc","name":"iPhone","paired_at":"2026-08-24T00:00:00Z"}]}
+            """.utf8
+        )
+    )
+    model.apply(event)
+    #expect(model.devices.count == 1)
+    #expect(model.devices.first?.name == "iPhone")
+    #expect(model.inventoryRevision == before + 1)
 }

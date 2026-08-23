@@ -85,6 +85,20 @@ fn token_is_single_use_and_expires_after_two_minutes() {
 }
 
 #[test]
+fn rejects_terminal_control_sequences_and_oversized_device_names() {
+    let (_directory, coordinator, _store) = coordinator();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(25_000);
+    for name in ["Phone\u{1b}]0;spoof\u{7}", &"x".repeat(81)] {
+        let offer = coordinator.issue_offer(now).expect("pairing offer");
+        assert!(
+            coordinator
+                .begin_approval(&offer.token, name, &[1_u8; 32], &[2_u8; 32], now)
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn rejected_or_revoked_device_cannot_authenticate() {
     let (_directory, coordinator, store) = coordinator();
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(30_000);
@@ -142,6 +156,25 @@ fn pending_offer_capacity_is_bounded_and_recoverable() {
 
     assert!(coordinator.invalidate_offer(&offers[0].token));
     assert!(coordinator.issue_offer(now).is_ok());
+}
+
+#[test]
+fn completed_handshakes_still_count_toward_pairing_capacity() {
+    let (_directory, coordinator, _store) = coordinator();
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(36_000);
+    for index in 0..MAX_PENDING_PAIRING_OFFERS {
+        let offer = coordinator.issue_offer(now).expect("bounded offer");
+        coordinator
+            .begin_approval(
+                &offer.token,
+                format!("Phone {index}"),
+                &[u8::try_from(index).unwrap_or(0); 32],
+                &[3_u8; 32],
+                now,
+            )
+            .expect("pending approval");
+    }
+    assert!(coordinator.issue_offer(now).is_err());
 }
 
 #[test]

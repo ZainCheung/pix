@@ -16,17 +16,30 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
     let executable = std::env::current_exe().context("locating current pix executable")?;
     let config_path = absolute_config_path(store.path())?;
     let plist_path = launch_agent_path()?;
+    if plist_path.is_file() && !installed(store)? {
+        bail!(
+            "a Pix LaunchAgent is already installed for another configuration; use its --config path to uninstall it before replacing the service"
+        );
+    }
     let log_directory = config_path
         .parent()
         .context("locating the Pix configuration directory")?
         .join("logs");
     fs::create_dir_all(&log_directory)
         .with_context(|| format!("creating {}", log_directory.display()))?;
+    let desired_definition = render_launch_agent(&executable, &config_path, &log_directory);
+    let definition_changed =
+        fs::read_to_string(&plist_path).map_or(true, |current| current != desired_definition);
     write_launch_agent(&plist_path, &executable, &config_path, &log_directory)?;
 
     let host_running = crate::status::HostServiceStatus::current(store.path()).is_some();
+    let control_upgrade_required =
+        host_running && crate::service_client::verify_control_compatibility(store).is_err();
     if launchctl_is_loaded()? {
-        if !no_start && !host_running {
+        if !no_start && (definition_changed || control_upgrade_required) {
+            run_launchctl(&["bootout", &launchctl_target()?])?;
+            bootstrap_launch_agent(&plist_path)?;
+        } else if !no_start && !host_running {
             run_launchctl(&["kickstart", "-k", &launchctl_target()?])?;
         }
     } else if !no_start && !host_running {
@@ -59,21 +72,26 @@ pub(crate) fn start(store: &ConfigStore, announce: bool) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn stop(store: &ConfigStore) -> Result<()> {
+pub(crate) fn stop(store: &ConfigStore, announce: bool) -> Result<()> {
     require_launchctl()?;
+    refuse_other_configuration(store)?;
     let requested = request_graceful_shutdown(store)?;
     if launchctl_is_loaded()? {
         run_launchctl(&["bootout", &launchctl_target()?])?;
-        println!("Pix service stopped.");
+        if announce {
+            println!("Pix service stopped.");
+        }
     } else if requested {
-        println!("Requested Pix host service shutdown.");
-    } else {
+        if announce {
+            println!("Requested Pix host service shutdown.");
+        }
+    } else if announce {
         println!("Pix service is not running.");
     }
     Ok(())
 }
 
-pub(crate) fn restart(store: &ConfigStore) -> Result<()> {
+pub(crate) fn restart(store: &ConfigStore, announce: bool) -> Result<()> {
     require_launchctl()?;
     if !installed(store)? {
         bail!("Pix LaunchAgent is not installed; run `pix service install` first");
@@ -85,7 +103,9 @@ pub(crate) fn restart(store: &ConfigStore) -> Result<()> {
     if installed(store)? {
         bootstrap_launch_agent(&launch_agent_path()?)?;
     }
-    println!("Pix service restart requested.");
+    if announce {
+        println!("Pix service restart requested.");
+    }
     Ok(())
 }
 
@@ -102,8 +122,9 @@ fn request_graceful_shutdown(store: &ConfigStore) -> Result<bool> {
     Ok(true)
 }
 
-pub(crate) fn uninstall(store: &ConfigStore) -> Result<()> {
+pub(crate) fn uninstall(store: &ConfigStore, announce: bool) -> Result<()> {
     require_launchctl()?;
+    refuse_other_configuration(store)?;
     let path = launch_agent_path()?;
     let _ = if path.exists() {
         request_graceful_shutdown(store)?
@@ -120,25 +141,35 @@ pub(crate) fn uninstall(store: &ConfigStore) -> Result<()> {
         );
     }
     match fs::remove_file(&path) {
-        Ok(()) => println!("Removed {}.", path.display()),
+        Ok(()) if announce => println!("Removed {}.", path.display()),
+        Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            println!("No Pix LaunchAgent is installed at {}.", path.display());
+            if announce {
+                println!("No Pix LaunchAgent is installed at {}.", path.display());
+            }
         }
         Err(error) => return Err(error).with_context(|| format!("removing {}", path.display())),
     }
     Ok(())
 }
 
-pub(crate) fn installed(_store: &ConfigStore) -> Result<bool> {
-    Ok(launch_agent_path()?.is_file())
+pub(crate) fn installed(store: &ConfigStore) -> Result<bool> {
+    let path = launch_agent_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let config = xml_escape(&absolute_config_path(store.path())?.to_string_lossy());
+    Ok(contents.contains(&format!("<string>{config}</string>")))
 }
 
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
     require_launchctl()?;
-    // launchctl is global to the user session and cannot distinguish a
-    // different Pix config. The config-scoped status record is the source of
-    // truth used by the native macOS client and `pix status`.
-    Ok(crate::status::HostServiceStatus::current(store.path()).is_some())
+    if !installed(store)? {
+        return Ok(false);
+    }
+    launchctl_is_loaded()
 }
 
 fn require_launchctl() -> Result<()> {
@@ -204,15 +235,32 @@ fn bootstrap_launch_agent(path: &Path) -> Result<()> {
 }
 
 fn run_launchctl(arguments: &[&str]) -> Result<()> {
-    let status = Command::new("launchctl")
+    let output = Command::new("launchctl")
         .args(arguments)
-        .status()
+        .output()
         .with_context(|| format!("running launchctl {}", arguments.join(" ")))?;
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        bail!("launchctl {} exited with {status}", arguments.join(" "))
+        let detail = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "launchctl {} exited with {}: {}",
+            arguments.join(" "),
+            output.status,
+            detail.trim()
+        )
     }
+}
+
+fn refuse_other_configuration(store: &ConfigStore) -> Result<()> {
+    let path = launch_agent_path()?;
+    if path.is_file() && !installed(store)? {
+        bail!(
+            "the installed Pix LaunchAgent belongs to another configuration; refusing to control it with --config {}",
+            store.path().display()
+        );
+    }
+    Ok(())
 }
 
 fn render_launch_agent(executable: &Path, config_path: &Path, log_directory: &Path) -> String {
@@ -228,6 +276,9 @@ fn render_launch_agent(executable: &Path, config_path: &Path, log_directory: &Pa
            <key>ProgramArguments</key>\n\
            <array>\n\
              <string>{executable}</string>\n\
+             <string>--output</string>\n\
+             <string>human</string>\n\
+             <string>--no-input</string>\n\
              <string>--config</string>\n\
              <string>{config_path}</string>\n\
              <string>serve</string>\n\

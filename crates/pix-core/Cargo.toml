@@ -15,6 +15,7 @@ directories.workspace = true
 fs2.workspace = true
 getrandom.workspace = true
 hostname.workspace = true
+libc = "0.2"
 mdns-sd.workspace = true
 pix-wire = { path = "../pix-wire" }
 semver.workspace = true

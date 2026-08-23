@@ -9,11 +9,52 @@ Without an override, Pix stores host configuration at
 resolved path; host identity, service state, and logs live in the same Pix
 configuration directory.
 
+## Two modes: interactive and headless
+
+The same binary serves humans in a terminal and scripts or agents on a
+machine contract.
+
+Interactive mode is the default in a TTY:
+
+- A bare `pix` opens the home screen: a read-only host snapshot on top and
+  an action menu below. It never creates or modifies configuration.
+- A group command without an action (for example `pix device` or
+  `pix workspace`) opens that group's menu. Actions that remove trust —
+  revoking a device, removing a workspace — ask for confirmation first.
+
+Headless mode is opt-in with two global flags:
+
+```sh
+pix --output json --no-input status
+```
+
+- `--output human|json` (or `PIX_OUTPUT`) selects the format. JSON mode
+  never prompts and never opens a menu.
+- `--no-input` makes any command that would otherwise wait for a selection
+  fail with a usage error instead; pass the required ID explicitly.
+
+Outside a TTY, a bare `pix` prints the standard help text and exits 0, so
+pipelines and schedulers never block on a menu.
+
+### The JSON envelope
+
+Every JSON-mode command prints one object. Success goes to stdout, errors
+to stderr:
+
+```json
+{"schema_version": 1, "ok": true, "command": "status", "data": { ... }}
+{"schema_version": 1, "ok": false, "error": {"code": "usage", "message": "..."}}
+```
+
+Exit codes: `0` on success, `2` for usage errors (missing arguments or a
+required ID), `1` for command failures. Human-readable text is not a
+contract; parse only this envelope. An agent-facing skill with the full
+command inventory lives in `skills/pix-cli/SKILL.md`.
+
 ## Setup and diagnostics
 
 ```sh
 pix setup
-pix doctor
 pix status
 pix logs --tail 50
 ```
@@ -27,16 +68,23 @@ pix setup --workspace "$HOME/Projects/my-project"
 pix setup --relay wss://relay.example.com
 pix setup --no-pair --no-service --non-interactive \
   --workspace "$HOME/Projects/my-project"
+pix setup --advanced
 ```
 
-`pix doctor` checks the local configuration, Pi executable, version, and RPC
-capabilities. Use `--pi /path/to/pi` for a one-off probe or `pix pi set` to
-persist an explicit executable. Add `--verbose` when support needs local
-paths and environment details.
+Interactive setup goes straight to the recommended path; `--advanced`
+exposes host name, Pi selection, connectivity, workspaces, and the
+service question with a review step. Pairing is optional during setup
+(`pix device pair` works any time), and abandoning the wizard before it
+commits leaves no config file behind.
 
-`pix status` prints configuration and host-service state. `pix logs` prints
-payload-free host log entries; use `pix service logs` for the same log through
-the service subcommand.
+`pix status` prints configuration, host-service state, and the resolved Pi
+executable with its version. `pix logs` prints payload-free host log entries;
+use `pix service logs` for the same log through the service subcommand.
+
+`pix update` upgrades the running executable (and the macOS app bundle) from
+the repository's latest GitHub release, mirroring the first-party installer.
+On a configured host, `pix setup` runs a health verification directly; relay
+settings live in `pix relay` (the home screen's Settings entry).
 
 ## Workspaces
 
@@ -46,6 +94,7 @@ use it:
 ```sh
 pix workspace add "$HOME/Projects/my-project" --name my-project
 pix workspace list
+pix workspace sessions <workspace-id>
 pix workspace remove <workspace-id>
 ```
 
@@ -54,18 +103,40 @@ access to that root; it does not delete files.
 
 ## Devices
 
-Pairing requires an interactive terminal because the host asks you to approve
-the device's confirmation code:
+Pairing shows a confirmation code that a human should check against the
+phone. In a terminal, `pix device pair` walks you through it; headless
+callers split the flow into offer, review, and decision:
 
 ```sh
-pix device pair
+pix device pair                 # interactive: offer plus approval prompts
+pix device pair --remote        # interactive: relay offer with a QR code
 pix device list
+pix device pending              # requests waiting for approval
+pix device approve --code 123456
+pix device reject --request <request-id>
 pix device revoke <device-id>
 ```
 
-When a relay endpoint is active, `pix device pair` starts a short-lived remote
-pairing channel and prints a QR code. Without a relay it waits for a nearby
-client discovered over the local network.
+`approve` and `reject` accept exactly one of `--request` (the stable ID
+from `pix device pending`) or `--code` (the six digits shown on the
+phone). Revoking a device while the host service runs also closes its
+live connections.
+
+When a relay endpoint is active, `pix device pair --remote` starts a
+short-lived remote pairing channel and prints a QR code. Without a relay
+the host waits for a nearby client discovered over the local network.
+
+## Sessions
+
+The host service owns the Pi runtimes it starts. Inspect and release them
+without stopping the service:
+
+```sh
+pix session list
+pix session release <session-id>
+```
+
+Releasing a runtime lets another Pi process resume that session file.
 
 ## Pi selection
 
