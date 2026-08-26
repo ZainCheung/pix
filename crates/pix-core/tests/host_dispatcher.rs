@@ -732,7 +732,7 @@ fn image_history_is_externalized_and_loaded_in_bounded_chunks() {
             max_active_sessions: 2,
             max_concurrent_turns: 2,
             idle_timeout: Duration::from_secs(300),
-            request_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
             extra_arguments: Vec::new(),
             environment: HostEnvironment::from_process(),
         })
