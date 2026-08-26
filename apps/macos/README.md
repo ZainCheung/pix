@@ -71,6 +71,28 @@ interaction is unavailable.
 
 ## Develop
 
+For the normal edit/build/restart loop, run this from the repository root:
+
+```bash
+scripts/macos-dev-restart.sh
+```
+
+It builds the Debug app into `build/macos-debug`, embeds the matching
+`target/debug/pix`, updates the LaunchAgent with explicit `--adopt`, restarts
+the loaded host so an older DerivedData process cannot remain active, and
+opens the new menu-bar app. Set `PIX_MACOS_DEV_NO_OPEN=1` when only the host
+service should be refreshed.
+
+The first migration on a machine may require one interactive identity repair:
+
+```bash
+build/macos-debug/Build/Products/Debug/Pix.app/Contents/Resources/pix \
+  service repair-identity
+```
+
+For a plain App build without service replacement, use Xcode's `Run` action or
+the commands below.
+
 ```bash
 xcodegen generate
 xcodebuild -project Pix.xcodeproj -scheme Pix \
