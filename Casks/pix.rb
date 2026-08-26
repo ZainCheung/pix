@@ -1,6 +1,6 @@
 cask "pix" do
-  version "0.1.0"
-  sha256 "68ccdf9f6b3776ab6dda37485efc16c3bfef6c50e16e4088c8722225699449bc"
+  version "0.1.1"
+  sha256 "2598e1996edc47ec66e7921fbbd868ead7373b2b32797ec90f93c9bcd0b6536b"
 
   url "https://github.com/ZainCheung/pix/releases/download/v#{version}/pix-#{version}-macos-arm64.zip"
   name "Pix"
@@ -11,7 +11,8 @@ cask "pix" do
   depends_on macos: :sonoma
 
   app "Pix.app"
-  # Expose the CLI embedded in Pix.app as the canonical PATH entry.
+  # Expose the CLI embedded in Pix.app; this is a launcher for the same
+  # canonical binary the menu-bar app uses, not a second CLI installation.
   binary "#{appdir}/Pix.app/Contents/Resources/pix", target: "pix"
 
   # Unload the user LaunchAgent and quit the menu-bar app, but preserve the
