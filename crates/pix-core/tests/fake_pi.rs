@@ -364,6 +364,7 @@ fn runtime_manager_limits_turns_separately_from_resident_runtimes() {
             &PiCommand::Prompt {
                 message: "first".to_owned(),
                 streaming_behavior: None,
+                images: Vec::new(),
             },
         )
         .expect("first turn admission");
@@ -373,6 +374,7 @@ fn runtime_manager_limits_turns_separately_from_resident_runtimes() {
             &PiCommand::Prompt {
                 message: "second".to_owned(),
                 streaming_behavior: None,
+                images: Vec::new(),
             },
         )
         .expect_err("second turn exceeds the independent limit");
@@ -386,6 +388,7 @@ fn runtime_manager_limits_turns_separately_from_resident_runtimes() {
             &PiCommand::Prompt {
                 message: "second".to_owned(),
                 streaming_behavior: None,
+                images: Vec::new(),
             },
         )
         .expect("second turn after first settles");

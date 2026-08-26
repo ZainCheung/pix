@@ -174,6 +174,7 @@ Bonjour, and transport state:
 ```sh
 pix service install
 pix service install --no-start
+pix service install --adopt      # explicitly switch the registered CLI owner
 pix service start
 pix service status
 pix service restart
@@ -193,6 +194,12 @@ pix serve --json-events
 
 The JSON event stream is the native UI and automation bridge. It contains
 payload-free lifecycle and session events, not relay secrets or Pi messages.
+
+The macOS App bundle is the canonical CLI distribution, and the Homebrew
+`pix` command points to that same embedded binary. `service start`, `status`,
+`restart`, and `stop` operate on the currently installed owner. Installing
+from another CLI refuses to replace it; use `service install --adopt` only
+when intentionally transferring ownership.
 
 ## Diagnostics
 

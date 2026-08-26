@@ -6,12 +6,16 @@
 //! Linux and `LaunchAgents` on macOS.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use pix_core::ConfigStore;
+use serde::{Deserialize, Serialize};
+use tempfile::Builder;
 
+use crate::commands::shared::{default_host_name, load_host_identity};
 use crate::output::CommandOutput;
 
 #[cfg(target_os = "linux")]
@@ -26,6 +30,10 @@ pub enum ServiceCommand {
         /// Install and enable the service without starting it now.
         #[arg(long)]
         no_start: bool,
+        /// Explicitly make the current CLI the service owner when another
+        /// CLI is already registered for this configuration.
+        #[arg(long)]
+        adopt: bool,
     },
     /// Remove the user service and disable it.
     Uninstall,
@@ -35,6 +43,9 @@ pub enum ServiceCommand {
     Stop,
     /// Restart the installed user service.
     Restart,
+    /// Authorize the host identity interactively and refresh its protected
+    /// local recovery copy for background services.
+    RepairIdentity,
     /// Show service-manager and host-process status.
     Status,
     /// Print the most recent payload-free host log entries.
@@ -47,8 +58,8 @@ pub enum ServiceCommand {
 
 pub fn run(store: &ConfigStore, command: &ServiceCommand, output: CommandOutput) -> Result<()> {
     match command {
-        ServiceCommand::Install { no_start } => {
-            let path = platform_install(store, *no_start, !output.is_json())?;
+        ServiceCommand::Install { no_start, adopt } => {
+            let path = install_service(store, *no_start, !output.is_json(), *adopt)?;
             if !no_start {
                 wait_until_ready(store)?;
             }
@@ -76,8 +87,10 @@ pub fn run(store: &ConfigStore, command: &ServiceCommand, output: CommandOutput)
             wait_until_ready(store)?;
             emit_mutation(output, "service.restart", store)
         }
+        ServiceCommand::RepairIdentity => repair_identity(store, output),
         ServiceCommand::Uninstall => {
             platform_uninstall(store, !output.is_json())?;
+            remove_service_owner(store)?;
             emit_mutation(output, "service.uninstall", store)
         }
         ServiceCommand::Status => {
@@ -91,6 +104,183 @@ pub fn run(store: &ConfigStore, command: &ServiceCommand, output: CommandOutput)
     }
 }
 
+fn repair_identity(store: &ConfigStore, output: CommandOutput) -> Result<()> {
+    if output.is_json() {
+        bail!(
+            "`pix service repair-identity` requires human output so Keychain authorization can be shown"
+        )
+    }
+    let transaction = store.transaction()?;
+    let config = transaction
+        .load_or_create(default_host_name())
+        .context("loading Pix configuration")?;
+    load_host_identity(store, config.host.id).context("authorizing host identity")?;
+    let recovery_path = store
+        .path()
+        .parent()
+        .context("locating host identity directory")?
+        .join("host-identity.key");
+    println!(
+        "Host identity authorized; protected recovery copy is ready at {}.",
+        recovery_path.display()
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ServiceOwner {
+    executable: PathBuf,
+    version: String,
+}
+
+const SERVICE_OWNER_FILE: &str = "service-owner.json";
+
+fn install_service(
+    store: &ConfigStore,
+    no_start: bool,
+    announce: bool,
+    adopt: bool,
+) -> Result<PathBuf> {
+    let owner = current_service_owner()?;
+    ensure_service_owner(store, &owner, adopt)?;
+    let path = platform_install(store, no_start, announce)?;
+    write_service_owner(store, &owner)?;
+    if announce && adopt {
+        println!("Service owner adopted by {}.", owner.executable.display());
+    }
+    Ok(path)
+}
+
+fn current_service_owner() -> Result<ServiceOwner> {
+    let executable = std::env::current_exe().context("locating current pix executable")?;
+    Ok(ServiceOwner {
+        executable: normalize_executable(&executable),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+    })
+}
+
+fn normalize_executable(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn service_owner_path(store: &ConfigStore) -> Result<PathBuf> {
+    Ok(store
+        .path()
+        .parent()
+        .context("locating Pix configuration directory")?
+        .join(SERVICE_OWNER_FILE))
+}
+
+fn read_service_owner(store: &ConfigStore) -> Result<Option<ServiceOwner>> {
+    let path = service_owner_path(store)?;
+    let manifest = match fs::read(&path) {
+        Ok(contents) => Some(
+            serde_json::from_slice::<ServiceOwner>(&contents)
+                .with_context(|| format!("decoding service owner {}", path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let installed_executable = platform_installed_executable(store)?;
+    if let Some(executable) = installed_executable {
+        let executable = normalize_executable(&executable);
+        if let Some(owner) = manifest
+            .as_ref()
+            .filter(|owner| normalize_executable(&owner.executable) == executable)
+        {
+            return Ok(Some(ServiceOwner {
+                executable,
+                version: owner.version.clone(),
+            }));
+        }
+        // Older Pix installations predate the ownership manifest, and a
+        // --no-start adoption may leave the old process loaded temporarily.
+        // The platform definition is the live source of truth for the path.
+        return Ok(Some(ServiceOwner {
+            executable,
+            version: "legacy/unknown".to_owned(),
+        }));
+    }
+    Ok(manifest)
+}
+
+fn write_service_owner(store: &ConfigStore, owner: &ServiceOwner) -> Result<()> {
+    let path = service_owner_path(store)?;
+    let parent = path.parent().context("locating service owner directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let mut temporary = Builder::new()
+        .prefix(".pix-service-owner-")
+        .tempfile_in(parent)
+        .with_context(|| format!("creating temporary service owner in {}", parent.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))
+            .context("securing service owner")?;
+    }
+    let encoded = serde_json::to_vec_pretty(owner).context("encoding service owner")?;
+    temporary
+        .write_all(&encoded)
+        .and_then(|()| temporary.as_file_mut().sync_all())
+        .with_context(|| {
+            format!(
+                "writing temporary service owner {}",
+                temporary.path().display()
+            )
+        })?;
+    temporary.persist(&path).map_err(|error| {
+        anyhow::anyhow!(
+            "persisting service owner to {}: {}",
+            path.display(),
+            error.error
+        )
+    })?;
+    Ok(())
+}
+
+fn remove_service_owner(store: &ConfigStore) -> Result<()> {
+    let path = service_owner_path(store)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
+fn ensure_service_owner(store: &ConfigStore, current: &ServiceOwner, adopt: bool) -> Result<()> {
+    if !platform_installed(store)? {
+        return Ok(());
+    }
+    check_service_owner(read_service_owner(store)?.as_ref(), current, adopt)
+}
+
+fn check_service_owner(
+    existing: Option<&ServiceOwner>,
+    current: &ServiceOwner,
+    adopt: bool,
+) -> Result<()> {
+    let Some(existing) = existing else {
+        if adopt {
+            return Ok(());
+        }
+        bail!(
+            "Pix service owner is unknown for this existing installation; run `pix service install --adopt` once to register the current CLI ({})",
+            current.executable.display()
+        );
+    };
+    if normalize_executable(&existing.executable) == current.executable || adopt {
+        return Ok(());
+    }
+    bail!(
+        "Pix service is owned by {} (Pix {}), but this CLI is {}; run `pix service install --adopt` only when intentionally switching the service owner",
+        existing.executable.display(),
+        existing.version,
+        current.executable.display()
+    );
+}
+
 fn emit_mutation(output: CommandOutput, command: &str, store: &ConfigStore) -> Result<()> {
     if output.is_json() {
         output.success(command, &snapshot(store)?)?;
@@ -101,7 +291,7 @@ fn emit_mutation(output: CommandOutput, command: &str, store: &ConfigStore) -> R
 /// Installs and starts the service for setup. The returned path is only used
 /// for setup UI; the actual daemon is managed by the platform service manager.
 pub fn install_for_setup(store: &ConfigStore) -> Result<PathBuf> {
-    let unit_path = platform_install(store, false, false)?;
+    let unit_path = install_service(store, false, false, false)?;
     wait_until_ready(store)?;
     Ok(unit_path)
 }
@@ -109,7 +299,8 @@ pub fn install_for_setup(store: &ConfigStore) -> Result<PathBuf> {
 /// Removes the service unit. Setup uses this when the user asked for no
 /// background service but pairing needed a temporary host.
 pub fn uninstall_for_setup(store: &ConfigStore) -> Result<()> {
-    platform_uninstall(store, false)
+    platform_uninstall(store, false)?;
+    remove_service_owner(store)
 }
 
 fn start_with_announce(store: &ConfigStore, announce: bool) -> Result<()> {
@@ -154,7 +345,7 @@ pub fn ensure_running(store: &ConfigStore) -> Result<()> {
     if platform_installed(store)? {
         platform_start(store, false)?;
     } else {
-        platform_install(store, false, false)?;
+        install_service(store, false, false, false)?;
     }
     wait_until_ready(store)
 }
@@ -195,10 +386,33 @@ pub fn connect_events(store: &ConfigStore) -> Result<std::os::unix::net::UnixStr
 fn status(store: &ConfigStore) -> Result<()> {
     let installed = platform_installed(store)?;
     let active = platform_active(store)?;
+    let owner = read_service_owner(store)?;
+    let current_cli = current_service_owner()?.executable;
     println!("Pix service status");
     println!("  manager: {}", platform_name());
     println!("  installed: {}", if installed { "yes" } else { "no" });
     println!("  manager active: {}", if active { "yes" } else { "no" });
+    match owner {
+        Some(owner) => {
+            println!(
+                "  owner: {} (Pix {})",
+                owner.executable.display(),
+                owner.version
+            );
+            println!(
+                "  owner matches current CLI: {}",
+                if normalize_executable(&owner.executable) == current_cli {
+                    "yes"
+                } else {
+                    "no"
+                }
+            );
+        }
+        None if installed => {
+            println!("  owner: unknown (run `pix service install --adopt` once to register it)");
+        }
+        None => println!("  owner: not registered"),
+    }
     if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
         println!(
             "  host: running (pid {}, port {}, started_at {})",
@@ -222,10 +436,25 @@ fn snapshot(store: &ConfigStore) -> Result<serde_json::Value> {
     let installed = platform_installed(store)?;
     let manager_active = platform_active(store)?;
     let current = crate::status::HostServiceStatus::current(store.path());
+    let owner = read_service_owner(store)?;
+    let current_cli = current_service_owner()?;
+    let owner_snapshot = owner.map(|owner| {
+        let matches_current_cli = normalize_executable(&owner.executable) == current_cli.executable;
+        serde_json::json!({
+            "executable": owner.executable,
+            "version": owner.version,
+            "matches_current_cli": matches_current_cli,
+        })
+    });
     Ok(serde_json::json!({
         "manager": platform_name(),
         "installed": installed,
         "manager_active": manager_active,
+        "owner": owner_snapshot,
+        "current_cli": {
+            "executable": current_cli.executable,
+            "version": current_cli.version,
+        },
         "host": match &current {
             Some(status) => serde_json::json!({
                 "state": "running",
@@ -381,6 +610,19 @@ fn platform_installed(_store: &ConfigStore) -> Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
+fn platform_installed_executable(store: &ConfigStore) -> Result<Option<PathBuf>> {
+    linux::installed_executable(store)
+}
+#[cfg(target_os = "macos")]
+fn platform_installed_executable(store: &ConfigStore) -> Result<Option<PathBuf>> {
+    macos::installed_executable(store)
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_installed_executable(_store: &ConfigStore) -> Result<Option<PathBuf>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
 fn platform_active(store: &ConfigStore) -> Result<bool> {
     linux::active(store)
 }
@@ -465,7 +707,14 @@ pub(crate) fn service_command(
     let items = actions.iter().map(|(_, item)| *item).collect::<Vec<_>>();
     match ui.menu("Actions", &items, 0)? {
         MenuResult::Selected(index) => match actions[index].0 {
-            0 => run(store, &ServiceCommand::Install { no_start: false }, output),
+            0 => run(
+                store,
+                &ServiceCommand::Install {
+                    no_start: false,
+                    adopt: false,
+                },
+                output,
+            ),
             1 => run(store, &ServiceCommand::Restart, output),
             2 => run(store, &ServiceCommand::Stop, output),
             3 => run(store, &ServiceCommand::Start, output),
@@ -489,3 +738,59 @@ pub(crate) fn service_command(
 use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
 use crate::status::HostServiceStatus;
 use crate::{print_cli_help, usage_error};
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::{
+        ConfigStore, ServiceOwner, check_service_owner, normalize_executable, read_service_owner,
+        write_service_owner,
+    };
+
+    #[test]
+    fn service_owner_manifest_round_trips_the_canonical_cli_path() {
+        let directory = tempdir().expect("service owner directory");
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let owner = ServiceOwner {
+            executable: normalize_executable(std::path::Path::new("/bin/sh")),
+            version: "0.1.0".to_owned(),
+        };
+
+        write_service_owner(&store, &owner).expect("write owner manifest");
+        assert_eq!(
+            read_service_owner(&store).expect("read owner manifest"),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn service_owner_manifest_uses_a_stable_relative_filename() {
+        let directory = tempdir().expect("service owner directory");
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let owner = ServiceOwner {
+            executable: "/tmp/pix".into(),
+            version: "0.1.0".to_owned(),
+        };
+
+        write_service_owner(&store, &owner).expect("write owner manifest");
+        assert!(directory.path().join("service-owner.json").is_file());
+    }
+
+    #[test]
+    fn service_owner_mismatch_requires_explicit_adoption() {
+        let existing = ServiceOwner {
+            executable: "/Applications/Pix.app/Contents/Resources/pix".into(),
+            version: "0.1.0".to_owned(),
+        };
+        let current = ServiceOwner {
+            executable: "/Users/example/.local/bin/pix".into(),
+            version: "0.1.0".to_owned(),
+        };
+
+        let error = check_service_owner(Some(&existing), &current, false)
+            .expect_err("a different CLI must not silently take ownership");
+        assert!(error.to_string().contains("--adopt"));
+        check_service_owner(Some(&existing), &current, true).expect("explicit adoption");
+    }
+}

@@ -244,7 +244,9 @@ fn tcp_noise_xx_approval_then_ik_application_round_trip() {
     let request = ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
         request_id: 77,
-        request: ClientRequest::HostSnapshot,
+        request: ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
     }
     .encode()
     .expect("encode client request");

@@ -22,12 +22,18 @@ pub enum PiCommand {
         message: String,
         #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<StreamingBehavior>,
+        #[serde(skip_serializing_if = "<[PiImage]>::is_empty")]
+        images: Vec<PiImage>,
     },
     Steer {
         message: String,
+        #[serde(skip_serializing_if = "<[PiImage]>::is_empty")]
+        images: Vec<PiImage>,
     },
     FollowUp {
         message: String,
+        #[serde(skip_serializing_if = "<[PiImage]>::is_empty")]
+        images: Vec<PiImage>,
     },
     Abort,
     GetState,
@@ -53,6 +59,9 @@ pub enum PiCommand {
         #[serde(flatten)]
         response: ExtensionUiAnswer,
     },
+    GetCommands,
+    GetAvailableThinkingLevels,
+    GetSessionStats,
 }
 
 impl PiCommand {
@@ -70,6 +79,31 @@ impl PiCommand {
             Self::Compact { .. } => "compact",
             Self::SetSessionName { .. } => "set_session_name",
             Self::ExtensionUiResponse { .. } => "extension_ui_response",
+            Self::GetCommands => "get_commands",
+            Self::GetAvailableThinkingLevels => "get_available_thinking_levels",
+            Self::GetSessionStats => "get_session_stats",
+        }
+    }
+}
+
+/// Pi `ImageContent`: base64 bytes plus the declared mime type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PiImage {
+    /// Fixed discriminator Pi requires on every content part.
+    #[serde(rename = "type")]
+    image_type: &'static str,
+    #[serde(rename = "mimeType")]
+    pub mime_type: String,
+    pub data: String,
+}
+
+impl PiImage {
+    #[must_use]
+    pub fn new(mime_type: impl Into<String>, data: impl Into<String>) -> Self {
+        Self {
+            image_type: "image",
+            mime_type: mime_type.into(),
+            data: data.into(),
         }
     }
 }
@@ -503,7 +537,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{PiCommand, RpcError, encode_jsonl, read_lf_records};
+    use super::{PiCommand, PiImage, RpcError, encode_jsonl, read_lf_records};
 
     #[test]
     fn splits_only_on_ascii_lf_and_preserves_unicode_separators() {
@@ -543,5 +577,30 @@ mod tests {
                 .expect("valid JSON"),
             json!({"type": "get_state"})
         );
+    }
+
+    #[test]
+    fn images_serialize_as_pi_image_content_without_extra_fields() {
+        let command = PiCommand::Prompt {
+            message: "what is this".to_owned(),
+            streaming_behavior: None,
+            images: vec![PiImage::new("image/png", "aGk=")],
+        };
+        let value = serde_json::to_value(&command).expect("serialize prompt");
+        assert_eq!(
+            value,
+            json!({
+                "type": "prompt",
+                "message": "what is this",
+                "images": [{"type": "image", "data": "aGk=", "mimeType": "image/png"}]
+            })
+        );
+
+        let bare = serde_json::to_value(PiCommand::Steer {
+            message: "focus".to_owned(),
+            images: Vec::new(),
+        })
+        .expect("serialize steer");
+        assert_eq!(bare, json!({"type": "steer", "message": "focus"}));
     }
 }

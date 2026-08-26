@@ -153,6 +153,26 @@ pub(crate) fn installed(store: &ConfigStore) -> Result<bool> {
     Ok(contents.contains(&format!("--config {config} serve --service")))
 }
 
+pub(crate) fn installed_executable(store: &ConfigStore) -> Result<Option<PathBuf>> {
+    let path = unit_file_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    if !installed(store)? {
+        return Ok(None);
+    }
+    let Some(argument) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .and_then(|line| line.split_once(" --output").map(|(path, _)| path))
+    else {
+        return Ok(None);
+    };
+    Ok(parse_systemd_exec_arg(argument))
+}
+
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
     require_systemctl()?;
     if !installed(store)? {
@@ -290,6 +310,30 @@ fn quote_systemd_exec_arg(path: &Path) -> String {
     quoted
 }
 
+fn parse_systemd_exec_arg(value: &str) -> Option<PathBuf> {
+    let value = value.trim();
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    let mut decoded = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        match characters.next()? {
+            '\\' => decoded.push('\\'),
+            '"' => decoded.push('"'),
+            'x' => {
+                let high = characters.next()?.to_digit(16)?;
+                let low = characters.next()?.to_digit(16)?;
+                decoded.push(char::from_u32(high * 16 + low)?);
+            }
+            _ => return None,
+        }
+    }
+    Some(PathBuf::from(decoded.replace("%%", "%")))
+}
+
 fn absolute_config_path(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -302,7 +346,7 @@ fn absolute_config_path(path: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_unit;
+    use super::{parse_systemd_exec_arg, render_unit};
 
     #[test]
     fn unit_contains_the_systemd_user_service_contract() {
@@ -322,5 +366,13 @@ mod tests {
         ));
         assert!(unit.contains("Environment=PIX_SERVICE_STOP_HOOK=1"));
         assert!(!unit.contains('\r'));
+    }
+
+    #[test]
+    fn parses_the_installed_systemd_executable() {
+        assert_eq!(
+            parse_systemd_exec_arg("\"/usr/bin/Pix Host/pix%%bin\""),
+            Some(std::path::PathBuf::from("/usr/bin/Pix Host/pix%bin"))
+        );
     }
 }

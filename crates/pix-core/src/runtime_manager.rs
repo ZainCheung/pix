@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
-use pix_wire::{HostModelDefaults, SessionState};
+use pix_wire::{HostModelDefaults, SessionQueue, SessionState};
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
@@ -64,6 +64,9 @@ struct ManagedRuntime {
     last_used: Instant,
     completed: bool,
     phase: RuntimePhase,
+    /// Last `queue_update` contents. Ephemeral reconnect state: it dies with
+    /// the runtime and never reaches durable storage.
+    queue: Option<SessionQueue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +222,22 @@ impl RuntimeManager {
         session_id: SessionId,
         command: &PiCommand,
     ) -> Result<PiResponse, RuntimeManagerError> {
+        self.request_with_timeout(session_id, command, self.options.request_timeout)
+    }
+
+    /// Sends a Pi operation with an operation-specific deadline. Optional
+    /// session metadata uses a short timeout so a slow Pi extension can never
+    /// hold up the base session snapshot or a phone connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] for unknown sessions or RPC failures.
+    pub fn request_with_timeout(
+        &self,
+        session_id: SessionId,
+        command: &PiCommand,
+        timeout: Duration,
+    ) -> Result<PiResponse, RuntimeManagerError> {
         let (runtime, operation) = self.runtime_and_operation(session_id)?;
         let _operation = try_lock_operation(&operation, session_id)?;
         let admitted = if is_turn_command(command) {
@@ -226,7 +245,7 @@ impl RuntimeManager {
         } else {
             false
         };
-        let response = match runtime.rpc().request(command, self.options.request_timeout) {
+        let response = match runtime.rpc().request(command, timeout) {
             Ok(response) => response,
             Err(error) => {
                 if admitted {
@@ -284,9 +303,27 @@ impl RuntimeManager {
     /// Returns [`RuntimeManagerError`] for unknown sessions, RPC failures, or
     /// incompatible Pi snapshot data.
     pub fn snapshot(&self, session_id: SessionId) -> Result<SessionSnapshot, RuntimeManagerError> {
+        self.snapshot_with_timeout(session_id, self.options.request_timeout)
+    }
+
+    /// Reads the authoritative state and messages with a caller-selected
+    /// deadline. History restoration is allowed more time than optional
+    /// metadata, but it remains bounded so a dead Pi child cannot pin a
+    /// connection forever.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the session is inactive, busy, or
+    /// Pi does not return a valid snapshot before the deadline.
+    pub fn snapshot_with_timeout(
+        &self,
+        session_id: SessionId,
+        timeout: Duration,
+    ) -> Result<SessionSnapshot, RuntimeManagerError> {
         let (runtime, operation) = self.runtime_and_operation(session_id)?;
         let _operation = try_lock_operation(&operation, session_id)?;
-        let snapshot = SessionSnapshot::read(runtime.rpc(), self.options.request_timeout)?;
+        let snapshot =
+            SessionSnapshot::read(runtime.rpc(), timeout.min(self.options.request_timeout))?;
         let mut runtimes = self
             .runtimes
             .lock()
@@ -607,6 +644,29 @@ impl RuntimeManager {
         );
     }
 
+    /// Records the latest steering and follow-up queue reported by Pi so a
+    /// reconnecting client can recover queue text without a Pi round trip.
+    pub fn record_queue(&self, session_id: SessionId, queue: SessionQueue) {
+        if let Some(managed) = self
+            .runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&session_id)
+        {
+            managed.queue = Some(queue);
+        }
+    }
+
+    /// Returns the last recorded queue for an active runtime.
+    #[must_use]
+    pub fn queue(&self, session_id: SessionId) -> Option<SessionQueue> {
+        self.runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .and_then(|managed| managed.queue.clone())
+    }
+
     #[must_use]
     pub fn client_count(&self, session_id: SessionId) -> Option<usize> {
         self.runtimes
@@ -655,6 +715,7 @@ impl RuntimeManager {
                     last_used: Instant::now(),
                     completed: false,
                     phase: RuntimePhase::Starting,
+                    queue: None,
                 },
             );
         Ok(())

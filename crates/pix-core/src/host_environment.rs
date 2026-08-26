@@ -176,11 +176,33 @@ impl HostEnvironment {
 
     /// Replaces the command's environment with the captured variables.
     /// Process-sourced environments leave the command inheriting as usual.
+    ///
+    /// When `program` is an absolute or relative path, its parent directory is
+    /// prepended to `PATH`. Version-manager installs commonly place a `pi`
+    /// script and its `/usr/bin/env node` interpreter beside each other; GUI
+    /// services can otherwise resolve the configured script while the script
+    /// itself immediately fails to resolve `node`.
     pub fn apply(&self, command: &mut Command) {
+        let program = command.get_program().to_os_string();
         if let Some(variables) = &self.variables {
             command.env_clear();
             command.envs(variables.iter().map(|(key, value)| (key, value)));
         }
+        if let Some(path) = self.path_with_program_directory(&program) {
+            command.env("PATH", path);
+        }
+    }
+
+    fn path_with_program_directory(&self, program: &OsStr) -> Option<OsString> {
+        let directory = std::path::Path::new(program).parent()?;
+        if directory.as_os_str().is_empty() {
+            return None;
+        }
+        let mut entries = vec![directory.to_path_buf()];
+        if let Some(path) = self.path() {
+            entries.extend(env::split_paths(&path).filter(|entry| entry != directory));
+        }
+        env::join_paths(entries).ok()
     }
 
     #[cfg(test)]
@@ -277,10 +299,11 @@ fn capture_login_environment(
     command.process_group(0);
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
+    let (output_sender, output_receiver) = std::sync::mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
         let mut output = Vec::new();
         let _ = stdout.read_to_end(&mut output);
-        output
+        let _ = output_sender.send(output);
     });
 
     let deadline = Instant::now() + timeout;
@@ -309,7 +332,16 @@ fn capture_login_environment(
         drop(reader);
         return None;
     }
-    let output = reader.join().ok()?;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Ok(output) = output_receiver.recv_timeout(remaining) else {
+        // The shell may have exited while an rc-file descendant kept the
+        // capture pipe open. Terminate that process group and keep the
+        // same total timeout instead of blocking forever in join().
+        kill_process_group(&mut child);
+        drop(reader);
+        return None;
+    };
+    let _ = reader.join();
     parse_marked_environment(&output, marker.as_bytes())
 }
 
@@ -494,6 +526,22 @@ mod tests {
             capture_login_environment(&hanging_candidate, Duration::from_millis(200)).is_none()
         );
         assert!(started.elapsed() < Duration::from_secs(5));
+
+        let inherited_pipe =
+            write_shell(directory.path(), "fish", "#!/bin/sh\nsleep 2 &\nexit 0\n");
+        let inherited_pipe_candidate = ShellCandidate {
+            program: inherited_pipe,
+            login_arguments: &["-i", "-l", "-c"],
+        };
+        let started = Instant::now();
+        assert!(
+            capture_login_environment(&inherited_pipe_candidate, Duration::from_millis(200))
+                .is_none()
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stdout descendants must not outlive the capture timeout"
+        );
     }
 
     #[test]

@@ -188,6 +188,52 @@ func resolvesEmbeddedPixBeforePath() throws {
     #expect(resolved.standardizedFileURL == embedded.standardizedFileURL)
 }
 
+@Test("CLI resolver honors an explicit development override before the bundle")
+func resolvesExplicitPixOverrideBeforeBundle() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pix-host-model-\(UUID().uuidString)")
+    let bundleURL = root.appendingPathComponent("Pix.bundle")
+    let resources = bundleURL.appendingPathComponent("Contents/Resources")
+    let overrideBin = root.appendingPathComponent("override-bin")
+    try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: overrideBin, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    try Data(
+        """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.pix.tests</string></dict></plist>
+        """.utf8
+    ).write(to: bundleURL.appendingPathComponent("Contents/Info.plist"))
+
+    let embedded = resources.appendingPathComponent("pix")
+    try Data("#!/bin/sh\n".utf8).write(to: embedded)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o755))],
+        ofItemAtPath: embedded.path
+    )
+
+    let override = overrideBin.appendingPathComponent("pix")
+    try Data("#!/bin/sh\n".utf8).write(to: override)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: NSNumber(value: Int16(0o755))],
+        ofItemAtPath: override.path
+    )
+
+    guard let bundle = Bundle(path: bundleURL.path) else {
+        Issue.record("Could not load the temporary test bundle")
+        return
+    }
+    let resolved = try HostModel.resolvePixExecutable(
+        environment: ["PIX_CLI": override.path, "PATH": "/usr/bin"],
+        homeDirectory: root.appendingPathComponent("home"),
+        bundle: bundle,
+        searchLoginShell: false
+    )
+    #expect(resolved.standardizedFileURL == override.standardizedFileURL)
+}
+
 @Test("CLI resolver includes the mise shim fallback")
 func resolvesPixFromMiseShimFallback() throws {
     let root = FileManager.default.temporaryDirectory

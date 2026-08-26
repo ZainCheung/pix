@@ -54,6 +54,7 @@ fn resolve_defaults(settings: Option<&Value>, mut models: Vec<ModelSummary>) -> 
                 // name. Pi uses `id` as the custom-model display name too.
                 name: id.to_owned(),
                 reasoning: false,
+                input: Vec::new(),
                 thinking_levels: Vec::new(),
             }
         });
@@ -165,6 +166,17 @@ fn collect_models(provider: &str, models: &[Value], catalog: &mut BTreeMap<Strin
             id: id.to_owned(),
             name: name.to_owned(),
             reasoning,
+            input: model
+                .get("input")
+                .and_then(Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
             thinking_levels: supported_thinking_levels(model, reasoning),
         };
         catalog.insert(format!("{provider}\u{1f}|{id}"), summary);
@@ -249,6 +261,7 @@ mod tests {
                 id: "actual-id".into(),
                 name: "Actual name".into(),
                 reasoning: true,
+                input: Vec::new(),
                 thinking_levels: vec![
                     pix_wire::ThinkingLevel::Off,
                     pix_wire::ThinkingLevel::Minimal,

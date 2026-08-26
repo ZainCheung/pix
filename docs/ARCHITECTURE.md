@@ -45,6 +45,23 @@ This shared service instance keeps Bonjour ownership, pairing state, and
 encrypted transport stable while `pix device pair` or the menu app performs
 approval.
 
+## CLI ownership on macOS
+
+The release App bundle is the canonical Pix CLI distribution. The Homebrew
+Cask exposes `Pix.app/Contents/Resources/pix` in `PATH`; it does not install a
+second implementation. The macOS app resolves that embedded binary by
+default, while `PIX_CLI` is an explicit development override.
+
+The per-user LaunchAgent records its CLI owner in the configuration's
+`service-owner.json`. `service start`, `stop`, `restart`, and `status` operate
+on the installed owner without silently replacing it. `service install` only
+replaces a different owner when `--adopt` is supplied; the App uses that flag
+when it is explicitly launched so the service returns to its matching embedded
+CLI. The service manager exposes one per-user Pix service identity; a
+standalone CLI may control that existing service, but an independent CLI-only
+daemon must use a separate service identity rather than competing with the
+App-managed host.
+
 ## Transport
 
 LAN direct TCP and the outbound WebSocket relay carry the same encrypted wire
@@ -68,3 +85,28 @@ session storage.
 - Relay loss changes reachability only; Pi continues locally.
 - Logs are payload-free and never contain prompts, files, model output, keys,
   tokens, or relay secrets.
+- Wire extensions are capability-gated per connection: a host never emits a
+  gated event or field to a client that did not declare it
+  (`protocol/schema/v1.md`).
+- Image attachments are staged in bounded connection memory, then persisted
+  atomically below the Pix configuration directory as a session-scoped
+  `attachments/v1/<session>/<attachment-key>/` asset (client attachment ID
+  for new uploads, vision hash for recovered history). The source, agent-compatible,
+  and vision paths are explicit; decodable images get a <=2000×2000 vision
+  derivative and malformed/unsupported bytes remain a byte-for-byte fallback.
+  Pi still receives the vision bytes in `images[]`, while the agent-compatible
+  paths are appended to the prompt for filesystem-aware workflows. History
+  clients that declare `image_refs.v1` receive `imageRef` entries and fetch
+  bounded chunks lazily; raw Pi `ImageContent` remains the durable source of
+  truth.
+- Session snapshots return Pi state and messages first. Clients declaring
+  `session_metadata.v1` receive commands, usage, and thinking-level choices in
+  a later unsolicited `session.metadata` event. Legacy clients keep the
+  fields in the snapshot, but each optional probe has a short best-effort
+  deadline so it cannot hold the connection indefinitely.
+
+## Pi RPC coverage
+
+`docs/PI_RPC_COVERAGE.md` tracks which Pi RPC commands and events are
+exposed, capability-gated, or intentionally omitted. Pi-specific field names
+stop at `pix-core/src/pi_bridge.rs`.

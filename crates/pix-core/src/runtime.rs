@@ -267,12 +267,20 @@ pub enum RuntimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
-    use super::runnable_executable;
+    use super::{PiRuntime, PiRuntimeOptions, runnable_executable};
+    use crate::host_environment::HostEnvironment;
+    use crate::pi_rpc::PiCommand;
+    use crate::session_lock::SessionId;
+
+    use super::SessionLaunch;
 
     #[test]
     fn keeps_version_manager_shim_path() {
@@ -287,5 +295,63 @@ mod tests {
             runnable_executable(&shim).expect("runnable shim"),
             dispatcher
         );
+    }
+
+    #[test]
+    fn executable_directory_supplies_env_interpreter_for_gui_environment() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary executable directory");
+        let executable = directory.path().join("pi");
+        let interpreter = directory.path().join("node");
+        fs::write(&interpreter, "#!/bin/sh\nexec /bin/sh \"$@\"\n")
+            .expect("write fake node interpreter");
+        fs::write(
+            &executable,
+            r#"#!/usr/bin/env node
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"fake-session\"}}"
+done
+"#,
+        )
+        .expect("write env-based Pi script");
+        for path in [&interpreter, &executable] {
+            let mut permissions = fs::metadata(path).expect("script metadata").permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("make script executable");
+        }
+
+        let workspace = tempdir().expect("temporary workspace");
+        let locks = tempdir().expect("temporary lock directory");
+        let environment = HostEnvironment::captured_for_tests(
+            PathBuf::from("/bin/zsh"),
+            vec![
+                (OsString::from("HOME"), OsString::from("/Users/example")),
+                (
+                    OsString::from("PATH"),
+                    OsString::from("/usr/bin:/bin:/usr/sbin:/sbin"),
+                ),
+            ],
+        );
+        let runtime = PiRuntime::start(&PiRuntimeOptions {
+            executable,
+            workspace: workspace.path().to_path_buf(),
+            lock_directory: locks.path().to_path_buf(),
+            launch: SessionLaunch::Create {
+                id: SessionId::new(),
+                name: Some("GUI service regression".to_owned()),
+            },
+            extra_arguments: Vec::new(),
+            environment,
+        })
+        .expect("start env-based Pi");
+
+        let response = runtime
+            .rpc()
+            .request(&PiCommand::GetState, Duration::from_secs(10))
+            .expect("Pi resolves the sibling interpreter and answers RPC");
+        assert_eq!(response.command, "get_state");
+        runtime.stop().expect("stop fake Pi");
     }
 }

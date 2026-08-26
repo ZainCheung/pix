@@ -96,7 +96,12 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     let config = startup_config
         .load_or_create(default_host_name())
         .context("loading Pix configuration")?;
-    let identity = load_host_identity(store, config.host.id).context("loading host identity")?;
+    let identity = if service_mode {
+        load_host_identity_for_service(store, config.host.id)
+    } else {
+        load_host_identity(store, config.host.id)
+    }
+    .context("loading host identity")?;
     let config_directory = store
         .path()
         .parent()
@@ -148,7 +153,10 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
         endpoint,
         identity.private_key,
         coordinator,
-        std::sync::Arc::new(HostState::new(config)),
+        std::sync::Arc::new(HostState::with_asset_root(
+            config,
+            config_directory.join("attachments"),
+        )),
         std::sync::Arc::clone(&runtime_manager),
     )
     .context("starting Pix host service")?;
@@ -1292,7 +1300,8 @@ use crate::commands::device::{approve_pairing, emit_devices, reject_pairing, rev
 use crate::commands::pi::configured_pi_executable;
 use crate::commands::session::{emit_sessions, emit_sessions_for, release_session};
 use crate::commands::shared::{
-    default_host_name, format_confirmation_code, load_host_identity, plural, terminal_label,
+    default_host_name, format_confirmation_code, load_host_identity,
+    load_host_identity_for_service, plural, terminal_label,
 };
 
 impl HostLog {

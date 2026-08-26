@@ -4,8 +4,9 @@
 //! clients operate only on `pix-wire` types.
 
 use pix_wire::{
-    CompactionEvent, ErrorCode, ExtensionUiRequest, ModelSummary, ServerEvent,
-    SessionSnapshot as WireSessionSnapshot, SessionState, ThinkingLevel, ToolEvent,
+    CommandScope, CommandSource, CommandSummary, CompactionEvent, ErrorCode, ExtensionUiRequest,
+    ModelSummary, ServerEvent, SessionQueue, SessionSnapshot as WireSessionSnapshot, SessionState,
+    SessionUsage, ThinkingLevel, ToolEvent,
 };
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -47,6 +48,11 @@ pub fn session_snapshot(
         // Pi's authoritative state does not expose in-progress tool payloads.
         // Live tool events repopulate this disposable client state.
         active_tools: Vec::new(),
+        // Capability-gated enrichment filled in by the host dispatcher after
+        // this conversion: commands, queue text, and usage.
+        commands: Vec::new(),
+        queue: None,
+        usage: None,
     })
 }
 
@@ -67,6 +73,88 @@ pub fn available_models(response: &PiResponse) -> Result<Vec<ModelSummary>, PiBr
     models.iter().map(model_summary).collect()
 }
 
+/// Converts a `get_commands` response into protocol command summaries.
+///
+/// Pi's `sourceInfo` carries host filesystem paths and package metadata; only
+/// the non-secret vocabulary crosses this bridge.
+///
+/// # Errors
+///
+/// Returns [`PiBridgeError`] for missing data or malformed command entries.
+pub fn commands(response: &PiResponse) -> Result<Vec<CommandSummary>, PiBridgeError> {
+    let commands = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("commands"))
+        .and_then(Value::as_array)
+        .ok_or(PiBridgeError::InvalidResponse("get_commands.commands"))?;
+    commands.iter().map(command_summary).collect()
+}
+
+/// Converts a `get_available_thinking_levels` response for the session's
+/// current model into protocol thinking levels.
+///
+/// # Errors
+///
+/// Returns [`PiBridgeError`] when Pi omits the `levels` array or reports an
+/// unknown level name.
+pub fn thinking_levels(response: &PiResponse) -> Result<Vec<ThinkingLevel>, PiBridgeError> {
+    let levels = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("levels"))
+        .and_then(Value::as_array)
+        .ok_or(PiBridgeError::InvalidResponse(
+            "get_available_thinking_levels.levels",
+        ))?;
+    levels
+        .iter()
+        .map(|level| {
+            let name = level.as_str().ok_or(PiBridgeError::InvalidResponse(
+                "get_available_thinking_levels.levels",
+            ))?;
+            parse_thinking_level(name)
+        })
+        .collect()
+}
+
+/// Converts a `get_session_stats` response into protocol usage. `sessionFile`
+/// and `sessionId` are host-local and never cross this bridge.
+///
+/// # Errors
+///
+/// Returns [`PiBridgeError`] when the usage shape is incompatible.
+pub fn usage(response: &PiResponse) -> Result<SessionUsage, PiBridgeError> {
+    let data = response
+        .data
+        .as_ref()
+        .ok_or(PiBridgeError::InvalidResponse("get_session_stats"))?;
+    let tokens = data
+        .get("tokens")
+        .ok_or(PiBridgeError::InvalidResponse("get_session_stats.tokens"))?;
+    let context = data.get("contextUsage").filter(|value| !value.is_null());
+    let (context_tokens, context_window, context_percent) = match context {
+        Some(context) => (
+            context.get("tokens").and_then(Value::as_u64),
+            context.get("contextWindow").and_then(Value::as_u64),
+            context.get("percent").and_then(Value::as_f64),
+        ),
+        None => (None, None, None),
+    };
+    Ok(SessionUsage {
+        tokens_total: tokens.get("total").and_then(Value::as_u64).ok_or(
+            PiBridgeError::InvalidResponse("get_session_stats.tokens.total"),
+        )?,
+        cost: data
+            .get("cost")
+            .and_then(Value::as_f64)
+            .ok_or(PiBridgeError::InvalidResponse("get_session_stats.cost"))?,
+        context_tokens,
+        context_window,
+        context_percent,
+    })
+}
+
 /// Converts one raw Pi event into zero or one stable Pix protocol events.
 ///
 /// Unknown informational events are deliberately ignored. A newly supported
@@ -75,6 +163,7 @@ pub fn available_models(response: &PiResponse) -> Result<Vec<ModelSummary>, PiBr
 /// # Errors
 ///
 /// Returns [`PiBridgeError`] when a known event is missing required fields.
+#[allow(clippy::too_many_lines)]
 pub fn event(session_id: SessionId, event: PiEvent) -> Result<Option<ServerEvent>, PiBridgeError> {
     let session_id = session_id.to_string();
     let PiEvent::Event {
@@ -169,6 +258,13 @@ pub fn event(session_id: SessionId, event: PiEvent) -> Result<Option<ServerEvent
             message: "A Pi extension reported an error".to_owned(),
             retryable: false,
         }),
+        "queue_update" => Some(ServerEvent::SessionQueue {
+            session_id,
+            queue: SessionQueue {
+                steering: string_array(&payload, "steering")?,
+                follow_up: string_array(&payload, "followUp")?,
+            },
+        }),
         _ => None,
     };
     Ok(mapped)
@@ -184,8 +280,64 @@ fn model_summary(value: &Value) -> Result<ModelSummary, PiBridgeError> {
         id: required_string(value, "id")?.to_owned(),
         name: required_string(value, "name")?.to_owned(),
         reasoning,
+        input: value
+            .get("input")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         thinking_levels: supported_thinking_levels(value, reasoning),
     })
+}
+
+fn command_summary(value: &Value) -> Result<CommandSummary, PiBridgeError> {
+    let source = match required_string(value, "source")? {
+        "extension" => CommandSource::Extension,
+        "prompt" => CommandSource::Prompt,
+        "skill" => CommandSource::Skill,
+        other => return Err(PiBridgeError::UnknownCommandSource(other.to_owned())),
+    };
+    let scope = value
+        .get("sourceInfo")
+        .and_then(|info| info.get("scope"))
+        .and_then(Value::as_str)
+        .map(|scope| match scope {
+            "user" => Ok(CommandScope::User),
+            "project" => Ok(CommandScope::Project),
+            "temporary" => Ok(CommandScope::Temporary),
+            other => Err(PiBridgeError::UnknownCommandScope(other.to_owned())),
+        })
+        .transpose()?;
+    Ok(CommandSummary {
+        name: required_string(value, "name")?.to_owned(),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        source,
+        scope,
+    })
+}
+
+fn string_array(payload: &Value, field: &'static str) -> Result<Vec<String>, PiBridgeError> {
+    let values = payload
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or(PiBridgeError::MissingField(field))?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(ToOwned::to_owned)
+                .ok_or(PiBridgeError::MissingField(field))
+        })
+        .collect()
 }
 
 fn parse_thinking_level(value: &str) -> Result<ThinkingLevel, PiBridgeError> {
@@ -245,13 +397,17 @@ pub enum PiBridgeError {
     InvalidResponse(&'static str),
     #[error("Pi RPC returned an unknown thinking level: {0}")]
     UnknownThinkingLevel(String),
+    #[error("Pi RPC returned an unknown command source: {0}")]
+    UnknownCommandSource(String),
+    #[error("Pi RPC returned an unknown command scope: {0}")]
+    UnknownCommandScope(String),
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{event, session_snapshot};
+    use super::{PiResponse, event, session_snapshot};
     use crate::pi_rpc::PiEvent;
     use crate::session::SessionSnapshot;
     use crate::session_lock::SessionId;
@@ -269,7 +425,8 @@ mod tests {
                     "provider": "test",
                     "id": "model-1",
                     "name": "Model 1",
-                    "reasoning": true
+                    "reasoning": true,
+                    "input": ["text", "image"]
                 })),
                 thinking_level: "high".to_owned(),
                 is_streaming: true,
@@ -283,6 +440,10 @@ mod tests {
         assert_eq!(snapshot.id, id.to_string());
         assert_eq!(snapshot.state, SessionState::Running);
         assert_eq!(snapshot.thinking_level, ThinkingLevel::High);
+        assert_eq!(
+            snapshot.model.expect("model").input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
         assert_eq!(snapshot.pending_prompts.len(), 2);
     }
 
@@ -319,5 +480,133 @@ mod tests {
         .expect("map tool")
         .expect("known event");
         assert!(matches!(tool, ServerEvent::ToolEnd { .. }));
+    }
+
+    #[test]
+    fn maps_queue_update_without_pi_field_names() {
+        let id = SessionId::new();
+        let mapped = event(
+            id,
+            PiEvent::Event {
+                event_type: "queue_update".to_owned(),
+                payload: json!({
+                    "type": "queue_update",
+                    "steering": ["Focus on error handling"],
+                    "followUp": ["Then summarize"]
+                }),
+            },
+        )
+        .expect("map queue")
+        .expect("known event");
+        let ServerEvent::SessionQueue { queue, .. } = mapped else {
+            panic!("expected session queue event");
+        };
+        assert_eq!(queue.steering, ["Focus on error handling"]);
+        assert_eq!(queue.follow_up, ["Then summarize"]);
+    }
+
+    #[test]
+    fn commands_response_drops_host_paths_and_maps_vocabulary() {
+        let response = PiResponse {
+            command: "get_commands".to_owned(),
+            data: Some(json!({
+                "commands": [
+                    {
+                        "name": "review",
+                        "description": "Review current changes",
+                        "source": "extension",
+                        "sourceInfo": {
+                            "path": "/Users/example/.pi/agent/extensions/review.ts",
+                            "source": "review",
+                            "scope": "user",
+                            "origin": "top-level"
+                        }
+                    },
+                    {
+                        "name": "fix-tests",
+                        "source": "prompt",
+                        "sourceInfo": {
+                            "path": "/Users/example/Developer/app/.pi/prompts/fix-tests.md",
+                            "scope": "project",
+                            "origin": "top-level"
+                        }
+                    },
+                    {
+                        "name": "skill:ship",
+                        "source": "skill",
+                        "sourceInfo": {
+                            "path": "/Users/example/.pi/agent/skills/ship",
+                            "scope": "temporary",
+                            "origin": "package"
+                        }
+                    }
+                ]
+            })),
+        };
+
+        let commands = super::commands(&response).expect("map commands");
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0].name, "review");
+        assert_eq!(
+            commands[0].description.as_deref(),
+            Some("Review current changes")
+        );
+        assert_eq!(commands[0].source, pix_wire::CommandSource::Extension);
+        assert_eq!(commands[0].scope, Some(pix_wire::CommandScope::User));
+        assert_eq!(commands[2].name, "skill:ship");
+        assert_eq!(commands[2].scope, Some(pix_wire::CommandScope::Temporary));
+
+        let encoded = serde_json::to_value(&commands).expect("encode commands");
+        let text = encoded.to_string();
+        assert!(
+            !text.contains("/Users/"),
+            "host paths must not cross the bridge: {text}"
+        );
+        assert!(
+            !text.contains("sourceInfo"),
+            "source metadata must not cross the bridge: {text}"
+        );
+    }
+
+    #[test]
+    fn thinking_levels_and_usage_use_authoritative_pi_values() {
+        let levels = super::thinking_levels(&PiResponse {
+            command: "get_available_thinking_levels".to_owned(),
+            data: Some(json!({"levels": ["off", "low", "high", "xhigh"]})),
+        })
+        .expect("map levels");
+        assert_eq!(
+            levels,
+            vec![
+                pix_wire::ThinkingLevel::Off,
+                pix_wire::ThinkingLevel::Low,
+                pix_wire::ThinkingLevel::High,
+                pix_wire::ThinkingLevel::Xhigh
+            ]
+        );
+
+        let usage = super::usage(&PiResponse {
+            command: "get_session_stats".to_owned(),
+            data: Some(json!({
+                "sessionFile": "/Users/example/.pi/agent/sessions/x.jsonl",
+                "sessionId": "pi-internal",
+                "userMessages": 3,
+                "assistantMessages": 2,
+                "toolCalls": 4,
+                "toolResults": 4,
+                "totalMessages": 5,
+                "tokens": {"input": 100, "output": 50, "cacheRead": 10, "cacheWrite": 5, "total": 165},
+                "cost": 0.0125,
+                "contextUsage": {"tokens": 4096, "contextWindow": 200_000, "percent": 2.05}
+            })),
+        })
+        .expect("map usage");
+        assert_eq!(usage.tokens_total, 165);
+        assert!((usage.cost - 0.0125).abs() < f64::EPSILON);
+        assert_eq!(usage.context_tokens, Some(4096));
+        assert_eq!(usage.context_window, Some(200_000));
+        assert_eq!(usage.context_percent, Some(2.05));
+        let encoded = serde_json::to_value(&usage).expect("encode usage");
+        assert!(!encoded.to_string().contains("/Users/"));
     }
 }

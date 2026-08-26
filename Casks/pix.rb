@@ -11,6 +11,7 @@ cask "pix" do
   depends_on macos: :sonoma
 
   app "Pix.app"
+  # Expose the CLI embedded in Pix.app as the canonical PATH entry.
   binary "#{appdir}/Pix.app/Contents/Resources/pix", target: "pix"
 
   # Unload the user LaunchAgent and quit the menu-bar app, but preserve the

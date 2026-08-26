@@ -4,10 +4,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pix_wire::{
-    ClientEnvelope, ClientRequest, CompactionEvent, ErrorCode, ExtensionUiAnswer,
-    ExtensionUiRequest, HostModelDefaults, HostSnapshot, HostSummary, MAX_ENCRYPTED_FRAME_BYTES,
-    ModelSummary, PROTOCOL_MAJOR, RelayAccess, RelayRole, ServerEnvelope, ServerEvent,
-    SessionSnapshot, SessionState, SessionSummary, ThinkingLevel, ToolEvent, WorkspaceAvailability,
+    ClientEnvelope, ClientRequest, CommandScope, CommandSource, CommandSummary, CompactionEvent,
+    ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HOST_CAPABILITIES, HostModelDefaults,
+    HostSnapshot, HostSummary, MAX_ENCRYPTED_FRAME_BYTES, ModelSummary, PROTOCOL_MAJOR,
+    RelayAccess, RelayRole, ServerEnvelope, ServerEvent, SessionQueue, SessionSnapshot,
+    SessionState, SessionSummary, SessionUsage, ThinkingLevel, ToolEvent, WorkspaceAvailability,
     WorkspaceSummary, confirmation_code, encode_encrypted_frame, host_public_key_fingerprint,
     pairing_offer, relay_channel_id, relay_channel_secret_from_join_code, relay_join_proof,
 };
@@ -115,7 +116,26 @@ fn main() {
 fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
     let workspace_id = Uuid::parse_str(WORKSPACE_ID).expect("workspace id");
     vec![
-        named("client-host-snapshot.json", ClientRequest::HostSnapshot),
+        named(
+            "client-host-snapshot.json",
+            ClientRequest::HostSnapshot {
+                capabilities: Vec::new(),
+            },
+        ),
+        named(
+            "client-host-snapshot-capabilities.json",
+            ClientRequest::HostSnapshot {
+                capabilities: vec![
+                    "commands.v1".to_owned(),
+                    "queue.v1".to_owned(),
+                    "attachments.v1".to_owned(),
+                    "usage.v1".to_owned(),
+                    "thinking_levels.v1".to_owned(),
+                    "session_metadata.v1".to_owned(),
+                    "image_refs.v1".to_owned(),
+                ],
+            },
+        ),
         named("client-host-defaults.json", ClientRequest::HostDefaults),
         named("client-workspace-list.json", ClientRequest::WorkspaceList),
         named(
@@ -156,6 +176,15 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
             ClientRequest::SessionPrompt {
                 session_id: SESSION_ID.to_owned(),
                 content: "Hello from Pix".to_owned(),
+                attachments: Vec::new(),
+            },
+        ),
+        named(
+            "client-session-prompt-attachments.json",
+            ClientRequest::SessionPrompt {
+                session_id: SESSION_ID.to_owned(),
+                content: "What does this screenshot show".to_owned(),
+                attachments: vec!["attachment-fixture".to_owned()],
             },
         ),
         named(
@@ -163,6 +192,7 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
             ClientRequest::SessionSteer {
                 session_id: SESSION_ID.to_owned(),
                 content: "Stop and try another path".to_owned(),
+                attachments: Vec::new(),
             },
         ),
         named(
@@ -170,6 +200,7 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
             ClientRequest::SessionFollowUp {
                 session_id: SESSION_ID.to_owned(),
                 content: "Also run the tests".to_owned(),
+                attachments: Vec::new(),
             },
         ),
         named(
@@ -214,6 +245,39 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                 answer: ExtensionUiAnswer::Confirmed { confirmed: true },
             },
         ),
+        named(
+            "client-attachment-begin.json",
+            ClientRequest::AttachmentBegin {
+                session_id: SESSION_ID.to_owned(),
+                attachment_id: "attachment-fixture".to_owned(),
+                mime_type: "image/png".to_owned(),
+                size: 4,
+            },
+        ),
+        named(
+            "client-attachment-chunk.json",
+            ClientRequest::AttachmentChunk {
+                attachment_id: "attachment-fixture".to_owned(),
+                data: "aGVsbG8=".to_owned(),
+            },
+        ),
+        named(
+            "client-attachment-finish.json",
+            ClientRequest::AttachmentFinish {
+                attachment_id: "attachment-fixture".to_owned(),
+            },
+        ),
+        named(
+            "client-image-get.json",
+            ClientRequest::ImageGet {
+                session_id: SESSION_ID.to_owned(),
+                image_ref:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                offset: 0,
+                limit: 1024,
+            },
+        ),
     ]
 }
 
@@ -237,6 +301,7 @@ fn fixture_workspace() -> (Uuid, WorkspaceSummary, ModelSummary, ToolEvent) {
             id: "fixture-model".to_owned(),
             name: "Fixture Model".to_owned(),
             reasoning: true,
+            input: Vec::new(),
             thinking_levels: Vec::new(),
         },
         ToolEvent {
@@ -248,6 +313,7 @@ fn fixture_workspace() -> (Uuid, WorkspaceSummary, ModelSummary, ToolEvent) {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
     let (workspace_id, workspace, model, _) = fixture_workspace();
     vec![
@@ -263,6 +329,10 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                     },
                     workspaces: vec![workspace.clone()],
                     relay: None,
+                    capabilities: HOST_CAPABILITIES
+                        .iter()
+                        .map(|value| (*value).to_owned())
+                        .collect(),
                 },
             },
         ),
@@ -280,6 +350,10 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                         url: RELAY_URL.to_owned(),
                         channel_secret: RELAY_CHANNEL_SECRET.to_owned(),
                     }),
+                    capabilities: HOST_CAPABILITIES
+                        .iter()
+                        .map(|value| (*value).to_owned())
+                        .collect(),
                 },
             },
         ),
@@ -337,6 +411,50 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                     })],
                     pending_prompts: Vec::new(),
                     active_tools: Vec::new(),
+                    commands: Vec::new(),
+                    queue: None,
+                    usage: None,
+                },
+            },
+        ),
+        server(
+            "server-session-snapshot-enriched.json",
+            Some(REQUEST_ID),
+            ServerEvent::SessionSnapshot {
+                snapshot: SessionSnapshot {
+                    id: SESSION_ID.to_owned(),
+                    name: Some("Fixture session".to_owned()),
+                    state: SessionState::Running,
+                    model: Some(fixture_model_with_levels()),
+                    thinking_level: ThinkingLevel::High,
+                    messages: Vec::new(),
+                    pending_prompts: vec![serde_json::json!({"status": "pending"})],
+                    active_tools: Vec::new(),
+                    commands: vec![
+                        CommandSummary {
+                            name: "review".to_owned(),
+                            description: Some("Review current changes".to_owned()),
+                            source: CommandSource::Extension,
+                            scope: Some(CommandScope::User),
+                        },
+                        CommandSummary {
+                            name: "fix-tests".to_owned(),
+                            description: None,
+                            source: CommandSource::Prompt,
+                            scope: Some(CommandScope::Project),
+                        },
+                    ],
+                    queue: Some(SessionQueue {
+                        steering: vec!["Focus on error handling".to_owned()],
+                        follow_up: vec!["Then run the tests".to_owned()],
+                    }),
+                    usage: Some(SessionUsage {
+                        tokens_total: 16_512,
+                        cost: 0.0125,
+                        context_tokens: Some(4096),
+                        context_window: Some(200_000),
+                        context_percent: Some(2.05),
+                    }),
                 },
             },
         ),
@@ -346,6 +464,41 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
             ServerEvent::SessionState {
                 session_id: SESSION_ID.to_owned(),
                 state: SessionState::Running,
+            },
+        ),
+        server(
+            "server-session-queue.json",
+            None,
+            ServerEvent::SessionQueue {
+                session_id: SESSION_ID.to_owned(),
+                queue: SessionQueue {
+                    steering: vec!["Focus on error handling".to_owned()],
+                    follow_up: Vec::new(),
+                },
+            },
+        ),
+        server(
+            "server-session-metadata.json",
+            None,
+            ServerEvent::SessionMetadata {
+                session_id: SESSION_ID.to_owned(),
+                commands: Some(Vec::new()),
+                usage: None,
+                thinking_levels: Some(vec![ThinkingLevel::Off, ThinkingLevel::High]),
+            },
+        ),
+        server(
+            "server-image-chunk.json",
+            Some(REQUEST_ID),
+            ServerEvent::ImageChunk {
+                image_ref:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                mime_type: "image/png".to_owned(),
+                offset: 0,
+                total_size: 2,
+                eof: true,
+                data: "aGk=".to_owned(),
             },
         ),
     ]
@@ -448,6 +601,22 @@ fn stream_and_control_events() -> Vec<(String, ServerEnvelope)> {
             },
         ),
     ]
+}
+
+fn fixture_model_with_levels() -> ModelSummary {
+    ModelSummary {
+        provider: "fixture".to_owned(),
+        id: "fixture-model".to_owned(),
+        name: "Fixture Model".to_owned(),
+        reasoning: true,
+        input: Vec::new(),
+        thinking_levels: vec![
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::High,
+            ThinkingLevel::Xhigh,
+        ],
+    }
 }
 
 fn named(name: &str, request: ClientRequest) -> (String, ClientEnvelope) {

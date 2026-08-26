@@ -2,7 +2,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{MAX_ENCRYPTED_FRAME_BYTES, MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError};
+use crate::{
+    ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST,
+    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES,
+    MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
+};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientEnvelope {
@@ -82,8 +86,14 @@ impl ServerEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientRequest {
+    /// Requests the host snapshot. `capabilities` declares the optional
+    /// protocol extensions this client understands; the host enables each
+    /// extension only when the declaration arrives on the connection.
     #[serde(rename = "host.snapshot")]
-    HostSnapshot,
+    HostSnapshot {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
     /// Returns Pi's persisted default model/thinking level and the model
     /// catalog without starting a session runtime.
     #[serde(rename = "host.defaults")]
@@ -111,11 +121,28 @@ pub enum ClientRequest {
     #[serde(rename = "session.release")]
     SessionRelease { session_id: String },
     #[serde(rename = "session.prompt")]
-    SessionPrompt { session_id: String, content: String },
+    SessionPrompt {
+        session_id: String,
+        content: String,
+        /// Ready attachment IDs uploaded through `attachment.begin` on this
+        /// connection. Consumed by the host when the prompt is accepted.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
     #[serde(rename = "session.steer")]
-    SessionSteer { session_id: String, content: String },
+    SessionSteer {
+        session_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
     #[serde(rename = "session.follow_up")]
-    SessionFollowUp { session_id: String, content: String },
+    SessionFollowUp {
+        session_id: String,
+        content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<String>,
+    },
     #[serde(rename = "session.abort")]
     SessionAbort { session_id: String },
     #[serde(rename = "session.compact")]
@@ -143,10 +170,37 @@ pub enum ClientRequest {
         extension_request_id: String,
         answer: ExtensionUiAnswer,
     },
+    /// Starts an attachment upload scoped to one attached session. The host
+    /// stages chunks in bounded memory, then atomically persists a source,
+    /// agent, and vision asset at `attachment.finish`.
+    #[serde(rename = "attachment.begin")]
+    AttachmentBegin {
+        session_id: String,
+        attachment_id: String,
+        mime_type: String,
+        size: u64,
+    },
+    /// Appends one base64 chunk to a pending attachment. Chunk payloads stay
+    /// inside the regular encrypted frame and decoded-string limits.
+    #[serde(rename = "attachment.chunk")]
+    AttachmentChunk { attachment_id: String, data: String },
+    /// Marks an attachment ready after all declared bytes have arrived.
+    #[serde(rename = "attachment.finish")]
+    AttachmentFinish { attachment_id: String },
+    /// Reads one bounded range of a host-owned historical image asset. The
+    /// request is only accepted by clients that declared `image_refs.v1`.
+    #[serde(rename = "image.get")]
+    ImageGet {
+        session_id: String,
+        image_ref: String,
+        offset: u64,
+        limit: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ServerEvent {
     #[serde(rename = "request.ack")]
     RequestAck,
@@ -197,6 +251,35 @@ pub enum ServerEvent {
         session_id: String,
         models: Vec<ModelSummary>,
     },
+    /// Live steering and follow-up queue contents for a running session.
+    /// Sent only to connections that declared the `queue.v1` capability.
+    #[serde(rename = "session.queue")]
+    SessionQueue {
+        session_id: String,
+        queue: SessionQueue,
+    },
+    /// One lazy image range for a `session.snapshot` image reference.
+    #[serde(rename = "image.chunk")]
+    ImageChunk {
+        image_ref: String,
+        mime_type: String,
+        offset: u64,
+        total_size: u64,
+        eof: bool,
+        data: String,
+    },
+    /// Optional session enrichment delivered after the base snapshot. Each
+    /// field is omitted when its corresponding capability was not declared.
+    #[serde(rename = "session.metadata")]
+    SessionMetadata {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<CommandSummary>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<SessionUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_levels: Option<Vec<ThinkingLevel>>,
+    },
     #[serde(rename = "error")]
     Error {
         code: ErrorCode,
@@ -220,6 +303,11 @@ pub struct HostSnapshot {
     /// the authenticated encrypted channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayAccess>,
+    /// Optional protocol extensions this host honors. Absent on hosts without
+    /// capability negotiation; clients must treat every listed extension as
+    /// unavailable in that case.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// Read-only Pi preferences used by a new draft session. This is deliberately
@@ -278,6 +366,18 @@ pub struct SessionSnapshot {
     pub messages: Vec<Value>,
     pub pending_prompts: Vec<Value>,
     pub active_tools: Vec<ToolEvent>,
+    /// Slash commands Pi exposes for this session, without host filesystem
+    /// paths. Present only for connections that declared `commands.v1`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandSummary>,
+    /// Last reported steering and follow-up queue contents. Present only for
+    /// connections that declared `queue.v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<SessionQueue>,
+    /// Live token and cost usage for this session. Present only for
+    /// connections that declared `usage.v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<SessionUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +397,10 @@ pub struct ModelSummary {
     pub id: String,
     pub name: String,
     pub reasoning: bool,
+    /// Input modalities advertised by Pi, for example `text` and `image`.
+    /// Older Pi versions omit the field and therefore decode as an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
     /// Pi's effective thinking choices for this model. Older hosts omit the
     /// field; clients then retain the standard compatibility choices.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -368,10 +472,85 @@ pub enum ThinkingLevel {
     Max,
 }
 
+/// Text of the messages queued behind a running agent turn. Ephemeral state:
+/// the queue disappears with the Pi runtime that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionQueue {
+    pub steering: Vec<String>,
+    pub follow_up: Vec<String>,
+}
+
+/// One Pi slash command invocable through a prompt. The wire shape is
+/// deliberately narrower than Pi's `get_commands` entry: host filesystem
+/// paths and package metadata stay on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandSummary {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub source: CommandSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CommandScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandSource {
+    Extension,
+    Prompt,
+    Skill,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandScope {
+    User,
+    Project,
+    Temporary,
+}
+
+/// Cumulative token and cost usage Pi reports for one session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionUsage {
+    pub tokens_total: u64,
+    pub cost: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_percent: Option<f64>,
+}
+
+/// Accepts only the conservative capability vocabulary `[a-z0-9._-]` so a
+/// declaration can never smuggle structured data past length checks.
+#[must_use]
+pub fn is_valid_capability(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 24
+        && value.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-' || c == '_'
+        })
+}
+
+#[allow(clippy::too_many_lines)]
 fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
     let value = serde_json::to_value(request).map_err(WireError::Encode)?;
     validate_all_strings(&value)?;
     match request {
+        ClientRequest::HostSnapshot { capabilities } => {
+            if capabilities.len() > MAX_CLIENT_CAPABILITIES {
+                return Err(WireError::InvalidCapability(format!(
+                    "at most {MAX_CLIENT_CAPABILITIES} capabilities are allowed"
+                )));
+            }
+            for capability in capabilities {
+                if !is_valid_capability(capability) {
+                    return Err(WireError::InvalidCapability(capability.clone()));
+                }
+            }
+            Ok(())
+        }
         ClientRequest::SessionAttach { session_id }
         | ClientRequest::SessionRelease { session_id }
         | ClientRequest::SessionAbort { session_id }
@@ -383,17 +562,21 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
         ClientRequest::SessionPrompt {
             session_id,
             content,
+            attachments,
         }
         | ClientRequest::SessionSteer {
             session_id,
             content,
+            attachments,
         }
         | ClientRequest::SessionFollowUp {
             session_id,
             content,
+            attachments,
         } => {
             validate_identifier("session_id", session_id)?;
-            validate_text("content", content)
+            validate_text("content", content)?;
+            validate_attachment_references(attachments)
         }
         ClientRequest::SessionCompact {
             session_id,
@@ -429,11 +612,95 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
             Some(name) => validate_text("name", name),
             None => Ok(()),
         },
-        ClientRequest::HostSnapshot
-        | ClientRequest::HostDefaults
+        ClientRequest::HostDefaults
         | ClientRequest::WorkspaceList
         | ClientRequest::SessionList { .. } => Ok(()),
+        ClientRequest::AttachmentBegin {
+            session_id,
+            attachment_id,
+            mime_type,
+            size,
+        } => validate_attachment_begin(session_id, attachment_id, mime_type, *size),
+        ClientRequest::AttachmentChunk {
+            attachment_id,
+            data,
+        } => {
+            validate_attachment_id(attachment_id)?;
+            validate_text("data", data)
+        }
+        ClientRequest::AttachmentFinish { attachment_id } => validate_attachment_id(attachment_id),
+        ClientRequest::ImageGet {
+            session_id,
+            image_ref,
+            offset: _,
+            limit,
+        } => {
+            validate_identifier("session_id", session_id)?;
+            validate_image_ref(image_ref)?;
+            if *limit == 0 || u64::from(*limit) > u64::from(MAX_IMAGE_CHUNK_BYTES) {
+                return Err(WireError::ImageChunkSizeInvalid {
+                    size: *limit,
+                    limit: MAX_IMAGE_CHUNK_BYTES,
+                });
+            }
+            Ok(())
+        }
     }
+}
+
+fn validate_attachment_begin(
+    session_id: &str,
+    attachment_id: &str,
+    mime_type: &str,
+    size: u64,
+) -> Result<(), WireError> {
+    validate_identifier("session_id", session_id)?;
+    validate_attachment_id(attachment_id)?;
+    if !ATTACHMENT_MIME_TYPES.contains(&mime_type) {
+        return Err(WireError::UnsupportedAttachmentMime(mime_type.to_owned()));
+    }
+    if size == 0 || size > MAX_ATTACHMENT_BYTES {
+        return Err(WireError::AttachmentSizeInvalid {
+            size,
+            limit: MAX_ATTACHMENT_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_attachment_references(attachments: &[String]) -> Result<(), WireError> {
+    if attachments.len() > MAX_ATTACHMENTS_PER_REQUEST {
+        return Err(WireError::TooManyAttachments {
+            count: attachments.len(),
+            limit: MAX_ATTACHMENTS_PER_REQUEST,
+        });
+    }
+    for attachment_id in attachments {
+        validate_attachment_id(attachment_id)?;
+    }
+    Ok(())
+}
+
+/// Attachment IDs are client-generated opaque handles; a conservative charset
+/// keeps them safe for host-side map keys and logging.
+fn validate_attachment_id(value: &str) -> Result<(), WireError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err(WireError::EmptyIdentifier("attachment_id"));
+    }
+    Ok(())
+}
+
+fn validate_image_ref(value: &str) -> Result<(), WireError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(WireError::InvalidImageReference);
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WireError::InvalidImageReference);
+    }
+    Ok(())
 }
 
 fn validate_server_event(event: &ServerEvent) -> Result<(), WireError> {
@@ -528,11 +795,125 @@ mod tests {
             request: ClientRequest::SessionPrompt {
                 session_id: "session-1".into(),
                 content: "hello".into(),
+                attachments: Vec::new(),
             },
         };
         let encoded = message.encode().expect("encode");
         assert!(String::from_utf8_lossy(&encoded).contains("session.prompt"));
         assert_eq!(ClientEnvelope::decode(&encoded).expect("decode"), message);
+    }
+
+    #[test]
+    fn host_snapshot_negotiates_capabilities_and_old_clients_stay_compatible() {
+        let negotiated = ClientEnvelope::decode(
+            br#"{"protocol":1,"request_id":1,"type":"host.snapshot","capabilities":["commands.v1","queue.v1"]}"#,
+        )
+        .expect("decode with capabilities");
+        match &negotiated.request {
+            ClientRequest::HostSnapshot { capabilities } => {
+                assert_eq!(
+                    capabilities,
+                    &["commands.v1".to_owned(), "queue.v1".to_owned()]
+                );
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        let legacy =
+            ClientEnvelope::decode(br#"{"protocol":1,"request_id":2,"type":"host.snapshot"}"#)
+                .expect("decode without capabilities");
+        match legacy.request {
+            ClientRequest::HostSnapshot { capabilities } => assert!(capabilities.is_empty()),
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":3,"type":"host.snapshot","capabilities":["bad capability!"]}"#
+            ),
+            Err(WireError::InvalidCapability(_))
+        ));
+    }
+
+    #[test]
+    fn prompt_attachments_are_bounded_and_backward_compatible() {
+        let with_attachments = ClientEnvelope::decode(
+            br#"{"protocol":1,"request_id":1,"type":"session.prompt","session_id":"s","content":"see this","attachments":["att-1","att-2"]}"#,
+        )
+        .expect("decode attachments");
+        match &with_attachments.request {
+            ClientRequest::SessionPrompt { attachments, .. } => {
+                assert_eq!(attachments.len(), 2);
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        ClientEnvelope::decode(
+            br#"{"protocol":1,"request_id":2,"type":"session.prompt","session_id":"s","content":"plain"}"#,
+        )
+        .expect("legacy prompt without attachments");
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":3,"type":"session.prompt","session_id":"s","content":"x","attachments":["1","2","3","4","5"]}"#
+            ),
+            Err(WireError::TooManyAttachments { count: 5, .. })
+        ));
+    }
+
+    #[test]
+    fn attachment_transfer_requests_enforce_mime_size_and_id_shape() {
+        for mime in ["image/png", "image/jpeg", "image/webp", "image/gif"] {
+            let request = format!(
+                r#"{{"protocol":1,"request_id":1,"type":"attachment.begin","session_id":"s","attachment_id":"att-1","mime_type":"{mime}","size":1024}}"#
+            );
+            ClientEnvelope::decode(request.as_bytes())
+                .unwrap_or_else(|error| panic!("accept {mime}: {error}"));
+        }
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":2,"type":"attachment.begin","session_id":"s","attachment_id":"att-1","mime_type":"image/tiff","size":10}"#
+            ),
+            Err(WireError::UnsupportedAttachmentMime(_))
+        ));
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":3,"type":"attachment.begin","session_id":"s","attachment_id":"att-1","mime_type":"image/png","size":0}"#
+            ),
+            Err(WireError::AttachmentSizeInvalid { size: 0, .. })
+        ));
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":4,"type":"attachment.chunk","attachment_id":"bad id","data":"aGk="}"#
+            ),
+            Err(WireError::EmptyIdentifier("attachment_id"))
+        ));
+    }
+
+    #[test]
+    fn image_get_requests_are_bounded_and_reference_sha256_assets() {
+        let valid = ClientEnvelope::decode(
+            br#"{"protocol":1,"request_id":1,"type":"image.get","session_id":"session","image_ref":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","offset":0,"limit":1024}"#,
+        )
+        .expect("valid image range");
+        assert!(matches!(
+            valid.request,
+            ClientRequest::ImageGet { limit: 1024, .. }
+        ));
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":2,"type":"image.get","session_id":"session","image_ref":"sha256:not-a-hash","offset":0,"limit":1024}"#
+            ),
+            Err(WireError::InvalidImageReference)
+        ));
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":3,"type":"image.get","session_id":"session","image_ref":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","offset":0,"limit":524289}"#
+            ),
+            Err(WireError::ImageChunkSizeInvalid { .. })
+        ));
     }
 
     #[test]

@@ -13,17 +13,39 @@ pub(crate) fn load_host_identity(
     store: &ConfigStore,
     host_id: uuid::Uuid,
 ) -> Result<pix_core::host_identity::HostIdentityKey> {
+    load_host_identity_with_keychain_policy(store, host_id, true)
+}
+
+pub(crate) fn load_host_identity_for_service(
+    store: &ConfigStore,
+    host_id: uuid::Uuid,
+) -> Result<pix_core::host_identity::HostIdentityKey> {
+    load_host_identity_with_keychain_policy(store, host_id, false)
+}
+
+fn load_host_identity_with_keychain_policy(
+    store: &ConfigStore,
+    host_id: uuid::Uuid,
+    allow_keychain_user_interaction: bool,
+) -> Result<pix_core::host_identity::HostIdentityKey> {
     let identity_path = store
         .path()
         .parent()
         .context("locating host identity directory")?
         .join("host-identity.key");
     let identity_store = HostIdentityStore::new(identity_path);
+    #[cfg(not(target_os = "macos"))]
+    let _ = allow_keychain_user_interaction;
     #[cfg(target_os = "macos")]
     let identity_store = if std::env::var("PIX_DISABLE_KEYCHAIN").is_ok_and(|value| value == "1") {
         identity_store
     } else {
-        identity_store.with_keychain_host_id(host_id.to_string())
+        let identity_store = identity_store.with_keychain_host_id(host_id.to_string());
+        if allow_keychain_user_interaction {
+            identity_store
+        } else {
+            identity_store.without_keychain_user_interaction()
+        }
     };
     #[cfg(target_os = "linux")]
     let identity_store = identity_store.with_secret_service_host_id(host_id.to_string());

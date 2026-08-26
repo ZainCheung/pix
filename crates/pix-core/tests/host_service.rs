@@ -190,7 +190,9 @@ fn service_routes_pairing_through_approval_then_dispatches_snapshot() {
     let request = ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
         request_id: 1,
-        request: ClientRequest::HostSnapshot,
+        request: ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
     }
     .encode()
     .expect("encode snapshot request");
@@ -240,7 +242,9 @@ fn service_routes_pairing_through_approval_then_dispatches_snapshot() {
     let request = ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
         request_id: 2,
-        request: ClientRequest::HostSnapshot,
+        request: ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
     }
     .encode()
     .expect("encode reconnect snapshot request");
@@ -320,7 +324,9 @@ fn explicit_repair_after_revoke_allows_ik_reconnect() {
     let request = ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
         request_id: 1,
-        request: ClientRequest::HostSnapshot,
+        request: ClientRequest::HostSnapshot {
+            capabilities: Vec::new(),
+        },
     }
     .encode()
     .expect("encode snapshot request");
@@ -486,6 +492,7 @@ done
         request: ClientRequest::SessionPrompt {
             session_id,
             content: "Continue".to_owned(),
+            attachments: Vec::new(),
         },
     }
     .encode()
