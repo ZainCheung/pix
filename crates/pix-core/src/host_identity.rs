@@ -1,9 +1,9 @@
 //! Host static identity persistence.
 //!
 //! The JSON configuration intentionally excludes private key material. This
-//! small store is the documented mode-0600 fallback used by Linux and by
-//! macOS migration/development; the macOS CLI prefers Keychain without
-//! changing the secure-channel API.
+//! small store is the documented mode-0600 recovery copy used by Linux and
+//! macOS; the macOS CLI prefers Keychain without changing the secure-channel
+//! API.
 
 use std::fmt::Display;
 use std::fs::{self, OpenOptions};
@@ -38,6 +38,8 @@ pub struct HostIdentityStore {
     secret_service_tool: Option<PathBuf>,
     #[cfg(target_os = "macos")]
     keychain_host_id: Option<String>,
+    #[cfg(target_os = "macos")]
+    keychain_user_interaction: bool,
 }
 
 impl HostIdentityStore {
@@ -50,6 +52,8 @@ impl HostIdentityStore {
             secret_service_tool: None,
             #[cfg(target_os = "macos")]
             keychain_host_id: None,
+            #[cfg(target_os = "macos")]
+            keychain_user_interaction: true,
         }
     }
 
@@ -69,12 +73,25 @@ impl HostIdentityStore {
     }
 
     /// Uses the macOS Keychain as the preferred backend for this host
-    /// identity. The file path remains a mode-0600 migration/fallback path so
-    /// an unavailable Keychain cannot rotate an already paired host identity.
+    /// identity. The file path remains a mode-0600 recovery path so an
+    /// unavailable Keychain cannot rotate an already paired host identity.
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn with_keychain_host_id(mut self, host_id: impl Into<String>) -> Self {
         self.keychain_host_id = Some(host_id.into());
+        self
+    }
+
+    /// Prevents Keychain APIs from presenting authentication UI.
+    ///
+    /// Background services must fail closed when their code-signing identity
+    /// is no longer trusted instead of leaving a `SecurityAgent` prompt behind
+    /// while the service manager repeatedly restarts them. A protected local
+    /// recovery copy is used when one already exists.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn without_keychain_user_interaction(mut self) -> Self {
+        self.keychain_user_interaction = false;
         self
     }
 
@@ -93,8 +110,16 @@ impl HostIdentityStore {
     pub fn load_or_create(&self) -> Result<HostIdentityKey, HostIdentityError> {
         #[cfg(target_os = "macos")]
         let keychain_error = if let Some(host_id) = &self.keychain_host_id {
-            match load_keychain_identity(host_id) {
-                Ok(Some(identity)) => return Ok(identity),
+            match load_keychain_identity(host_id, self.keychain_user_interaction) {
+                Ok(Some(identity)) => {
+                    if let Err(error) = self.ensure_file_fallback(&identity) {
+                        warn_identity_fallback(
+                            "Protected local host identity recovery copy could not be refreshed.",
+                            &error,
+                        );
+                    }
+                    return Ok(identity);
+                }
                 Ok(None) => None,
                 Err(error) => {
                     warn_identity_fallback(
@@ -150,11 +175,10 @@ impl HostIdentityStore {
                     if keychain_error.is_none() {
                         match store_keychain_identity(host_id, &identity) {
                             Ok(()) => {
-                                if let Err(error) = fs::remove_file(&self.path) {
-                                    eprintln!(
-                                        "Pix: could not remove the migrated host identity file \
-                                         {} ({error}); Keychain remains authoritative.",
-                                        self.path.display()
+                                if let Err(error) = self.ensure_file_fallback(&identity) {
+                                    warn_identity_fallback(
+                                        "Protected local host identity recovery copy could not be refreshed.",
+                                        &error,
                                     );
                                 }
                                 return Ok(identity);
@@ -213,7 +237,15 @@ impl HostIdentityStore {
                 #[cfg(target_os = "macos")]
                 if let Some(host_id) = &self.keychain_host_id {
                     match store_keychain_identity(host_id, &identity) {
-                        Ok(()) => return Ok(identity),
+                        Ok(()) => {
+                            if let Err(error) = self.ensure_file_fallback(&identity) {
+                                warn_identity_fallback(
+                                    "Protected local host identity recovery copy could not be created.",
+                                    &error,
+                                );
+                            }
+                            return Ok(identity);
+                        }
                         Err(error) => warn_identity_fallback(
                             "System keyring unavailable; using a protected local key file instead.",
                             &error,
@@ -323,9 +355,24 @@ const SECRET_SERVICE_LABEL: &str = "Pix host identity";
 const KEYCHAIN_SERVICE: &str = "com.deepoke.pix.host-identity";
 
 #[cfg(target_os = "macos")]
-fn load_keychain_identity(host_id: &str) -> Result<Option<HostIdentityKey>, HostIdentityError> {
+fn load_keychain_identity(
+    host_id: &str,
+    allow_user_interaction: bool,
+) -> Result<Option<HostIdentityKey>, HostIdentityError> {
+    use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::passwords::generic_password;
     use security_framework_sys::base::errSecItemNotFound;
+
+    let _interaction_lock = if allow_user_interaction {
+        None
+    } else {
+        Some(SecKeychain::disable_user_interaction().map_err(|error| {
+            HostIdentityError::Keychain {
+                host_id: host_id.to_owned(),
+                message: format!("disabling authentication UI failed: {error}"),
+            }
+        })?)
+    };
 
     match generic_password(
         security_framework::passwords::PasswordOptions::new_generic_password(

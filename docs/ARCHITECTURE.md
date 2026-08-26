@@ -45,6 +45,23 @@ This shared service instance keeps Bonjour ownership, pairing state, and
 encrypted transport stable while `pix device pair` or the menu app performs
 approval.
 
+## CLI ownership on macOS
+
+The release App bundle is the canonical Pix CLI distribution. The Homebrew
+Cask exposes `Pix.app/Contents/Resources/pix` in `PATH`; it does not install a
+second implementation. The macOS app resolves that embedded binary by
+default, while `PIX_CLI` is an explicit development override.
+
+The per-user LaunchAgent records its CLI owner in the configuration's
+`service-owner.json`. `service start`, `stop`, `restart`, and `status` operate
+on the installed owner without silently replacing it. `service install` only
+replaces a different owner when `--adopt` is supplied; the App uses that flag
+when it is explicitly launched so the service returns to its matching embedded
+CLI. The service manager exposes one per-user Pix service identity; a
+standalone CLI may control that existing service, but an independent CLI-only
+daemon must use a separate service identity rather than competing with the
+App-managed host.
+
 ## Transport
 
 LAN direct TCP and the outbound WebSocket relay carry the same encrypted wire

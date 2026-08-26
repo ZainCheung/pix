@@ -6,6 +6,14 @@ The Rust host, `pix-wire`, protocol fixtures, content-blind relay, and the
 SwiftUI macOS menu-bar client are open source. The SwiftUI iOS client remains
 in a separate private repository.
 
+## macOS CLI ownership
+
+The macOS App bundle is the canonical Pix CLI distribution. Homebrew may expose
+the embedded CLI through a PATH launcher, but a different CLI binary must not
+silently replace the App-managed service. Service installation records the
+owner and requires an explicit `--adopt` to switch it; ordinary lifecycle
+commands remain safe to run from another CLI.
+
 ## Protocol source of truth
 
 `pix-wire` is the only secure-channel implementation. Client repositories use a

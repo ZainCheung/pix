@@ -135,6 +135,11 @@ pix service install
 pix service status
 ~~~
 
+`pix service status` reports the executable that owns the installed service.
+If it belongs to another CLI, lifecycle commands leave that owner unchanged;
+run `pix service install --adopt` only after intentionally choosing the
+current CLI as the new owner.
+
 To install/enable the manager entry without starting it immediately:
 
 ~~~bash

@@ -377,6 +377,7 @@ pub(crate) fn prepare_setup_environment(
             .inspect();
         match result {
             Ok(installation) if installation.supported => {
+                remember_discovered_pi(config, &installation.executable);
                 ui.task_done(&format!("Pi {}", installation.version));
                 if options.verbose {
                     ui.hint(&format!(
@@ -441,6 +442,15 @@ pub(crate) fn prepare_setup_environment(
             2 => bail!("setup cancelled"),
             _ => {}
         }
+    }
+}
+
+fn remember_discovered_pi(config: &mut pix_core::HostConfig, executable: &std::path::Path) {
+    if config.preferences.pi_executable.is_none() {
+        // Setup may run with a richer terminal/login-shell PATH than the
+        // launchd service receives later. Pin the verified executable so the
+        // background host does not have to rediscover a version-manager shim.
+        config.preferences.pi_executable = Some(executable.to_path_buf());
     }
 }
 
@@ -1375,7 +1385,11 @@ use crate::service;
 
 #[cfg(test)]
 mod tests {
-    use super::is_user_cancel;
+    use std::path::{Path, PathBuf};
+
+    use pix_core::HostConfig;
+
+    use super::{is_user_cancel, remember_discovered_pi};
 
     #[test]
     fn cancellations_are_distinguished_from_relay_failures() {
@@ -1387,5 +1401,23 @@ mod tests {
         assert!(!is_user_cancel(&anyhow::anyhow!(
             "the relay channel failed to join"
         )));
+    }
+
+    #[test]
+    fn setup_pins_auto_discovered_pi_but_preserves_an_explicit_choice() {
+        let mut discovered = HostConfig::new("Test host");
+        remember_discovered_pi(&mut discovered, Path::new("/managed/node/bin/pi"));
+        assert_eq!(
+            discovered.preferences.pi_executable,
+            Some(PathBuf::from("/managed/node/bin/pi"))
+        );
+
+        let mut explicit = HostConfig::new("Test host");
+        explicit.preferences.pi_executable = Some(PathBuf::from("/custom/pi"));
+        remember_discovered_pi(&mut explicit, Path::new("/managed/node/bin/pi"));
+        assert_eq!(
+            explicit.preferences.pi_executable,
+            Some(PathBuf::from("/custom/pi"))
+        );
     }
 }

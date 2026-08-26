@@ -104,6 +104,7 @@ hosts. To manage it directly:
 
 ```sh
 pix service install
+pix service install --adopt  # only when intentionally changing the CLI owner
 pix service status
 pix service restart
 pix service uninstall
@@ -112,7 +113,10 @@ pix service uninstall
 The Linux service is a systemd user unit. The macOS service is a per-user
 LaunchAgent. Neither requires root, and uninstalling the service preserves
 the Pix configuration, host identity, authorized workspaces, and Pi session
-files.
+files. On macOS, the App's embedded CLI is the canonical owner; Homebrew's
+`pix` command is only a PATH entry for that same binary. A different CLI can
+inspect or control the installed service, but must use `--adopt` to replace
+the owner.
 
 ## Uninstall
 

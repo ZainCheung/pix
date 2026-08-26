@@ -434,6 +434,7 @@ final class HostModel {
             configPath.path,
             "service",
             "install",
+            "--adopt",
         ])
 
         let deadline = Date().addingTimeInterval(8)
@@ -821,7 +822,7 @@ final class HostModel {
     }
 
     /// Resolves the Pix CLI in the same order a user expects from a terminal:
-    /// the release bundle, an explicit development override, the inherited
+    /// an explicit development override, the release bundle, the inherited
     /// PATH, the interactive login-shell PATH, and common user install paths.
     nonisolated static func resolvePixExecutable() throws -> URL {
         try resolvePixExecutable(
@@ -840,15 +841,17 @@ final class HostModel {
         bundle: Bundle? = .main,
         searchLoginShell: Bool = true
     ) throws -> URL {
-        if let bundle, let bundled = bundledPixExecutable(bundle: bundle) {
-            return bundled
-        }
+#if DEBUG
         if let override = environment["PIX_CLI"], !override.isEmpty {
             let url = URL(fileURLWithPath: override)
             guard FileManager.default.isExecutableFile(atPath: url.path) else {
                 throw HostModelError.commandFailed("PIX_CLI is not an executable: \(override)")
             }
             return url
+        }
+#endif
+        if let bundle, let bundled = bundledPixExecutable(bundle: bundle) {
+            return bundled
         }
 
         if let found = executable(named: "pix", inPath: environment["PATH"]) {

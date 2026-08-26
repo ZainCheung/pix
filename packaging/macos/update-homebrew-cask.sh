@@ -53,6 +53,8 @@ cask "pix" do
   depends_on macos: :sonoma
 
   app "Pix.app"
+  # Expose the CLI embedded in Pix.app; this is a launcher for the same
+  # canonical binary the menu-bar app uses, not a second CLI installation.
   binary "#{appdir}/Pix.app/Contents/Resources/pix", target: "pix"
 
   # Unload the user LaunchAgent and quit the menu-bar app, but preserve the

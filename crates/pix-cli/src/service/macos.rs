@@ -164,6 +164,29 @@ pub(crate) fn installed(store: &ConfigStore) -> Result<bool> {
     Ok(contents.contains(&format!("<string>{config}</string>")))
 }
 
+pub(crate) fn installed_executable(store: &ConfigStore) -> Result<Option<PathBuf>> {
+    let path = launch_agent_path()?;
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    if !installed(store)? {
+        return Ok(None);
+    }
+    let Some(arguments) = contents.split("<key>ProgramArguments</key>").nth(1) else {
+        return Ok(None);
+    };
+    let Some(executable) = arguments
+        .split("<string>")
+        .nth(1)
+        .and_then(|value| value.split("</string>").next())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(PathBuf::from(xml_unescape(executable))))
+}
+
 pub(crate) fn active(store: &ConfigStore) -> Result<bool> {
     require_launchctl()?;
     if !installed(store)? {
@@ -304,6 +327,15 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+fn xml_unescape(value: &str) -> String {
+    value
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
 fn write_launch_agent(
     path: &Path,
     executable: &Path,
@@ -344,5 +376,32 @@ fn absolute_config_path(path: &Path) -> Result<PathBuf> {
         Ok(std::env::current_dir()
             .context("locating the current directory for the Pix config")?
             .join(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_launch_agent, xml_unescape};
+
+    #[test]
+    fn launch_agent_definition_keeps_the_embedded_executable_visible() {
+        let definition = render_launch_agent(
+            std::path::Path::new("/Applications/Pix Host/Pix.app/Contents/Resources/pix"),
+            std::path::Path::new("/tmp/pix/config.json"),
+            std::path::Path::new("/tmp/pix/logs"),
+        );
+        let arguments = definition
+            .split("<key>ProgramArguments</key>")
+            .nth(1)
+            .expect("program arguments");
+        let executable = arguments
+            .split("<string>")
+            .nth(1)
+            .and_then(|value| value.split("</string>").next())
+            .expect("executable argument");
+        assert_eq!(
+            xml_unescape(executable),
+            "/Applications/Pix Host/Pix.app/Contents/Resources/pix"
+        );
     }
 }

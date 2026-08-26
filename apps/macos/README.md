@@ -46,17 +46,28 @@ different development binary.
    authorize a folder, then choose **Add Device…** and start the iOS app on a
    phone or simulator. For local pairing, keep both devices on the same LAN.
 
-Xcode GUI launches do not inherit your shell `PATH`. The app looks for `pix`
-inside the app bundle first, then in the current `PATH`, the interactive
-login-shell `PATH`, and common user install paths such as `~/.local/bin` and
-mise shims. Override with `PIX_CLI` if needed during development.
+Xcode GUI launches do not inherit your shell `PATH`. Unless the explicit
+development-only `PIX_CLI` override is set, the app uses the embedded `pix`
+first, then the current `PATH`, the interactive login-shell `PATH`, and common
+user install paths such as `~/.local/bin` and mise shims.
 
 The release workflow builds and embeds the matching Rust CLI from the same
 source commit at
 `Pix.app/Contents/Resources/pix`, so an installed release does not depend on
-Cargo or a pre-existing `pix` executable. The CLI stores its long-term host
-identity in macOS Keychain; the mode-0600 file is only a migration/development
-fallback.
+Cargo or a pre-existing `pix` executable. The Homebrew Cask's `pix` command is
+only a PATH entry for that same embedded binary; do not install a second CLI
+for the App-managed host.
+
+The App is the canonical owner of the macOS LaunchAgent. It may pass
+`--adopt` when it installs the service so an explicitly launched App can move
+the service back to its matching embedded CLI. A standalone CLI may inspect,
+start, stop, or restart the installed service, but `service install` refuses
+to replace another CLI's owner unless `--adopt` is supplied explicitly. The
+owner path and Pix version are shown by `pix service status`.
+
+The CLI stores its long-term host identity in macOS Keychain and keeps a
+mode-0600 recovery copy so a background service can continue when Keychain
+interaction is unavailable.
 
 ## Develop
 
