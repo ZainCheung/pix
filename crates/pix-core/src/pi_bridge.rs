@@ -280,6 +280,17 @@ fn model_summary(value: &Value) -> Result<ModelSummary, PiBridgeError> {
         id: required_string(value, "id")?.to_owned(),
         name: required_string(value, "name")?.to_owned(),
         reasoning,
+        input: value
+            .get("input")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         thinking_levels: supported_thinking_levels(value, reasoning),
     })
 }
@@ -414,7 +425,8 @@ mod tests {
                     "provider": "test",
                     "id": "model-1",
                     "name": "Model 1",
-                    "reasoning": true
+                    "reasoning": true,
+                    "input": ["text", "image"]
                 })),
                 thinking_level: "high".to_owned(),
                 is_streaming: true,
@@ -428,6 +440,10 @@ mod tests {
         assert_eq!(snapshot.id, id.to_string());
         assert_eq!(snapshot.state, SessionState::Running);
         assert_eq!(snapshot.thinking_level, ThinkingLevel::High);
+        assert_eq!(
+            snapshot.model.expect("model").input,
+            vec!["text".to_owned(), "image".to_owned()]
+        );
         assert_eq!(snapshot.pending_prompts.len(), 2);
     }
 

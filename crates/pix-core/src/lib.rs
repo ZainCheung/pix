@@ -12,6 +12,7 @@ pub mod host_dispatcher;
 pub mod host_environment;
 pub mod host_identity;
 pub mod host_service;
+pub mod image_assets;
 pub mod pairing;
 pub mod pi;
 pub mod pi_bridge;
@@ -37,6 +38,7 @@ pub use host_service::{
     ConfigRefreshReport, ConnectionStage, HostService, HostServiceError, HostServiceEvent,
     HostServiceHandle, PairingRequest,
 };
+pub use image_assets::{ImageAsset, ImageAssetChunk, ImageAssetError, ImageAssetStore};
 pub use pairing::{
     ApprovedDevice, DeviceRevocation, MAX_PENDING_PAIRING_OFFERS, PairingCoordinator, PairingOffer,
     PairingPending, PairingToken,

@@ -16,21 +16,21 @@ Status legend:
 
 | Pi RPC command | Pix surface | Status |
 | --- | --- | --- |
-| `prompt` (with `images`, `streamingBehavior`) | `session.prompt` (+ `attachment.*` uploads) | supported + exposed / images gated by `attachments.v1` |
+| `prompt` (with `images`, `streamingBehavior`) | `session.prompt` (+ `attachment.*` uploads) | supported + exposed / images gated by `attachments.v1`; host paths are appended to prompt text |
 | `steer` (with `images`) | `session.steer` | supported + exposed / images gated |
 | `follow_up` (with `images`) | `session.follow_up` | supported + exposed / images gated |
 | `abort` | `session.abort` | supported + exposed |
 | `get_state` | snapshots, `session.list` refresh | supported + exposed |
-| `get_messages` | `session.snapshot.messages` | supported + exposed |
+| `get_messages` | `session.snapshot.messages` | supported + exposed; `image_refs.v1` externalizes image data to lazy `image.get` chunks |
 | `get_available_models` | `model.list` | supported + exposed |
 | `set_model` | `model.set` | supported + exposed |
 | `set_thinking_level` | `thinking.set` | supported + exposed |
 | `compact` | `session.compact` | supported + exposed |
 | `set_session_name` | `session.rename` | supported + exposed |
 | `extension_ui_response` | `extension_ui.respond` | supported + exposed |
-| `get_commands` | `session.snapshot.commands` | supported + gated (`commands.v1`) |
-| `get_available_thinking_levels` | authoritative `thinking_levels` in snapshots | supported + gated (`thinking_levels.v1`) |
-| `get_session_stats` | `session.snapshot.usage` | supported + gated (`usage.v1`) |
+| `get_commands` | `session.metadata.commands` (or legacy snapshot field) | supported + gated (`commands.v1`, asynchronous with `session_metadata.v1`) |
+| `get_available_thinking_levels` | `session.metadata.thinking_levels` (or legacy snapshot field) | supported + gated (`thinking_levels.v1`, asynchronous with `session_metadata.v1`) |
+| `get_session_stats` | `session.metadata.usage` (or legacy snapshot field) | supported + gated (`usage.v1`, asynchronous with `session_metadata.v1`) |
 | `new_session` | `session.create` | supported + exposed (Pix owns the session ID) |
 | `switch_session` | `session.attach` on a discovered session | supported + exposed |
 | `cycle_model` / `cycle_thinking_level` | — | supported + intentionally omitted (typed `model.set` / `thinking.set` cover it; cycling is a TUI interaction) |

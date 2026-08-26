@@ -48,6 +48,8 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "attachments.v1",
     "usage.v1",
     "thinking_levels.v1",
+    "session_metadata.v1",
+    "image_refs.v1",
 ];
 /// Upper bound on capability strings a client may declare per connection.
 pub const MAX_CLIENT_CAPABILITIES: usize = 16;
@@ -55,6 +57,8 @@ pub const MAX_CLIENT_CAPABILITIES: usize = 16;
 pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024;
 /// Maximum attachment references on one prompt, steer, or follow-up request.
 pub const MAX_ATTACHMENTS_PER_REQUEST: usize = 4;
+/// Maximum decoded bytes in one lazy historical image range.
+pub const MAX_IMAGE_CHUNK_BYTES: u32 = 512 * 1024;
 /// Attachment mime types Pi's `images` content accepts.
 pub const ATTACHMENT_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
@@ -78,6 +82,10 @@ pub enum WireError {
     AttachmentSizeInvalid { size: u64, limit: u64 },
     #[error("request references {count} attachments; at most {limit} are allowed")]
     TooManyAttachments { count: usize, limit: usize },
+    #[error("lazy image chunk size {size} exceeds {limit} bytes")]
+    ImageChunkSizeInvalid { size: u32, limit: u32 },
+    #[error("image reference must be sha256 followed by 64 hexadecimal characters")]
+    InvalidImageReference,
     #[error("pairing token must be canonical URL-safe base64 for 32 bytes")]
     InvalidPairingToken,
     #[error("relay channel secret must be canonical URL-safe base64 for 32 bytes")]

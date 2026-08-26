@@ -33,3 +33,24 @@ parse, queue, persist, or replay application messages.
 
 Pix Host source is MIT licensed. Third-party code keeps its original license;
 release artifacts must ship the corresponding dependency notices.
+
+### Image history and optional session metadata
+
+Pi JSONL remains the authoritative conversation history, including the
+original `ImageContent` base64. Pix derives host-local image assets with
+content-addressed SHA-256 IDs and atomically writes `source`, `agent`, `vision`,
+and `metadata.json` under the configuration directory. A client that opts into
+`image_refs.v1` receives lightweight `imageRef` content and retrieves the
+vision bytes with bounded `image.get`/`image.chunk` requests. This avoids
+shipping every historical image during session attach while preserving
+graceful recovery if the derived asset cache is lost.
+
+The base `session.snapshot` path is intentionally independent from optional
+Pi probes. `commands.v1`, `usage.v1`, and `thinking_levels.v1` are scheduled
+after the snapshot and delivered through `session.metadata` for clients that
+declare `session_metadata.v1`; older clients use a short, best-effort inline
+fallback for compatibility.
+
+Model summaries carry Pi's optional `input` modalities. Clients use the
+advertised `image` value to gate image composition; the host does not infer
+model capability from the existence of an attachment upload.

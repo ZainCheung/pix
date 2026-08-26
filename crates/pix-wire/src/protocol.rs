@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::{
     ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST,
-    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR,
-    WireError,
+    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES,
+    MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,9 +170,9 @@ pub enum ClientRequest {
         extension_request_id: String,
         answer: ExtensionUiAnswer,
     },
-    /// Starts an in-memory attachment upload scoped to one attached session.
-    /// The bytes never touch durable storage; the host assembles the chunks
-    /// and forwards them to Pi as prompt images.
+    /// Starts an attachment upload scoped to one attached session. The host
+    /// stages chunks in bounded memory, then atomically persists a source,
+    /// agent, and vision asset at `attachment.finish`.
     #[serde(rename = "attachment.begin")]
     AttachmentBegin {
         session_id: String,
@@ -187,6 +187,15 @@ pub enum ClientRequest {
     /// Marks an attachment ready after all declared bytes have arrived.
     #[serde(rename = "attachment.finish")]
     AttachmentFinish { attachment_id: String },
+    /// Reads one bounded range of a host-owned historical image asset. The
+    /// request is only accepted by clients that declared `image_refs.v1`.
+    #[serde(rename = "image.get")]
+    ImageGet {
+        session_id: String,
+        image_ref: String,
+        offset: u64,
+        limit: u32,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,6 +257,28 @@ pub enum ServerEvent {
     SessionQueue {
         session_id: String,
         queue: SessionQueue,
+    },
+    /// One lazy image range for a `session.snapshot` image reference.
+    #[serde(rename = "image.chunk")]
+    ImageChunk {
+        image_ref: String,
+        mime_type: String,
+        offset: u64,
+        total_size: u64,
+        eof: bool,
+        data: String,
+    },
+    /// Optional session enrichment delivered after the base snapshot. Each
+    /// field is omitted when its corresponding capability was not declared.
+    #[serde(rename = "session.metadata")]
+    SessionMetadata {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        commands: Option<Vec<CommandSummary>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<SessionUsage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_levels: Option<Vec<ThinkingLevel>>,
     },
     #[serde(rename = "error")]
     Error {
@@ -366,6 +397,10 @@ pub struct ModelSummary {
     pub id: String,
     pub name: String,
     pub reasoning: bool,
+    /// Input modalities advertised by Pi, for example `text` and `image`.
+    /// Older Pi versions omit the field and therefore decode as an empty list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<String>,
     /// Pi's effective thinking choices for this model. Older hosts omit the
     /// field; clients then retain the standard compatibility choices.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -498,6 +533,7 @@ pub fn is_valid_capability(value: &str) -> bool {
         })
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
     let value = serde_json::to_value(request).map_err(WireError::Encode)?;
     validate_all_strings(&value)?;
@@ -593,6 +629,22 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
             validate_text("data", data)
         }
         ClientRequest::AttachmentFinish { attachment_id } => validate_attachment_id(attachment_id),
+        ClientRequest::ImageGet {
+            session_id,
+            image_ref,
+            offset: _,
+            limit,
+        } => {
+            validate_identifier("session_id", session_id)?;
+            validate_image_ref(image_ref)?;
+            if *limit == 0 || u64::from(*limit) > u64::from(MAX_IMAGE_CHUNK_BYTES) {
+                return Err(WireError::ImageChunkSizeInvalid {
+                    size: *limit,
+                    limit: MAX_IMAGE_CHUNK_BYTES,
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -637,6 +689,16 @@ fn validate_attachment_id(value: &str) -> Result<(), WireError> {
         || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
     {
         return Err(WireError::EmptyIdentifier("attachment_id"));
+    }
+    Ok(())
+}
+
+fn validate_image_ref(value: &str) -> Result<(), WireError> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err(WireError::InvalidImageReference);
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WireError::InvalidImageReference);
     }
     Ok(())
 }
@@ -826,6 +888,31 @@ mod tests {
                 br#"{"protocol":1,"request_id":4,"type":"attachment.chunk","attachment_id":"bad id","data":"aGk="}"#
             ),
             Err(WireError::EmptyIdentifier("attachment_id"))
+        ));
+    }
+
+    #[test]
+    fn image_get_requests_are_bounded_and_reference_sha256_assets() {
+        let valid = ClientEnvelope::decode(
+            br#"{"protocol":1,"request_id":1,"type":"image.get","session_id":"session","image_ref":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","offset":0,"limit":1024}"#,
+        )
+        .expect("valid image range");
+        assert!(matches!(
+            valid.request,
+            ClientRequest::ImageGet { limit: 1024, .. }
+        ));
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":2,"type":"image.get","session_id":"session","image_ref":"sha256:not-a-hash","offset":0,"limit":1024}"#
+            ),
+            Err(WireError::InvalidImageReference)
+        ));
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":3,"type":"image.get","session_id":"session","image_ref":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","offset":0,"limit":524289}"#
+            ),
+            Err(WireError::ImageChunkSizeInvalid { .. })
         ));
     }
 

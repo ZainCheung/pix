@@ -15,12 +15,14 @@ directories.workspace = true
 fs2.workspace = true
 getrandom.workspace = true
 hostname.workspace = true
+image.workspace = true
 libc = "0.2"
 mdns-sd.workspace = true
 pix-wire = { path = "../pix-wire" }
 semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

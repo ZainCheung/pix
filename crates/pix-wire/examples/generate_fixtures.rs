@@ -131,6 +131,8 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                     "attachments.v1".to_owned(),
                     "usage.v1".to_owned(),
                     "thinking_levels.v1".to_owned(),
+                    "session_metadata.v1".to_owned(),
+                    "image_refs.v1".to_owned(),
                 ],
             },
         ),
@@ -265,6 +267,17 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                 attachment_id: "attachment-fixture".to_owned(),
             },
         ),
+        named(
+            "client-image-get.json",
+            ClientRequest::ImageGet {
+                session_id: SESSION_ID.to_owned(),
+                image_ref:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                offset: 0,
+                limit: 1024,
+            },
+        ),
     ]
 }
 
@@ -288,6 +301,7 @@ fn fixture_workspace() -> (Uuid, WorkspaceSummary, ModelSummary, ToolEvent) {
             id: "fixture-model".to_owned(),
             name: "Fixture Model".to_owned(),
             reasoning: true,
+            input: Vec::new(),
             thinking_levels: Vec::new(),
         },
         ToolEvent {
@@ -463,6 +477,30 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                 },
             },
         ),
+        server(
+            "server-session-metadata.json",
+            None,
+            ServerEvent::SessionMetadata {
+                session_id: SESSION_ID.to_owned(),
+                commands: Some(Vec::new()),
+                usage: None,
+                thinking_levels: Some(vec![ThinkingLevel::Off, ThinkingLevel::High]),
+            },
+        ),
+        server(
+            "server-image-chunk.json",
+            Some(REQUEST_ID),
+            ServerEvent::ImageChunk {
+                image_ref:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_owned(),
+                mime_type: "image/png".to_owned(),
+                offset: 0,
+                total_size: 2,
+                eof: true,
+                data: "aGk=".to_owned(),
+            },
+        ),
     ]
 }
 
@@ -571,6 +609,7 @@ fn fixture_model_with_levels() -> ModelSummary {
         id: "fixture-model".to_owned(),
         name: "Fixture Model".to_owned(),
         reasoning: true,
+        input: Vec::new(),
         thinking_levels: vec![
             ThinkingLevel::Off,
             ThinkingLevel::Low,

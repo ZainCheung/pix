@@ -87,6 +87,35 @@ done
     (directory, path)
 }
 
+fn fake_pi_image_script() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempdir().expect("temporary fake Pi directory");
+    let path = directory.path().join("fake-pi-image.sh");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
+  type=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
+  case "$type" in
+    get_state)
+      printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"fake-session\",\"sessionName\":\"Image session\",\"model\":{\"provider\":\"fake\",\"id\":\"model\",\"name\":\"Fake Model\",\"reasoning\":true},\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"pendingMessageCount\":0}}"
+      ;;
+    get_messages)
+      printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_messages\",\"success\":true,\"data\":{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"see image\"},{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"aW1hZ2U=\"}]}]}}"
+      ;;
+    *)
+      printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"$type\",\"success\":true}"
+      ;;
+  esac
+done
+"#,
+    )
+    .expect("write fake image Pi");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+        .expect("make fake image Pi executable");
+    (directory, path)
+}
+
 fn request(request_id: u64, request: ClientRequest) -> ClientEnvelope {
     ClientEnvelope {
         protocol: PROTOCOL_MAJOR,
@@ -118,14 +147,19 @@ fn setup() -> (
             max_active_sessions: 4,
             max_concurrent_turns: 4,
             idle_timeout: Duration::from_secs(300),
-            request_timeout: Duration::from_secs(2),
+            request_timeout: Duration::from_secs(5),
             extra_arguments: Vec::new(),
             environment: HostEnvironment::from_process(),
         })
         .expect("runtime manager"),
     );
-    let dispatcher =
-        HostProtocolDispatcher::new(Arc::new(HostState::new(config)), Arc::clone(&manager));
+    let dispatcher = HostProtocolDispatcher::new(
+        Arc::new(HostState::with_asset_root(
+            config,
+            workspace.path().join(".pix-attachments"),
+        )),
+        Arc::clone(&manager),
+    );
     (
         script_directory,
         workspace,
@@ -274,8 +308,13 @@ fn failed_create_snapshot_releases_the_runtime_and_session_lease() {
         })
         .expect("runtime manager"),
     );
-    let mut dispatcher =
-        HostProtocolDispatcher::new(Arc::new(HostState::new(config)), Arc::clone(&manager));
+    let mut dispatcher = HostProtocolDispatcher::new(
+        Arc::new(HostState::with_asset_root(
+            config,
+            workspace.path().join(".pix-attachments"),
+        )),
+        Arc::clone(&manager),
+    );
 
     let response = dispatcher.dispatch(request(
         20,
@@ -519,7 +558,7 @@ fn host_snapshot_advertises_capabilities_and_gates_session_enrichment() {
             assert!(snapshot.queue.is_none());
             assert!(snapshot.usage.is_none());
             assert!(
-                snapshot
+                !snapshot
                     .model
                     .as_ref()
                     .expect("model")
@@ -593,6 +632,168 @@ fn declared_capabilities_enrich_snapshots_with_pi_authority() {
         }
         event => panic!("expected snapshot, got {event:?}"),
     }
+    drop(script);
+}
+
+#[test]
+fn session_metadata_is_delivered_after_the_base_snapshot() {
+    let (script, _workspace, _locks, mut dispatcher, manager, workspace_id) = setup();
+    let _ = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec![
+                "commands.v1".to_owned(),
+                "usage.v1".to_owned(),
+                "thinking_levels.v1".to_owned(),
+                "session_metadata.v1".to_owned(),
+            ],
+        },
+    ));
+    let created = dispatcher.dispatch(request(
+        2,
+        ClientRequest::SessionCreate {
+            workspace_id,
+            name: Some("async metadata".to_owned()),
+        },
+    ));
+    let session_id = match &created[1].event {
+        ServerEvent::SessionSnapshot { snapshot } => {
+            assert!(snapshot.commands.is_empty());
+            assert!(snapshot.usage.is_none());
+            assert!(
+                !snapshot
+                    .model
+                    .as_ref()
+                    .expect("model")
+                    .thinking_levels
+                    .is_empty()
+            );
+            snapshot.id.clone()
+        }
+        event => panic!("expected base snapshot, got {event:?}"),
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let metadata = loop {
+        if let Some(event) = dispatcher
+            .drain_events()
+            .into_iter()
+            .find(|event| matches!(event.event, ServerEvent::SessionMetadata { .. }))
+        {
+            break event;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "metadata event timeout"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    match metadata.event {
+        ServerEvent::SessionMetadata {
+            session_id: event_session,
+            commands,
+            usage,
+            thinking_levels,
+        } => {
+            assert_eq!(event_session, session_id);
+            assert_eq!(commands.expect("commands").len(), 2);
+            assert_eq!(usage.expect("usage").tokens_total, 15);
+            assert_eq!(
+                thinking_levels.expect("thinking levels"),
+                vec![
+                    pix_wire::ThinkingLevel::Off,
+                    pix_wire::ThinkingLevel::Low,
+                    pix_wire::ThinkingLevel::High
+                ]
+            );
+        }
+        event => panic!("expected metadata event, got {event:?}"),
+    }
+    manager
+        .release(session_id.parse().expect("session ID"))
+        .expect("release runtime");
+    drop(script);
+}
+
+#[test]
+fn image_history_is_externalized_and_loaded_in_bounded_chunks() {
+    let (script, executable) = fake_pi_image_script();
+    let workspace = tempdir().expect("workspace");
+    let locks = tempdir().expect("lock directory");
+    let assets = tempdir().expect("asset directory");
+    let mut config = HostConfig::new("Test Mac");
+    let workspace_id = WorkspaceRegistry::new(&mut config)
+        .add(workspace.path(), Some("Project".to_owned()))
+        .expect("authorize workspace")
+        .id;
+    let manager = Arc::new(
+        RuntimeManager::new(RuntimeManagerOptions {
+            executable,
+            lock_directory: locks.path().to_path_buf(),
+            max_active_sessions: 2,
+            max_concurrent_turns: 2,
+            idle_timeout: Duration::from_secs(300),
+            request_timeout: Duration::from_secs(2),
+            extra_arguments: Vec::new(),
+            environment: HostEnvironment::from_process(),
+        })
+        .expect("runtime manager"),
+    );
+    let mut dispatcher = HostProtocolDispatcher::new(
+        Arc::new(HostState::with_asset_root(config, assets.path())),
+        Arc::clone(&manager),
+    );
+    let _ = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec!["image_refs.v1".to_owned()],
+        },
+    ));
+    let created = dispatcher.dispatch(request(
+        2,
+        ClientRequest::SessionCreate {
+            workspace_id,
+            name: Some("image history".to_owned()),
+        },
+    ));
+    let session_id = match &created[1].event {
+        ServerEvent::SessionSnapshot { snapshot } => {
+            let image = &snapshot.messages[0]["content"][1];
+            assert_eq!(image["type"], "imageRef");
+            assert!(
+                image["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("sha256:"))
+            );
+            snapshot.id.clone()
+        }
+        event => panic!("expected image snapshot, got {event:?}"),
+    };
+    let image_ref = match &created[1].event {
+        ServerEvent::SessionSnapshot { snapshot } => snapshot.messages[0]["content"][1]["id"]
+            .as_str()
+            .expect("image ref")
+            .to_owned(),
+        _ => unreachable!(),
+    };
+    let chunk = dispatcher.dispatch(request(
+        3,
+        ClientRequest::ImageGet {
+            session_id: session_id.clone(),
+            image_ref,
+            offset: 0,
+            limit: 3,
+        },
+    ));
+    match &chunk[0].event {
+        ServerEvent::ImageChunk { data, eof, .. } => {
+            assert_eq!(data, "aW1h");
+            assert!(!eof);
+        }
+        event => panic!("expected image chunk, got {event:?}"),
+    }
+    manager
+        .release(session_id.parse().expect("session ID"))
+        .expect("release runtime");
     drop(script);
 }
 
@@ -730,6 +931,24 @@ fn attachment_uploads_assemble_into_pi_prompt_images() {
     assert_eq!(images[0]["type"], "image");
     assert_eq!(images[0]["mimeType"], "image/png");
     assert_eq!(images[0]["data"], "aGVsbG8=");
+    assert!(
+        record["message"]
+            .as_str()
+            .expect("prompt message")
+            .contains("Attached image paths (host-local):")
+    );
+    assert!(
+        record["message"]
+            .as_str()
+            .expect("prompt message")
+            .contains("/.pix-attachments/v1/")
+    );
+    assert!(
+        record["message"]
+            .as_str()
+            .expect("prompt message")
+            .contains("/att-1/")
+    );
 }
 
 #[test]

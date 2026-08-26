@@ -153,7 +153,10 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
         endpoint,
         identity.private_key,
         coordinator,
-        std::sync::Arc::new(HostState::new(config)),
+        std::sync::Arc::new(HostState::with_asset_root(
+            config,
+            config_directory.join("attachments"),
+        )),
         std::sync::Arc::clone(&runtime_manager),
     )
     .context("starting Pix host service")?;

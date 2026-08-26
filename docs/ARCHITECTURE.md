@@ -88,8 +88,22 @@ session storage.
 - Wire extensions are capability-gated per connection: a host never emits a
   gated event or field to a client that did not declare it
   (`protocol/schema/v1.md`).
-- Image attachments assemble in host memory only, bounded per connection, and
-  are consumed by the prompt that references them; nothing is persisted.
+- Image attachments are staged in bounded connection memory, then persisted
+  atomically below the Pix configuration directory as a session-scoped
+  `attachments/v1/<session>/<attachment-key>/` asset (client attachment ID
+  for new uploads, vision hash for recovered history). The source, agent-compatible,
+  and vision paths are explicit; decodable images get a <=2000×2000 vision
+  derivative and malformed/unsupported bytes remain a byte-for-byte fallback.
+  Pi still receives the vision bytes in `images[]`, while the agent-compatible
+  paths are appended to the prompt for filesystem-aware workflows. History
+  clients that declare `image_refs.v1` receive `imageRef` entries and fetch
+  bounded chunks lazily; raw Pi `ImageContent` remains the durable source of
+  truth.
+- Session snapshots return Pi state and messages first. Clients declaring
+  `session_metadata.v1` receive commands, usage, and thinking-level choices in
+  a later unsolicited `session.metadata` event. Legacy clients keep the
+  fields in the snapshot, but each optional probe has a short best-effort
+  deadline so it cannot hold the connection indefinitely.
 
 ## Pi RPC coverage
 

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::{Duration, Instant};
 
@@ -8,13 +9,14 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pix_wire::{
     ClientEnvelope, ClientRequest, ErrorCode, HOST_CAPABILITIES, HostSnapshot, HostSummary,
-    PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
+    MAX_IMAGE_CHUNK_BYTES, PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
     SessionSummary as WireSessionSummary, WorkspaceAvailability, WorkspaceSummary,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::config::{ConfigError, HostConfig};
+use crate::config::{ConfigError, ConfigStore, HostConfig};
+use crate::image_assets::{ImageAsset, ImageAssetChunk, ImageAssetError, ImageAssetStore};
 use crate::pi_bridge::{self, PiBridgeError};
 use crate::pi_rpc::{
     ExtensionUiAnswer as PiExtensionUiAnswer, PiCommand, PiEvent, PiImage,
@@ -39,11 +41,16 @@ const CAPABILITY_QUEUE: &str = "queue.v1";
 const CAPABILITY_ATTACHMENTS: &str = "attachments.v1";
 const CAPABILITY_USAGE: &str = "usage.v1";
 const CAPABILITY_THINKING_LEVELS: &str = "thinking_levels.v1";
+const CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
+const CAPABILITY_IMAGE_REFS: &str = "image_refs.v1";
+const SESSION_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(8);
+const RUNTIME_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Shared, conversation-free host configuration visible to all connections.
 pub struct HostState {
     config: RwLock<HostConfig>,
     catalog: Mutex<HostCatalog>,
+    image_assets: Arc<ImageAssetStore>,
 }
 
 #[derive(Default)]
@@ -60,9 +67,22 @@ struct CachedWorkspaceAvailability {
 impl HostState {
     #[must_use]
     pub fn new(config: HostConfig) -> Self {
+        let root = ConfigStore::default_path()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.join("attachments")))
+            .unwrap_or_else(|| std::env::temp_dir().join("pix").join("attachments"));
+        Self::with_asset_root(config, root)
+    }
+
+    /// Constructs host state with an explicit durable asset root. The service
+    /// uses the directory next to its `ConfigStore`; tests and embedded callers
+    /// can isolate image files in a temporary directory.
+    #[must_use]
+    pub fn with_asset_root(config: HostConfig, root: impl Into<PathBuf>) -> Self {
         Self {
             config: RwLock::new(config),
             catalog: Mutex::new(HostCatalog::default()),
+            image_assets: Arc::new(ImageAssetStore::new(root)),
         }
     }
 
@@ -93,6 +113,11 @@ impl HostState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    #[must_use]
+    pub fn image_assets(&self) -> Arc<ImageAssetStore> {
+        Arc::clone(&self.image_assets)
+    }
 }
 
 /// Connection-scoped protocol dispatcher for one authenticated device.
@@ -108,25 +133,31 @@ pub struct HostProtocolDispatcher {
     /// Optional protocol extensions the connected client declared. Every
     /// gated field and event is omitted until the declaration arrives.
     client_capabilities: HashSet<String>,
-    /// In-memory attachment uploads staged on this connection. Dropped on
+    /// Attachment uploads staged on this connection. Durable asset files are
+    /// retained for history/lazy loading; the staging entries are dropped on
     /// disconnect, expiry, or the prompt that consumes them.
     attachments: HashMap<String, PendingAttachment>,
+    metadata_events: mpsc::Receiver<ServerEvent>,
+    metadata_sender: mpsc::Sender<ServerEvent>,
+    metadata_cancel: Arc<AtomicBool>,
 }
 
-/// One assembling attachment upload. Bytes exist only between `begin` and the
-/// prompt that consumes them; nothing is written to durable storage.
+/// One assembling attachment upload. Bytes are staged until `finish`, then
+/// persisted as a host asset and consumed by the prompt that references it.
 struct PendingAttachment {
     session_id: SessionId,
     mime_type: String,
     expected_size: usize,
     buffer: Vec<u8>,
     ready: bool,
+    asset: Option<ImageAsset>,
     updated: Instant,
 }
 
 impl HostProtocolDispatcher {
     #[must_use]
     pub fn new(host: Arc<HostState>, runtimes: Arc<RuntimeManager>) -> Self {
+        let (metadata_sender, metadata_events) = mpsc::channel();
         Self {
             host,
             runtimes,
@@ -135,6 +166,9 @@ impl HostProtocolDispatcher {
             event_receivers: HashMap::new(),
             client_capabilities: HashSet::new(),
             attachments: HashMap::new(),
+            metadata_events,
+            metadata_sender,
+            metadata_cancel: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -224,6 +258,21 @@ impl HostProtocolDispatcher {
             self.disconnect();
             return vec![unsolicited(error.public_event())];
         }
+        let mut envelopes = Vec::new();
+        while let Ok(event) = self.metadata_events.try_recv() {
+            // A metadata query may finish after the user detached the session;
+            // never deliver stale enrichment to a different attachment.
+            let attached = match &event {
+                ServerEvent::SessionMetadata { session_id, .. } => parse_session_id(session_id)
+                    .map(|id| self.attached_sessions.contains(&id))
+                    .unwrap_or(false),
+                _ => true,
+            };
+            if attached {
+                envelopes.push(unsolicited(event));
+            }
+        }
+
         let mut raw_events = Vec::new();
         let mut disconnected = Vec::new();
         for (&session_id, receiver) in &self.event_receivers {
@@ -242,19 +291,23 @@ impl HostProtocolDispatcher {
             self.event_receivers.remove(&session_id);
         }
 
-        raw_events
-            .into_iter()
-            .filter_map(|(session_id, event)| {
-                match self.map_pi_event(&session_id.to_string(), event) {
-                    Ok(mapped) => mapped,
-                    Err(error) => Some(unsolicited(error.public_event())),
-                }
-            })
-            .collect()
+        envelopes.extend(
+            raw_events
+                .into_iter()
+                .filter_map(|(session_id, event)| {
+                    match self.map_pi_event(&session_id.to_string(), event) {
+                        Ok(mapped) => mapped,
+                        Err(error) => Some(unsolicited(error.public_event())),
+                    }
+                })
+                .collect::<Vec<_>>(),
+        );
+        envelopes
     }
 
     /// Detaches this connection from every session without stopping Pi work.
     pub fn disconnect(&mut self) {
+        self.metadata_cancel.store(false, Ordering::Release);
         for session_id in self.attached_sessions.drain() {
             let _ = self.runtimes.detach(session_id);
         }
@@ -365,11 +418,11 @@ impl HostProtocolDispatcher {
                 content,
                 attachments,
             } => {
-                let images = self.take_attachment_images(&session_id, &attachments)?;
+                let (message, images) = self.prepare_prompt(&session_id, content, &attachments)?;
                 self.command_ack(
                     &session_id,
                     &PiCommand::Prompt {
-                        message: content,
+                        message,
                         streaming_behavior: None,
                         images,
                     },
@@ -380,28 +433,16 @@ impl HostProtocolDispatcher {
                 content,
                 attachments,
             } => {
-                let images = self.take_attachment_images(&session_id, &attachments)?;
-                self.command_ack(
-                    &session_id,
-                    &PiCommand::Steer {
-                        message: content,
-                        images,
-                    },
-                )
+                let (message, images) = self.prepare_prompt(&session_id, content, &attachments)?;
+                self.command_ack(&session_id, &PiCommand::Steer { message, images })
             }
             ClientRequest::SessionFollowUp {
                 session_id,
                 content,
                 attachments,
             } => {
-                let images = self.take_attachment_images(&session_id, &attachments)?;
-                self.command_ack(
-                    &session_id,
-                    &PiCommand::FollowUp {
-                        message: content,
-                        images,
-                    },
-                )
+                let (message, images) = self.prepare_prompt(&session_id, content, &attachments)?;
+                self.command_ack(&session_id, &PiCommand::FollowUp { message, images })
             }
             ClientRequest::SessionAbort { session_id } => {
                 self.command_ack(&session_id, &PiCommand::Abort)
@@ -476,6 +517,7 @@ impl HostProtocolDispatcher {
                         expected_size,
                         buffer: Vec::new(),
                         ready: false,
+                        asset: None,
                         updated: Instant::now(),
                     },
                 );
@@ -518,9 +560,38 @@ impl HostProtocolDispatcher {
                         "Attachment byte count does not match the declared size",
                     ));
                 }
+                let asset = self.host.image_assets().persist_named(
+                    attachment.session_id,
+                    &attachment_id,
+                    attachment.mime_type.clone(),
+                    &attachment.buffer,
+                )?;
+                attachment.asset = Some(asset);
+                // Once the durable source exists, do not retain a second full
+                // copy in the connection-scoped staging map.
+                attachment.buffer.clear();
                 attachment.ready = true;
                 attachment.updated = Instant::now();
                 Ok(vec![ready(ServerEvent::RequestAck)])
+            }
+            ClientRequest::ImageGet {
+                session_id,
+                image_ref,
+                offset,
+                limit,
+            } => {
+                self.require_capability(CAPABILITY_IMAGE_REFS)?;
+                let session_id = self.require_attached(&session_id)?;
+                let max_image_chunk_bytes =
+                    usize::try_from(MAX_IMAGE_CHUNK_BYTES).unwrap_or(usize::MAX);
+                let limit = usize::try_from(limit)
+                    .unwrap_or(max_image_chunk_bytes)
+                    .min(max_image_chunk_bytes);
+                let chunk = self
+                    .host
+                    .image_assets()
+                    .read_chunk(session_id, &image_ref, offset, limit)?;
+                Ok(vec![ready(image_chunk_event(chunk))])
             }
         }
     }
@@ -760,31 +831,63 @@ impl HostProtocolDispatcher {
         Ok(vec![ready(ServerEvent::RequestAck)])
     }
 
-    fn session_snapshot_event(&self, session_id: SessionId) -> Result<ServerEvent, DispatchError> {
+    fn session_snapshot_event(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<ServerEvent, DispatchError> {
         self.ensure_device_authorized()?;
         self.ensure_active_session_authorized(session_id)?;
-        let snapshot = self.runtimes.snapshot(session_id)?;
+        let snapshot = self
+            .runtimes
+            .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
         let mut snapshot = pi_bridge::session_snapshot(session_id, snapshot)?;
-        if self.client_capabilities.contains(CAPABILITY_COMMANDS) {
-            match self.runtimes.request(session_id, &PiCommand::GetCommands) {
-                Ok(response) => match pi_bridge::commands(&response) {
-                    Ok(commands) => snapshot.commands = commands,
-                    Err(_) => {
-                        crate::diagnostics::record("session.commands", &[("failed", 1)]);
-                    }
-                },
-                Err(_) => {
-                    crate::diagnostics::record("session.commands", &[("failed", 1)]);
-                }
-            }
+        if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+            self.host
+                .image_assets()
+                .externalize_messages(session_id, &mut snapshot.messages)?;
         }
         if self.client_capabilities.contains(CAPABILITY_QUEUE) {
             snapshot.queue = self.runtimes.queue(session_id);
         }
+        if self
+            .client_capabilities
+            .contains(CAPABILITY_SESSION_METADATA)
+        {
+            self.schedule_session_metadata(session_id);
+        } else {
+            // Legacy clients still receive the old fields, but every optional
+            // probe is strictly bounded and best-effort. New clients declare
+            // `session_metadata.v1` and receive the same data asynchronously
+            // after this base snapshot has already been delivered.
+            self.enrich_legacy_snapshot(&mut snapshot, session_id);
+        }
+        Ok(ServerEvent::SessionSnapshot { snapshot })
+    }
+
+    fn enrich_legacy_snapshot(
+        &self,
+        snapshot: &mut pix_wire::SessionSnapshot,
+        session_id: SessionId,
+    ) {
+        if self.client_capabilities.contains(CAPABILITY_COMMANDS) {
+            match self.runtimes.request_with_timeout(
+                session_id,
+                &PiCommand::GetCommands,
+                RUNTIME_METADATA_TIMEOUT,
+            ) {
+                Ok(response) => match pi_bridge::commands(&response) {
+                    Ok(commands) => snapshot.commands = commands,
+                    Err(_) => crate::diagnostics::record("session.commands", &[("failed", 1)]),
+                },
+                Err(_) => crate::diagnostics::record("session.commands", &[("failed", 1)]),
+            }
+        }
         if self.client_capabilities.contains(CAPABILITY_USAGE)
-            && let Ok(response) = self
-                .runtimes
-                .request(session_id, &PiCommand::GetSessionStats)
+            && let Ok(response) = self.runtimes.request_with_timeout(
+                session_id,
+                &PiCommand::GetSessionStats,
+                RUNTIME_METADATA_TIMEOUT,
+            )
             && let Ok(usage) = pi_bridge::usage(&response)
         {
             snapshot.usage = Some(usage);
@@ -793,29 +896,113 @@ impl HostProtocolDispatcher {
             .client_capabilities
             .contains(CAPABILITY_THINKING_LEVELS)
             && let Some(model) = snapshot.model.as_mut()
-            && let Ok(response) = self
-                .runtimes
-                .request(session_id, &PiCommand::GetAvailableThinkingLevels)
+            && let Ok(response) = self.runtimes.request_with_timeout(
+                session_id,
+                &PiCommand::GetAvailableThinkingLevels,
+                RUNTIME_METADATA_TIMEOUT,
+            )
             && let Ok(levels) = pi_bridge::thinking_levels(&response)
         {
             model.thinking_levels = levels;
         }
-        Ok(ServerEvent::SessionSnapshot { snapshot })
+    }
+
+    fn schedule_session_metadata(&self, session_id: SessionId) {
+        let runtimes = Arc::clone(&self.runtimes);
+        let sender = self.metadata_sender.clone();
+        let cancelled = Arc::clone(&self.metadata_cancel);
+        let include_commands = self.client_capabilities.contains(CAPABILITY_COMMANDS);
+        let include_usage = self.client_capabilities.contains(CAPABILITY_USAGE);
+        let include_thinking = self
+            .client_capabilities
+            .contains(CAPABILITY_THINKING_LEVELS);
+        let _ = std::thread::Builder::new()
+            .name("pix-session-metadata".to_owned())
+            .spawn(move || {
+                let mut commands = None;
+                let mut usage = None;
+                let mut thinking_levels = None;
+                if !cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                if include_commands
+                    && let Ok(response) = runtimes.request_with_timeout(
+                        session_id,
+                        &PiCommand::GetCommands,
+                        RUNTIME_METADATA_TIMEOUT,
+                    )
+                {
+                    commands = pi_bridge::commands(&response).ok();
+                }
+                if !cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                if include_usage
+                    && let Ok(response) = runtimes.request_with_timeout(
+                        session_id,
+                        &PiCommand::GetSessionStats,
+                        RUNTIME_METADATA_TIMEOUT,
+                    )
+                {
+                    usage = pi_bridge::usage(&response).ok();
+                }
+                if !cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                if include_thinking
+                    && let Ok(response) = runtimes.request_with_timeout(
+                        session_id,
+                        &PiCommand::GetAvailableThinkingLevels,
+                        RUNTIME_METADATA_TIMEOUT,
+                    )
+                {
+                    thinking_levels = pi_bridge::thinking_levels(&response).ok();
+                }
+                if !cancelled.load(Ordering::Acquire) {
+                    return;
+                }
+                let _ = sender.send(ServerEvent::SessionMetadata {
+                    session_id: session_id.to_string(),
+                    commands,
+                    usage,
+                    thinking_levels,
+                });
+            });
     }
 
     /// Resolves finished attachment uploads into Pi images and consumes them.
     /// An empty reference list needs no capability and changes nothing.
+    fn prepare_prompt(
+        &mut self,
+        session_id: &str,
+        content: String,
+        attachments: &[String],
+    ) -> Result<(String, Vec<PiImage>), DispatchError> {
+        let (images, paths) = self.take_attachment_images(session_id, attachments)?;
+        if paths.is_empty() {
+            return Ok((content, images));
+        }
+        let mut message = content;
+        message.push_str("\n\nAttached image paths (host-local):\n");
+        for path in paths {
+            message.push_str(&path.display().to_string());
+            message.push('\n');
+        }
+        Ok((message, images))
+    }
+
     fn take_attachment_images(
         &mut self,
         session_id: &str,
         attachments: &[String],
-    ) -> Result<Vec<PiImage>, DispatchError> {
+    ) -> Result<(Vec<PiImage>, Vec<PathBuf>), DispatchError> {
         if attachments.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         self.require_capability(CAPABILITY_ATTACHMENTS)?;
         let session_id = self.require_attached(session_id)?;
         let mut images = Vec::with_capacity(attachments.len());
+        let mut paths = Vec::with_capacity(attachments.len());
         let mut total_base64 = 0_usize;
         for attachment_id in attachments {
             let attachment =
@@ -834,16 +1021,23 @@ impl HostProtocolDispatcher {
                     "Attachment belongs to a different session",
                 ));
             }
-            let data = STANDARD.encode(&attachment.buffer);
+            let asset = attachment.asset.ok_or(DispatchError::InvalidAttachment(
+                "Attachment was not persisted",
+            ))?;
+            let bytes = std::fs::read(&asset.vision_path).map_err(|_| {
+                DispatchError::InvalidAttachment("Attachment vision asset is unavailable")
+            })?;
+            let data = STANDARD.encode(bytes);
             total_base64 += data.len() + attachment.mime_type.len();
             images.push(PiImage::new(attachment.mime_type, data));
+            paths.push(asset.agent_path);
         }
         if total_base64 > MAX_PROMPT_IMAGE_BASE64_BYTES {
             return Err(DispatchError::InvalidAttachment(
                 "Attachment payload is too large for one Pi prompt",
             ));
         }
-        Ok(images)
+        Ok((images, paths))
     }
 
     fn require_capability(&self, capability: &'static str) -> Result<(), DispatchError> {
@@ -1027,6 +1221,17 @@ fn unsolicited(event: ServerEvent) -> ServerEnvelope {
     }
 }
 
+fn image_chunk_event(chunk: ImageAssetChunk) -> ServerEvent {
+    ServerEvent::ImageChunk {
+        image_ref: chunk.id,
+        mime_type: chunk.mime_type,
+        offset: chunk.offset,
+        total_size: chunk.total_size,
+        eof: chunk.eof,
+        data: STANDARD.encode(chunk.data),
+    }
+}
+
 fn parse_session_id(value: &str) -> Result<SessionId, DispatchError> {
     SessionId::from_str(value).map_err(|_| DispatchError::InvalidSessionId)
 }
@@ -1069,6 +1274,8 @@ pub enum DispatchError {
     DeviceRevoked,
     #[error("attachment transfer is invalid: {0}")]
     InvalidAttachment(&'static str),
+    #[error(transparent)]
+    ImageAsset(#[from] ImageAssetError),
     #[error("connection did not declare capability {0}")]
     MissingCapability(&'static str),
     #[error(transparent)]
@@ -1101,6 +1308,11 @@ impl DispatchError {
                 false,
             ),
             Self::InvalidAttachment(message) => (ErrorCode::InvalidRequest, *message, false),
+            Self::ImageAsset(_) => (
+                ErrorCode::PiUnavailable,
+                "Image asset is temporarily unavailable",
+                true,
+            ),
             Self::MissingCapability(_) => (
                 ErrorCode::InvalidRequest,
                 "This client did not declare the capability this request requires",
