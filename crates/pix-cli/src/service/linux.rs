@@ -326,7 +326,7 @@ fn parse_systemd_exec_arg(value: &str) -> Option<PathBuf> {
             'x' => {
                 let high = characters.next()?.to_digit(16)?;
                 let low = characters.next()?.to_digit(16)?;
-                decoded.push(char::from_u32((high * 16 + low) as u32)?);
+                decoded.push(char::from_u32(high * 16 + low)?);
             }
             _ => return None,
         }

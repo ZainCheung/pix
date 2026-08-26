@@ -34,6 +34,8 @@ fn load_host_identity_with_keychain_policy(
         .context("locating host identity directory")?
         .join("host-identity.key");
     let identity_store = HostIdentityStore::new(identity_path);
+    #[cfg(not(target_os = "macos"))]
+    let _ = allow_keychain_user_interaction;
     #[cfg(target_os = "macos")]
     let identity_store = if std::env::var("PIX_DISABLE_KEYCHAIN").is_ok_and(|value| value == "1") {
         identity_store
