@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use pix_core::{ConfigStore, HostIdentityStore};
 
-pub(crate) const DEFAULT_RELAY_URL: &str = "wss://pix-relay.zaincheung-255.workers.dev";
+pub(crate) const DEFAULT_RELAY_URL: &str = "wss://pix-relay.deepoke.com";
 
 pub(crate) fn load_host_identity(
     store: &ConfigStore,

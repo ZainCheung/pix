@@ -128,7 +128,7 @@ final class HostModel {
     }
 
     /// The product relay the CLI setup offers by default.
-    static let defaultRelayURL = "wss://pix-relay.zaincheung-255.workers.dev"
+    static let defaultRelayURL = "wss://pix-relay.deepoke.com"
 
     /// Applies the guided first-run choices through the same headless CLI
     /// commands the terminal wizard commits, then adopts the running host.
