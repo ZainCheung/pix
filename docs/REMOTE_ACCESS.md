@@ -32,8 +32,8 @@ frames. It does not run Pi, receive a workspace, terminate the Pix secure
 channel, queue messages, or persist application payloads. Relay loss changes
 reachability; Pi and its local session continue on the host.
 
-The interactive setup wizard offers the default Pix Relay. To use another
-endpoint:
+The interactive setup wizard offers Pix's hosted relay at
+`wss://pix-relay.deepoke.com`. To use another endpoint:
 
 ```sh
 pix relay set wss://relay.example.com

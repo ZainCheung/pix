@@ -23,6 +23,24 @@ configure Pix with the returned WebSocket endpoint:
 pix relay set wss://worker-name.subdomain.workers.dev
 ```
 
+Pix's hosted relay is available at `wss://pix-relay.deepoke.com`. It is a
+Cloudflare Custom Domain attached to the `pix-relay` Worker; the public
+`wrangler.jsonc` intentionally stays generic so the Deploy to Cloudflare
+button remains safe for self-hosted copies. To attach your own custom domain,
+add it to the Worker configuration and deploy:
+
+```jsonc
+{
+  "routes": [
+    { "pattern": "relay.example.com", "custom_domain": true }
+  ]
+}
+```
+
+Cloudflare creates the DNS record and TLS certificate for the custom domain.
+The hostname must be in an active Cloudflare zone and must not already have a
+CNAME record.
+
 This deploys to your account; it does not modify Pix's hosted relay. See
 [`docs/REMOTE_ACCESS.md`](../docs/REMOTE_ACCESS.md) for the pairing flow and
 self-hosting notes.

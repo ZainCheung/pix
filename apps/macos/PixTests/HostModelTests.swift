@@ -349,7 +349,7 @@ func firstRunDetectionFollowsConfigState() {
 
 @Test("guided setup recommends the product relay")
 func setupRecommendsProductRelay() {
-    #expect(HostModel.defaultRelayURL == "wss://pix-relay.zaincheung-255.workers.dev")
+    #expect(HostModel.defaultRelayURL == "wss://pix-relay.deepoke.com")
     #expect(HostModel.normalizedRelayURL(HostModel.defaultRelayURL) != nil)
     #expect(HostModel.normalizedRelayURL("not a url") == nil)
 }
