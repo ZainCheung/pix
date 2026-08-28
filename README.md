@@ -22,6 +22,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/github/license/ZainCheung/pix" alt="GPL-3.0 License"></a>
 </p>
 
+<p align="center">
+  <img src="docs/diagrams/pix.png" alt="Pix overview: a phone or tablet sends text prompts, image attachments, and skills to Pix Host on your Mac or Linux computer, over a direct connection or an encrypted relay." width="920">
+</p>
+
 ## What is Pix?
 
 Pix connects your phone or another Pix client to the Pi coding agent running
