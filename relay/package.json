@@ -2,7 +2,7 @@
   "name": "pix-relay",
   "version": "0.1.0",
   "private": true,
-  "license": "MIT",
+  "license": "GPL-3.0-only",
   "description": "Content-blind encrypted-frame relay for Pix (Cloudflare Worker + Durable Objects)",
   "type": "module",
   "scripts": {

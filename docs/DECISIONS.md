@@ -31,8 +31,9 @@ parse, queue, persist, or replay application messages.
 
 ## Licensing
 
-Pix Host source is MIT licensed. Third-party code keeps its original license;
-release artifacts must ship the corresponding dependency notices.
+Pix Host source is licensed under GPL-3.0-only. Third-party code keeps its
+original license; release artifacts must ship the corresponding dependency
+notices.
 
 ### Image history and optional session metadata
 
