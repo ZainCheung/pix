@@ -113,3 +113,13 @@ validated deployment. Configure the `relay-production` Environment with the
 least-privileged `CLOUDFLARE_API_TOKEN` secret and the
 `CLOUDFLARE_ACCOUNT_ID` variable. Deployment concurrency is serialized so two
 production Worker updates cannot run at the same time.
+
+## Website deployment
+
+The public site is the `pix-website` Worker, deployed by Cloudflare Workers
+Builds from `main`. The GitHub Actions `Website checks` workflow only typechecks
+and builds when `website/**` changes. Workers Builds does not inherit that
+filter: set Build watch paths on the Worker to include `website/*` and exclude
+nothing, or a docs-only push to `main` will still deploy the site. The Worker
+root directory (`website/`) is the build working directory, not the watch
+filter. See [website/README.md](../website/README.md).
