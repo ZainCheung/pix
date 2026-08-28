@@ -1,8 +1,8 @@
-import { ArrowDownToLine, Check, ChevronDown, Copy } from 'lucide-react'
+import { ArrowDownToLine, ArrowUpRight, Check, ChevronDown, Copy } from 'lucide-react'
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 
-import { Button } from '#/components/ui/button'
+import { Button, ButtonLink } from '#/components/ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '#/components/ui/tabs'
 import {
   GITHUB_RELEASES_URL,
@@ -14,10 +14,11 @@ import {
 const installCommands = {
   macos: 'brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git\nbrew install --cask ZainCheung/pix/pix',
   linux: 'curl -fsSL https://pix.deepoke.com/install.sh | sh',
-  ios: null,
 } as const
 
-type InstallPlatform = keyof typeof installCommands
+const IOS_APP_URL = 'https://deepoke.com/pix'
+
+type InstallPlatform = 'macos' | 'linux' | 'ios'
 
 function assetOrFallback(release: PixRelease | null, pattern: RegExp) {
   return findReleaseAsset(release, pattern)?.url ?? GITHUB_RELEASES_URL
@@ -45,8 +46,8 @@ export function Download({ release }: { release: PixRelease | null }) {
   const latestRelease = query.data
 
   async function copyInstallCommand() {
+    if (installPlatform === 'ios') return
     const command = installCommands[installPlatform]
-    if (!command) return
 
     try {
       await navigator.clipboard.writeText(command)
@@ -142,9 +143,15 @@ export function Download({ release }: { release: PixRelease | null }) {
             </div>
           </TabsContent>
           <TabsContent className="install-tab-content-v2" value="ios">
-            <div className="install-coming-soon-v2">
-              <strong>iOS</strong>
-              <span>Private beta coming soon</span>
+            <div className="install-app-link-v2">
+              <div>
+                <strong>Pix for iPhone</strong>
+                <span>Open the Pix app, then pair it with the host on your computer.</span>
+              </div>
+              <ButtonLink href={IOS_APP_URL} variant="primary">
+                Open Pix
+                <ArrowUpRight size={16} />
+              </ButtonLink>
             </div>
           </TabsContent>
         </Tabs>

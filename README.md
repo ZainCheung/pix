@@ -19,7 +19,11 @@
 <p align="center">
   <a href="https://github.com/ZainCheung/pix/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ZainCheung/pix/ci.yml?branch=main&label=CI" alt="CI status"></a>
   <a href="https://github.com/ZainCheung/pix/releases"><img src="https://img.shields.io/github/v/release/ZainCheung/pix?display_name=tag" alt="Latest release"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/ZainCheung/pix" alt="MIT License"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ZainCheung/pix" alt="GPL-3.0 License"></a>
+</p>
+
+<p align="center">
+  <img src="docs/diagrams/pix.png" alt="Pix overview: a phone or tablet sends text prompts, image attachments, and skills to Pix Host on your Mac or Linux computer, over a direct connection or an encrypted relay." width="920">
 </p>
 
 ## What is Pix?
@@ -211,6 +215,6 @@ wire protocol, relay, and macOS menu-bar client.
 
 ## License
 
-Pix Host is available under the [MIT License](LICENSE). Third-party
-dependencies retain their own licenses; see
+Pix Host is available under the [GNU General Public License v3.0](LICENSE).
+Third-party dependencies retain their own licenses; see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
