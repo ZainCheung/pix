@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 import { useState, type ReactNode } from 'react'
 
+import { THEME_BOOTSTRAP_SCRIPT } from '#/lib/theme'
 import appCss from '#/styles.css?url'
 
 export const Route = createRootRoute({
@@ -57,8 +58,9 @@ function RootDocument({ children }: { children: ReactNode }) {
   )
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP_SCRIPT }} />
         <HeadContent />
       </head>
       <body>

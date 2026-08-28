@@ -1,4 +1,5 @@
 import { BrandMark } from '#/components/ui/brand-mark'
+import { ThemeSwitch } from '#/components/theme-switch'
 
 export function Footer() {
   return (
@@ -11,6 +12,7 @@ export function Footer() {
       </div>
       <div className="footer-bottom-v2">
         <span>© {new Date().getFullYear()} Pix contributors</span>
+        <ThemeSwitch />
       </div>
     </footer>
   )
