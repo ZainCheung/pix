@@ -411,6 +411,59 @@ impl RuntimeManager {
         session_id: SessionId,
         timeout: Duration,
     ) -> Result<SessionSnapshot, RuntimeManagerError> {
+        self.snapshot_with_timeout_and_cursor(session_id, timeout)
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// Reads an authoritative snapshot and, for a TUI owner, returns the
+    /// bridge sequence covered by that snapshot. The caller must establish its
+    /// event subscription before invoking this method, then discard queued TUI
+    /// events through the returned cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the runtime is inactive, the TUI
+    /// bridge cannot answer, or Pi returns incompatible snapshot data.
+    pub fn snapshot_with_timeout_and_cursor(
+        &self,
+        session_id: SessionId,
+        timeout: Duration,
+    ) -> Result<(SessionSnapshot, Option<u64>), RuntimeManagerError> {
+        if let Some(owner) = self.tui_bridge.owner(session_id) {
+            if owner.state != TuiBridgeConnectionState::Attached {
+                return Err(self.tui_owner_error(session_id));
+            }
+            let bridge_snapshot = self.tui_bridge.request_snapshot(session_id, timeout)?;
+            let snapshot_session_id = bridge_snapshot
+                .session_id
+                .parse::<SessionId>()
+                .map_err(|_| TuiBridgeError::InvalidSnapshotSessionId)?;
+            if snapshot_session_id != session_id {
+                return Err(TuiBridgeError::InvalidSnapshotResponse(session_id).into());
+            }
+            let snapshot = SessionSnapshot {
+                session_id: bridge_snapshot.session_id,
+                session_name: bridge_snapshot.session_name,
+                model: bridge_snapshot.model,
+                thinking_level: bridge_snapshot.thinking_level,
+                is_streaming: bridge_snapshot.is_streaming,
+                is_compacting: bridge_snapshot.is_compacting,
+                pending_message_count: bridge_snapshot.pending_message_count,
+                messages: bridge_snapshot.messages,
+                active_tools: bridge_snapshot.active_tools,
+                inflight_assistant: bridge_snapshot.inflight_assistant,
+                through_sequence: Some(bridge_snapshot.through_sequence),
+            };
+            let state = if snapshot.is_compacting {
+                SessionState::Compacting
+            } else if snapshot.is_streaming {
+                SessionState::Running
+            } else {
+                SessionState::Idle
+            };
+            self.tui_bridge.mark_state(session_id, state)?;
+            return Ok((snapshot, Some(bridge_snapshot.through_sequence)));
+        }
         let (runtime, operation) = self.runtime_and_operation(session_id)?;
         let _operation = try_lock_operation(&operation, session_id)?;
         let snapshot =
@@ -430,7 +483,7 @@ impl RuntimeManager {
         if completed {
             self.release_turn(session_id);
         }
-        Ok(snapshot)
+        Ok((snapshot, None))
     }
 
     /// Detaches one client without stopping an in-progress Pi task.

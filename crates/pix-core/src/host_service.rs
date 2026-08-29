@@ -28,8 +28,8 @@ use crate::secure_connection::{
 };
 use crate::session_lock::SessionId;
 use crate::tui_bridge::{
-    TuiBridgeError, TuiBridgeRegisterResponse, TuiBridgeToken, TuiBridgeUnixSocket,
-    decode_event_frame, encode_register_response,
+    TUI_BRIDGE_OUTBOUND_QUEUE, TuiBridgeError, TuiBridgeRegisterResponse, TuiBridgeToken,
+    TuiBridgeUnixSocket, decode_inbound_frame, encode_register_response,
 };
 use pix_wire::{NoiseHandshake, NoisePattern, WireError};
 
@@ -647,7 +647,39 @@ fn handle_tui_bridge_connection(
         let _ = registry.disconnect(&registration.token);
         return;
     }
+    let Ok(writer_stream) = stream.try_clone() else {
+        let _ = registry.disconnect(&registration.token);
+        return;
+    };
+    let (outbound, outbound_receiver) = mpsc::sync_channel(TUI_BRIDGE_OUTBOUND_QUEUE);
+    let Ok(broker) = registry.bind_transport(&registration.token, outbound) else {
+        let _ = registry.disconnect(&registration.token);
+        return;
+    };
+    let writer_broker = Arc::clone(&broker);
+    let writer_registry = Arc::clone(&registry);
+    let writer_token = registration.token.clone();
+    let writer_stop = Arc::clone(stop);
+    if thread::Builder::new()
+        .name("pix-tui-bridge-writer".to_owned())
+        .spawn(move || {
+            tui_bridge_writer_loop(
+                writer_stream,
+                outbound_receiver,
+                writer_broker,
+                writer_registry,
+                writer_token,
+                writer_stop,
+            );
+        })
+        .is_err()
+    {
+        broker.close();
+        let _ = registry.disconnect(&registration.token);
+        return;
+    }
     tui_bridge_connection_loop(stream, &registration.token, &registry, stop);
+    broker.close();
 }
 
 #[cfg(unix)]
@@ -683,13 +715,52 @@ fn tui_bridge_connection_loop(
             let _ = registry.disconnect(token);
             break;
         };
-        let Ok(event) = decode_event_frame(&frame) else {
+        let Ok(inbound) = decode_inbound_frame(&frame) else {
             let _ = registry.disconnect(token);
             break;
         };
-        if registry.publish_event(token, &event).is_err() {
-            let _ = registry.disconnect(token);
-            break;
+        match inbound {
+            crate::tui_bridge::TuiBridgeInboundFrame::Event(event) => {
+                if registry.publish_event(token, &event).is_err() {
+                    let _ = registry.disconnect(token);
+                    break;
+                }
+            }
+            crate::tui_bridge::TuiBridgeInboundFrame::SnapshotResponse(response) => {
+                if registry.resolve_snapshot_response(token, response).is_err() {
+                    let _ = registry.disconnect(token);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "These values are moved into the detached bridge writer thread."
+)]
+fn tui_bridge_writer_loop(
+    mut stream: std::os::unix::net::UnixStream,
+    receiver: mpsc::Receiver<Vec<u8>>,
+    broker: Arc<crate::tui_bridge::TuiBridgeBroker>,
+    registry: Arc<crate::tui_bridge::TuiBridgeRegistry>,
+    token: TuiBridgeToken,
+    stop: Arc<AtomicBool>,
+) {
+    let _ = stream.set_write_timeout(Some(TUI_CONNECTION_POLL_INTERVAL));
+    while !stop.load(Ordering::Acquire) && !broker.is_closed() {
+        match receiver.recv_timeout(TUI_CONNECTION_POLL_INTERVAL) {
+            Ok(frame) => {
+                if stream.write_all(&frame).is_err() || stream.flush().is_err() {
+                    broker.close();
+                    let _ = registry.disconnect(&token);
+                    break;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }

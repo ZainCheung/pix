@@ -244,6 +244,7 @@ fn rpc_first_claim_rejects_tui_register_on_the_same_session() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn host_service_accepts_register_and_marks_socket_disconnect_unreachable() {
     let (_fake_directory, workspace, _locks, manager, _harness, _peer, session_id) =
         manager_setup();
@@ -320,6 +321,55 @@ fn host_service_accepts_register_and_marks_socket_disconnect_unreachable() {
             .expect("receive TUI event"),
         pix_core::pi_rpc::PiEvent::Event { event_type, .. } if event_type == "agent_start"
     ));
+    let snapshot_manager = Arc::clone(&manager);
+    let snapshot_thread = std::thread::spawn(move || {
+        snapshot_manager.snapshot_with_timeout_and_cursor(session_id, Duration::from_secs(2))
+    });
+    let mut request = String::new();
+    BufReader::new(stream.try_clone().expect("clone request stream"))
+        .read_line(&mut request)
+        .expect("read snapshot request");
+    let request = serde_json::from_str::<serde_json::Value>(&request).expect("request JSON");
+    assert_eq!(request["type"], "request");
+    assert_eq!(request["command"], "snapshot");
+    assert_eq!(request["sessionId"], session_id.to_string());
+    let snapshot_response = serde_json::json!({
+        "version": 1,
+        "type": "response",
+        "requestId": request["requestId"],
+        "sessionId": session_id.to_string(),
+        "command": "snapshot",
+        "success": true,
+        "snapshot": {
+            "sessionId": session_id.to_string(),
+            "sessionName": "TUI snapshot",
+            "model": null,
+            "thinkingLevel": "high",
+            "isStreaming": true,
+            "isCompacting": false,
+            "pendingMessageCount": 0,
+            "messages": [{"role": "user", "content": "hi"}],
+            "inflightAssistant": null,
+            "activeTools": [],
+            "throughSequence": 1
+        }
+    });
+    stream
+        .write_all(snapshot_response.to_string().as_bytes())
+        .expect("write snapshot response");
+    stream.write_all(b"\n").expect("write snapshot newline");
+    stream.flush().expect("flush snapshot response");
+    let (snapshot, through_sequence) = snapshot_thread
+        .join()
+        .expect("snapshot thread")
+        .expect("snapshot response");
+    assert_eq!(through_sequence, Some(1));
+    assert_eq!(snapshot.session_name.as_deref(), Some("TUI snapshot"));
+    assert_eq!(snapshot.messages.len(), 1);
+    assert_eq!(
+        manager.session_state(session_id),
+        Some(pix_wire::SessionState::Running)
+    );
     drop(stream);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);

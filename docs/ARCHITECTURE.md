@@ -77,8 +77,9 @@ the same session lock as Pix RPC, survive a Host disconnect, and appear to the
 runtime manager as an unavailable placeholder until the TUI reconnects. After
 REGISTER, bounded sequenced event frames are mapped through the existing Pi
 compatibility adapter and can be forwarded to attached Pix clients. The bridge
-is not part of `pix-wire`; snapshot parity and host-to-TUI commands remain
-separate follow-up work.
+transport itself is not part of `pix-wire`; its snapshot cursor and partial
+assistant fields are additive wire data. Host-to-TUI commands remain separate
+follow-up work.
 
 ## Apple boundary
 

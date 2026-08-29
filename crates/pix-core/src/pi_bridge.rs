@@ -44,10 +44,25 @@ pub fn session_snapshot(
         model,
         thinking_level: parse_thinking_level(&snapshot.thinking_level)?,
         messages: snapshot.messages,
+        inflight_assistant: snapshot.inflight_assistant,
+        through_sequence: snapshot.through_sequence,
         pending_prompts,
-        // Pi's authoritative state does not expose in-progress tool payloads.
-        // Live tool events repopulate this disposable client state.
-        active_tools: Vec::new(),
+        active_tools: snapshot
+            .active_tools
+            .iter()
+            .map(|tool| {
+                let payload_field = if tool.get("partialResult").is_some() {
+                    "partialResult"
+                } else {
+                    "args"
+                };
+                tool_event(
+                    tool,
+                    payload_field,
+                    tool.get("isError").and_then(Value::as_bool),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?,
         // Capability-gated enrichment filled in by the host dispatcher after
         // this conversion: commands, queue text, and usage.
         commands: Vec::new(),
@@ -169,6 +184,7 @@ pub fn event(session_id: SessionId, event: PiEvent) -> Result<Option<ServerEvent
     let PiEvent::Event {
         event_type,
         payload,
+        ..
     } = event
     else {
         return Ok(Some(match event {
@@ -433,6 +449,16 @@ mod tests {
                 is_compacting: false,
                 pending_message_count: 2,
                 messages: vec![json!({"role": "user", "content": "hello"})],
+                active_tools: vec![json!({
+                    "toolCallId": "call-1",
+                    "toolName": "read",
+                    "args": {"path": "README.md"}
+                })],
+                inflight_assistant: Some(json!({
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "partial"}]
+                })),
+                through_sequence: Some(7),
             },
         )
         .expect("convert snapshot");
@@ -445,6 +471,10 @@ mod tests {
             vec!["text".to_owned(), "image".to_owned()]
         );
         assert_eq!(snapshot.pending_prompts.len(), 2);
+        assert_eq!(snapshot.active_tools.len(), 1);
+        assert_eq!(snapshot.active_tools[0].call_id, "call-1");
+        assert!(snapshot.inflight_assistant.is_some());
+        assert_eq!(snapshot.through_sequence, Some(7));
     }
 
     #[test]
@@ -453,6 +483,7 @@ mod tests {
         let delta = event(
             id,
             PiEvent::Event {
+                sequence: None,
                 event_type: "message_update".to_owned(),
                 payload: json!({
                     "type": "message_update",
@@ -467,6 +498,7 @@ mod tests {
         let tool = event(
             id,
             PiEvent::Event {
+                sequence: None,
                 event_type: "tool_execution_end".to_owned(),
                 payload: json!({
                     "type": "tool_execution_end",
@@ -488,6 +520,7 @@ mod tests {
         let mapped = event(
             id,
             PiEvent::Event {
+                sequence: None,
                 event_type: "queue_update".to_owned(),
                 payload: json!({
                     "type": "queue_update",

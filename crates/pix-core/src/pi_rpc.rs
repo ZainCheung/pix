@@ -150,8 +150,16 @@ pub struct RpcSnapshot {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PiEvent {
-    Event { event_type: String, payload: Value },
-    ProtocolError { message: String },
+    Event {
+        /// TUI bridge events carry a stream-local cursor; native RPC events
+        /// leave it absent because the RPC protocol has no snapshot cursor.
+        sequence: Option<u64>,
+        event_type: String,
+        payload: Value,
+    },
+    ProtocolError {
+        message: String,
+    },
     Closed,
 }
 
@@ -365,6 +373,7 @@ fn dispatch_record(record: &[u8], shared: &Shared) -> Result<(), RpcError> {
     broadcast(
         shared,
         &PiEvent::Event {
+            sequence: None,
             event_type: event_type.to_owned(),
             payload: value,
         },
