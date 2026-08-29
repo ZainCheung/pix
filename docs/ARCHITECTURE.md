@@ -86,6 +86,17 @@ compact, fork, and shutdown remain intentionally unsupported for TUI owners.
 The v1 prompt path is text-only; host attachment references are rejected for a
 TUI owner until an image-content mapping is separately verified.
 
+Session replacement has an explicit lifecycle boundary. Before Pi handles a
+`/resume`, the extension sends a bounded `preclaim` containing only the target
+session file. Host validates that the file is a discovered session in the
+current authorized workspace and, when it is free, holds the normal `PiTui`
+lease for at most five seconds. The following REGISTER consumes that same-owner
+reservation; an occupied target cancels the switch, while an unreachable Host
+fails open so Pi remains usable standalone. `/new`, `/fork`, `/quit`, and
+signal-driven shutdown emit a `session_release` marker before the socket closes;
+extension reload deliberately preserves the lease so the same Pi process can
+reconnect without opening a writer gap.
+
 ## Apple boundary
 
 The public macOS client owns menu-bar/settings UI, native folder pickers,

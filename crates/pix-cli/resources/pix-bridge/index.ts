@@ -14,6 +14,7 @@ import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 const BRIDGE_PROTOCOL_VERSION = 1;
 const BRIDGE_EXTENSION_VERSION = 1;
 const CLAIM_TIMEOUT_MS = 300;
+const PRECLAIM_TIMEOUT_MS = 500;
 const MAX_OUTGOING_BYTES = 8 * 1024 * 1024;
 const MAX_INCOMING_BYTES = 16 * 1024 * 1024;
 const MAX_COMMAND_TEXT_BYTES = 512 * 1024;
@@ -41,6 +42,8 @@ let compacting = false;
 let inflightAssistant;
 let activeTools = new Map();
 let commandInFlight = false;
+let pendingPreclaims = new Map();
+let reservedBridgeInstanceId;
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -52,10 +55,12 @@ function bridgeSocketPath() {
 
 function registerPayload(ctx, event) {
 	const sessionFile = ctx.sessionManager.getSessionFile();
+	const bridgeInstanceId = reservedBridgeInstanceId ?? randomUUID();
+	reservedBridgeInstanceId = undefined;
 	const payload = {
 		version: BRIDGE_PROTOCOL_VERSION,
 		type: "register",
-		bridgeInstanceId: randomUUID(),
+		bridgeInstanceId,
 		extensionVersion: BRIDGE_EXTENSION_VERSION,
 		sessionId: ctx.sessionManager.getSessionId(),
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
@@ -66,8 +71,17 @@ function registerPayload(ctx, event) {
 	return payload;
 }
 
+function clearPendingPreclaims() {
+	for (const pending of pendingPreclaims.values()) {
+		clearTimeout(pending.timer);
+		pending.resolve({ allowed: false, error: "bridge_unreachable" });
+	}
+	pendingPreclaims.clear();
+}
+
 function closeSocket(reason) {
 	const socket = activeSocket;
+	const preserveReservedBridge = reason === "resume" && reservedBridgeInstanceId;
 	if (socket && active && reason && reason !== "reload" && !desynced) {
 		const releaseFrame = `${JSON.stringify({
 			version: BRIDGE_PROTOCOL_VERSION,
@@ -104,6 +118,8 @@ function closeSocket(reason) {
 	inflightAssistant = undefined;
 	activeTools = new Map();
 	commandInFlight = false;
+	clearPendingPreclaims();
+	if (!preserveReservedBridge) reservedBridgeInstanceId = undefined;
 	if (socket) socket.end();
 }
 
@@ -294,6 +310,33 @@ function sendCommandResponse(request, success, result, error) {
 	enqueueOutgoing(frame);
 }
 
+function requestPreclaim(targetSessionFile) {
+	if (!activeSocket || !active) {
+		return Promise.resolve({ allowed: false, error: "bridge_unreachable" });
+	}
+	const requestId = randomUUID();
+	const bridgeInstanceId = randomUUID();
+	return new Promise((resolveRequest) => {
+		const timer = setTimeout(() => {
+			pendingPreclaims.delete(requestId);
+			resolveRequest({ allowed: false, error: "bridge_timeout" });
+		}, PRECLAIM_TIMEOUT_MS);
+		pendingPreclaims.set(requestId, { resolve: resolveRequest, timer });
+		const frame = `${JSON.stringify({
+			version: BRIDGE_PROTOCOL_VERSION,
+			type: "preclaim",
+			requestId,
+			bridgeInstanceId,
+			targetSessionFile,
+		})}\n`;
+		if (!enqueueOutgoing(frame)) {
+			clearTimeout(timer);
+			pendingPreclaims.delete(requestId);
+			resolveRequest({ allowed: false, error: "bridge_unreachable" });
+		}
+	});
+}
+
 async function handleCommand(request, ctx, pi) {
 	if (!SAFE_COMMANDS.has(request.command)) throw new Error("unsupported_command");
 	switch (request.command) {
@@ -415,6 +458,18 @@ function claim(pi, ctx, event) {
 					finish({ kind: "standalone" });
 					return;
 				}
+				if (response.type === "preclaim_result") {
+					const pending = pendingPreclaims.get(response.requestId);
+					if (!pending) continue;
+					clearTimeout(pending.timer);
+					pendingPreclaims.delete(response.requestId);
+					pending.resolve({
+						allowed: response.allowed === true,
+						bridgeInstanceId: response.bridgeInstanceId,
+						error: response.error,
+					});
+					continue;
+				}
 				if (response.type === "request") {
 					handleRequest(response, ctx, pi);
 					continue;
@@ -451,6 +506,11 @@ function claim(pi, ctx, event) {
 							inflightAssistant = undefined;
 							activeTools = new Map();
 							commandInFlight = false;
+							clearPendingPreclaims();
+							// A transport loss cannot safely carry a destination lease into a
+							// later, unrelated REGISTER attempt. The Host-side reservation is
+							// independently bounded and will expire if it is still present.
+							reservedBridgeInstanceId = undefined;
 						}
 					});
 					finish({ kind: "attached", response });
@@ -483,6 +543,27 @@ export default function pixTuiBridge(pi) {
 			return;
 		}
 		ctx.ui.setStatus("pix-bridge", "standalone");
+	});
+
+	pi.on("session_before_switch", async (event, ctx) => {
+		if (!active || event.reason !== "resume") return { cancel: false };
+		if (!event.targetSessionFile) {
+			ctx.ui.notify("The session switch could not be verified by Pix.", "warning");
+			return { cancel: true };
+		}
+		const result = await requestPreclaim(event.targetSessionFile);
+		if (result.allowed === true && typeof result.bridgeInstanceId === "string") {
+			reservedBridgeInstanceId = result.bridgeInstanceId;
+			return { cancel: false };
+		}
+		if (result.error === "bridge_unreachable" || result.error === "bridge_timeout") {
+			return { cancel: false };
+		}
+		ctx.ui.notify(
+			"This session is owned by Pix or another Pi TUI; the session switch was cancelled.",
+			"warning",
+		);
+		return { cancel: true };
 	});
 
 	pi.on("agent_start", () => {

@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -28,8 +29,9 @@ use crate::secure_connection::{
 };
 use crate::session_lock::SessionId;
 use crate::tui_bridge::{
-    TUI_BRIDGE_OUTBOUND_QUEUE, TUI_BRIDGE_RELEASE_EVENT, TuiBridgeError, TuiBridgeRegisterResponse,
-    TuiBridgeToken, TuiBridgeUnixSocket, decode_inbound_frame, encode_register_response,
+    PRECLAIM_RESULT_MESSAGE_TYPE, TUI_BRIDGE_OUTBOUND_QUEUE, TUI_BRIDGE_RELEASE_EVENT,
+    TuiBridgeError, TuiBridgePreclaimResponseFrame, TuiBridgeRegisterResponse, TuiBridgeToken,
+    TuiBridgeUnixSocket, decode_inbound_frame, encode_register_response,
 };
 use pix_wire::{NoiseHandshake, NoisePattern, WireError};
 
@@ -678,7 +680,7 @@ fn handle_tui_bridge_connection(
         let _ = registry.disconnect(&registration.token);
         return;
     }
-    tui_bridge_connection_loop(stream, &registration.token, &registry, stop);
+    tui_bridge_connection_loop(stream, &registration.token, &registry, &broker, stop);
     broker.close();
 }
 
@@ -700,6 +702,7 @@ fn tui_bridge_connection_loop(
     mut stream: std::os::unix::net::UnixStream,
     token: &TuiBridgeToken,
     registry: &Arc<crate::tui_bridge::TuiBridgeRegistry>,
+    broker: &Arc<crate::tui_bridge::TuiBridgeBroker>,
     stop: &Arc<AtomicBool>,
 ) {
     if stream
@@ -734,6 +737,33 @@ fn tui_bridge_connection_loop(
             }
             crate::tui_bridge::TuiBridgeInboundFrame::Response(response) => {
                 if registry.resolve_response(token, *response).is_err() {
+                    let _ = registry.disconnect(token);
+                    break;
+                }
+            }
+            crate::tui_bridge::TuiBridgeInboundFrame::Preclaim(request) => {
+                let Ok(decision) = registry.preclaim(
+                    token,
+                    Path::new(&request.target_session_file),
+                    request.bridge_instance_id,
+                ) else {
+                    let _ = registry.disconnect(token);
+                    break;
+                };
+                let response = TuiBridgePreclaimResponseFrame {
+                    version: crate::tui_bridge::TUI_BRIDGE_PROTOCOL_VERSION,
+                    message_type: PRECLAIM_RESULT_MESSAGE_TYPE.to_owned(),
+                    request_id: request.request_id,
+                    allowed: decision.allowed,
+                    bridge_instance_id: decision.bridge_instance_id,
+                    error: decision.error.map(str::to_owned),
+                };
+                let Ok(mut frame) = serde_json::to_vec(&response) else {
+                    let _ = registry.disconnect(token);
+                    break;
+                };
+                frame.push(b'\n');
+                if broker.enqueue(frame).is_err() {
                     let _ = registry.disconnect(token);
                     break;
                 }

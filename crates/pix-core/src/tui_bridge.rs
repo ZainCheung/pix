@@ -11,7 +11,7 @@ use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -37,6 +37,9 @@ const SNAPSHOT_COMMAND: &str = "snapshot";
 pub(crate) const TUI_BRIDGE_OUTBOUND_QUEUE: usize = 32;
 const TUI_BRIDGE_MAX_PENDING_REQUESTS: usize = 64;
 pub(crate) const TUI_BRIDGE_RELEASE_EVENT: &str = "session_release";
+const PRECLAIM_MESSAGE_TYPE: &str = "preclaim";
+pub(crate) const PRECLAIM_RESULT_MESSAGE_TYPE: &str = "preclaim_result";
+const TUI_BRIDGE_PRECLAIM_TTL: Duration = Duration::from_secs(5);
 
 /// REGISTER payload sent by the optional Pi extension.
 ///
@@ -275,16 +278,60 @@ pub struct TuiBridgeResponseFrame {
     pub error: Option<String>,
 }
 
+/// Extension-to-host request used to reserve a destination session before a
+/// Pi TUI `/resume` switch releases the current owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TuiBridgePreclaimFrame {
+    pub version: u32,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub request_id: Uuid,
+    pub bridge_instance_id: Uuid,
+    pub target_session_file: String,
+}
+
+/// Host response to a preclaim request. This remains on the local bridge
+/// socket and is never forwarded through `pix-wire`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TuiBridgePreclaimResponseFrame {
+    pub version: u32,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub request_id: Uuid,
+    pub allowed: bool,
+    #[serde(default)]
+    pub bridge_instance_id: Option<Uuid>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+pub(crate) struct TuiBridgePreclaimDecision {
+    pub allowed: bool,
+    pub bridge_instance_id: Option<Uuid>,
+    pub error: Option<&'static str>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum TuiBridgeInboundFrame {
     Event(TuiBridgeEventFrame),
     Response(Box<TuiBridgeResponseFrame>),
+    Preclaim(TuiBridgePreclaimFrame),
 }
 
 struct PendingTuiBridgeRequest {
     command: String,
     sender: mpsc::SyncSender<TuiBridgeResponseFrame>,
+}
+
+struct TuiPreclaim {
+    lease: SessionLease,
+    workspace: PathBuf,
+    owner: ProcessIdentity,
+    bridge_instance_id: Uuid,
+    created_at: Instant,
 }
 
 pub(crate) struct TuiBridgeBroker {
@@ -297,6 +344,10 @@ pub(crate) struct TuiBridgeBroker {
 impl TuiBridgeBroker {
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn enqueue(&self, frame: Vec<u8>) -> Result<(), mpsc::TrySendError<Vec<u8>>> {
+        self.outbound.try_send(frame)
     }
 
     pub(crate) fn close(&self) {
@@ -407,6 +458,23 @@ pub struct TuiBridgeRegistry {
     authorized_workspaces: RwLock<HashSet<PathBuf>>,
     expected_peer_uid: RwLock<Option<u32>>,
     owners: Mutex<HashMap<SessionId, TuiOwner>>,
+    preclaims: Mutex<HashMap<SessionId, TuiPreclaim>>,
+}
+
+impl Drop for TuiBridgeRegistry {
+    fn drop(&mut self) {
+        let preclaims = self
+            .preclaims
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, mut preclaim) in std::mem::take(preclaims) {
+            let (generation, claim_nonce) = {
+                let record = preclaim.lease.record();
+                (record.generation, record.claim_nonce)
+            };
+            let _ = preclaim.lease.release_external(generation, claim_nonce);
+        }
+    }
 }
 
 impl TuiBridgeRegistry {
@@ -417,6 +485,7 @@ impl TuiBridgeRegistry {
             authorized_workspaces: RwLock::new(HashSet::new()),
             expected_peer_uid: RwLock::new(None),
             owners: Mutex::new(HashMap::new()),
+            preclaims: Mutex::new(HashMap::new()),
         }
     }
 
@@ -455,6 +524,7 @@ impl TuiBridgeRegistry {
         request: &TuiBridgeRegister,
         peer: &TuiBridgePeer,
     ) -> Result<TuiBridgeRegistration, TuiBridgeError> {
+        self.expire_preclaims();
         validate_register(request)?;
         self.validate_peer(peer)?;
         let session_id = request
@@ -485,6 +555,19 @@ impl TuiBridgeRegistry {
         {
             return Err(TuiBridgeError::OwnerConflict(session_id));
         }
+        let reserved = {
+            let mut preclaims = self
+                .preclaims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match preclaims.get(&session_id) {
+                Some(preclaim) if preclaim.owner == peer.process && preclaim.workspace == cwd => {
+                    preclaims.remove(&session_id)
+                }
+                Some(_) => return Err(TuiBridgeError::OwnerConflict(session_id)),
+                None => None,
+            }
+        };
         if let Some(mut previous) = owners.remove(&session_id) {
             if let Some(broker) = previous.broker.take() {
                 broker.close();
@@ -494,19 +577,24 @@ impl TuiBridgeRegistry {
             }
         }
 
-        let lease = SessionLease::acquire_for_tui(
-            &self.lock_directory,
-            session_id,
-            &cwd,
-            &peer.process,
-            request.bridge_instance_id,
-        )
-        .map_err(|error| match error {
-            SessionLockError::AlreadyOwned { .. } | SessionLockError::AlreadyOwnedInProcess(_) => {
-                TuiBridgeError::OwnerConflict(session_id)
-            }
-            other => TuiBridgeError::SessionLock(other),
-        })?;
+        let lease = if let Some(reserved) = reserved {
+            reserved.lease
+        } else {
+            SessionLease::acquire_for_tui(
+                &self.lock_directory,
+                session_id,
+                &cwd,
+                &peer.process,
+                request.bridge_instance_id,
+            )
+            .map_err(|error| match error {
+                SessionLockError::AlreadyOwned { .. }
+                | SessionLockError::AlreadyOwnedInProcess(_) => {
+                    TuiBridgeError::OwnerConflict(session_id)
+                }
+                other => TuiBridgeError::SessionLock(other),
+            })?
+        };
         let token = token_from_lease(&lease);
         owners.insert(
             session_id,
@@ -526,6 +614,159 @@ impl TuiBridgeRegistry {
             token,
             state: TuiBridgeConnectionState::Attached,
             provisional,
+        })
+    }
+
+    fn expire_preclaims(&self) {
+        let expired = {
+            let mut preclaims = self
+                .preclaims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Instant::now();
+            let ids = preclaims
+                .iter()
+                .filter(|(_, preclaim)| {
+                    now.duration_since(preclaim.created_at) >= TUI_BRIDGE_PRECLAIM_TTL
+                })
+                .map(|(session_id, _)| *session_id)
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|session_id| preclaims.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+        for mut preclaim in expired {
+            let (generation, claim_nonce) = {
+                let record = preclaim.lease.record();
+                (record.generation, record.claim_nonce)
+            };
+            let _ = preclaim.lease.release_external(generation, claim_nonce);
+        }
+    }
+
+    /// Checks and reserves a destination session for a TUI `/resume` switch.
+    /// The reservation holds the normal external session lease for a short
+    /// bounded window, preventing an RPC runtime from winning the gap between
+    /// the pre-switch check and the new REGISTER.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn preclaim(
+        &self,
+        token: &TuiBridgeToken,
+        target_session_file: &Path,
+        bridge_instance_id: Uuid,
+    ) -> Result<TuiBridgePreclaimDecision, TuiBridgeError> {
+        self.expire_preclaims();
+        if bridge_instance_id.is_nil() {
+            return Err(TuiBridgeError::InvalidPreclaimId);
+        }
+        let (workspace, owner_identity) = {
+            let owners = self
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owner = owners
+                .get(&token.session_id)
+                .ok_or(TuiBridgeError::OwnershipTokenMismatch(token.session_id))?;
+            ensure_token(owner, token)?;
+            if owner.state != TuiBridgeConnectionState::Attached {
+                return Err(TuiBridgeError::BridgeUnreachable(token.session_id));
+            }
+            (owner.workspace.clone(), token.owner.clone())
+        };
+        let Ok(target_path) = fs::canonicalize(target_session_file) else {
+            return Ok(TuiBridgePreclaimDecision {
+                allowed: false,
+                bridge_instance_id: None,
+                error: Some("session_not_found"),
+            });
+        };
+        let store = PiSessionStore::for_workspace(&workspace)?;
+        let target = store.list()?.into_iter().find(|session| {
+            fs::canonicalize(&session.path)
+                .ok()
+                .is_some_and(|path| path == target_path)
+        });
+        let Some(target) = target else {
+            return Ok(TuiBridgePreclaimDecision {
+                allowed: false,
+                bridge_instance_id: None,
+                error: Some("session_not_found"),
+            });
+        };
+        if target.summary.id == token.session_id {
+            return Ok(TuiBridgePreclaimDecision {
+                allowed: true,
+                bridge_instance_id: Some(bridge_instance_id),
+                error: None,
+            });
+        }
+
+        let owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = owners
+            .get(&token.session_id)
+            .ok_or(TuiBridgeError::OwnershipTokenMismatch(token.session_id))?;
+        ensure_token(current, token)?;
+        if owners.contains_key(&target.summary.id) {
+            return Ok(TuiBridgePreclaimDecision {
+                allowed: false,
+                bridge_instance_id: None,
+                error: Some("session_owned"),
+            });
+        }
+        let mut preclaims = self
+            .preclaims
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(existing) = preclaims.get(&target.summary.id) {
+            if existing.owner == owner_identity && existing.workspace == workspace {
+                return Ok(TuiBridgePreclaimDecision {
+                    allowed: true,
+                    bridge_instance_id: Some(existing.bridge_instance_id),
+                    error: None,
+                });
+            }
+            return Ok(TuiBridgePreclaimDecision {
+                allowed: false,
+                bridge_instance_id: None,
+                error: Some("session_owned"),
+            });
+        }
+        let lease = match SessionLease::acquire_for_tui(
+            &self.lock_directory,
+            target.summary.id,
+            &workspace,
+            &owner_identity,
+            bridge_instance_id,
+        ) {
+            Ok(lease) => lease,
+            Err(
+                SessionLockError::AlreadyOwned { .. } | SessionLockError::AlreadyOwnedInProcess(_),
+            ) => {
+                return Ok(TuiBridgePreclaimDecision {
+                    allowed: false,
+                    bridge_instance_id: None,
+                    error: Some("session_owned"),
+                });
+            }
+            Err(error) => return Err(TuiBridgeError::SessionLock(error)),
+        };
+        preclaims.insert(
+            target.summary.id,
+            TuiPreclaim {
+                lease,
+                workspace,
+                owner: owner_identity,
+                bridge_instance_id,
+                created_at: Instant::now(),
+            },
+        );
+        Ok(TuiBridgePreclaimDecision {
+            allowed: true,
+            bridge_instance_id: Some(bridge_instance_id),
+            error: None,
         })
     }
 
@@ -634,6 +875,78 @@ impl TuiBridgeRegistry {
             let _ = subscriber.send(PiEvent::Closed);
         }
         Ok(())
+    }
+
+    /// Releases TUI owners whose recorded process is no longer live (or whose
+    /// PID has been reused). A bridge disconnect alone remains conservative:
+    /// only this identity check can turn an unreachable owner into a free
+    /// session while the Host stays running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError::SessionLock`] when process inspection or
+    /// durable lease cleanup cannot be completed. In that case the owner is
+    /// left in place and remains a safety barrier for RPC claims.
+    pub fn reap_dead_tui_owners(&self) -> Result<Vec<SessionId>, TuiBridgeError> {
+        // Preclaims are intentionally lazy resources. The normal Host
+        // maintenance tick calls this method, so their five-second TTL also
+        // takes effect when no subsequent bridge message arrives.
+        self.expire_preclaims();
+        let candidates = {
+            let owners = self
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            owners
+                .iter()
+                .filter(|(_, owner)| owner.state == TuiBridgeConnectionState::Unreachable)
+                .map(|(session_id, owner)| {
+                    (
+                        *session_id,
+                        owner.lease.record().owner_pid,
+                        owner.lease.record().owner_process_start_identity.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut reaped = Vec::new();
+        for (session_id, owner_pid, owner_start_identity) in candidates {
+            let process = ProcessIdentity::inspect(owner_pid)?;
+            if process
+                .is_some_and(|identity| identity.process_start_identity == owner_start_identity)
+            {
+                continue;
+            }
+            let mut owners = self
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(owner) = owners.get_mut(&session_id) else {
+                continue;
+            };
+            let record = owner.lease.record();
+            if record.owner_pid != owner_pid
+                || record.owner_process_start_identity != owner_start_identity
+            {
+                continue;
+            }
+            let (generation, claim_nonce) = (record.generation, record.claim_nonce);
+            owner
+                .lease
+                .release_external(generation, claim_nonce)
+                .map_err(TuiBridgeError::SessionLock)?;
+            let Some(mut removed) = owners.remove(&session_id) else {
+                continue;
+            };
+            if let Some(broker) = removed.broker.take() {
+                broker.close();
+            }
+            for subscriber in removed.subscribers.drain(..) {
+                let _ = subscriber.send(PiEvent::Closed);
+            }
+            reaped.push(session_id);
+        }
+        Ok(reaped)
     }
 
     /// Attaches one remote Pix client to an online TUI owner.
@@ -1090,6 +1403,28 @@ impl TuiBridgeRegistry {
     /// user's Pi process. The owner remains conservative until it disconnects
     /// or the process is proven dead by recovery.
     pub fn mark_unavailable_if_workspace_not_authorized(&self, authorized: &HashSet<PathBuf>) {
+        self.expire_preclaims();
+        let revoked_preclaims = {
+            let mut preclaims = self
+                .preclaims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ids = preclaims
+                .iter()
+                .filter(|(_, preclaim)| !authorized.contains(&preclaim.workspace))
+                .map(|(session_id, _)| *session_id)
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|session_id| preclaims.remove(&session_id))
+                .collect::<Vec<_>>()
+        };
+        for mut preclaim in revoked_preclaims {
+            let (generation, claim_nonce) = {
+                let record = preclaim.lease.record();
+                (record.generation, record.claim_nonce)
+            };
+            let _ = preclaim.lease.release_external(generation, claim_nonce);
+        }
         let mut owners = self
             .owners
             .lock()
@@ -1407,6 +1742,9 @@ pub(crate) fn decode_inbound_frame(frame: &[u8]) -> Result<TuiBridgeInboundFrame
         Some(RESPONSE_MESSAGE_TYPE) => Ok(TuiBridgeInboundFrame::Response(Box::new(
             decode_response_frame(frame)?,
         ))),
+        Some(PRECLAIM_MESSAGE_TYPE) => Ok(TuiBridgeInboundFrame::Preclaim(decode_preclaim_frame(
+            frame,
+        )?)),
         _ => Err(TuiBridgeError::InvalidInboundMessageType),
     }
 }
@@ -1467,6 +1805,26 @@ pub(crate) fn decode_response_frame(
             .map_err(|()| TuiBridgeError::InvalidCommandResponse(session_id))?;
     }
     Ok(response)
+}
+
+fn decode_preclaim_frame(frame: &[u8]) -> Result<TuiBridgePreclaimFrame, TuiBridgeError> {
+    if frame.len() > TUI_BRIDGE_MAX_FRAME_BYTES {
+        return Err(TuiBridgeError::FrameTooLarge);
+    }
+    let request = serde_json::from_slice::<TuiBridgePreclaimFrame>(frame)
+        .map_err(|_| TuiBridgeError::MalformedFrame)?;
+    if request.version != TUI_BRIDGE_PROTOCOL_VERSION {
+        return Err(TuiBridgeError::UnsupportedVersion(request.version));
+    }
+    if request.message_type != PRECLAIM_MESSAGE_TYPE {
+        return Err(TuiBridgeError::InvalidPreclaimMessageType);
+    }
+    if request.request_id.is_nil() || request.bridge_instance_id.is_nil() {
+        return Err(TuiBridgeError::InvalidPreclaimId);
+    }
+    validate_bridge_text(&request.target_session_file, 4096)
+        .map_err(|()| TuiBridgeError::InvalidPreclaimPath)?;
+    Ok(request)
 }
 
 /// Decodes and validates a snapshot response from the extension.
@@ -1780,6 +2138,12 @@ pub enum TuiBridgeError {
     InvalidRequestId,
     #[error("TUI bridge request command is invalid")]
     InvalidRequestCommand,
+    #[error("TUI bridge preclaim message type is invalid")]
+    InvalidPreclaimMessageType,
+    #[error("TUI bridge preclaim request ID is invalid")]
+    InvalidPreclaimId,
+    #[error("TUI bridge preclaim target path is invalid")]
+    InvalidPreclaimPath,
     #[error("TUI bridge inbound message type is invalid")]
     InvalidInboundMessageType,
     #[error("TUI bridge response snapshot session ID is invalid")]
@@ -1809,7 +2173,8 @@ mod tests {
         TUI_BRIDGE_MAX_FRAME_BYTES, TUI_BRIDGE_PROTOCOL_VERSION, TuiBridgeConnectionState,
         TuiBridgeError, TuiBridgeEventFrame, TuiBridgeHarness, TuiBridgePeer, TuiBridgeRegister,
         TuiBridgeRegistry, TuiBridgeRequestFrame, TuiBridgeResponseFrame, TuiBridgeSnapshot,
-        decode_event_frame, decode_register_frame, decode_snapshot_response, owner_uid,
+        decode_event_frame, decode_inbound_frame, decode_register_frame, decode_snapshot_response,
+        owner_uid,
     };
     use crate::pi_rpc::PiEvent;
     use crate::session_lock::{ProcessIdentity, SessionId};
@@ -1922,6 +2287,45 @@ mod tests {
             harness.disconnect(&first.token),
             Err(TuiBridgeError::OwnershipTokenMismatch(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dead_tui_process_is_reaped_after_socket_disconnect() {
+        use std::process::Command;
+
+        let (workspace, registry, _peer, session_id) = setup();
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn TUI stand-in");
+        let process = ProcessIdentity::inspect(child.id())
+            .expect("inspect TUI stand-in")
+            .expect("TUI stand-in is live");
+        let peer = TuiBridgePeer::new(
+            owner_uid(workspace.path()).expect("workspace owner"),
+            process,
+        );
+        let harness = TuiBridgeHarness::new(Arc::clone(&registry));
+        let frame = serde_json::to_vec(&TuiBridgeRegister::new(
+            session_id,
+            workspace.path(),
+            Uuid::new_v4(),
+        ))
+        .expect("register frame");
+        let registration = harness
+            .register_frame(&frame, &peer)
+            .expect("register stand-in TUI");
+        assert!(registry.contains(session_id));
+        harness
+            .disconnect(&registration.token)
+            .expect("disconnect stand-in socket");
+
+        child.kill().expect("kill TUI stand-in");
+        child.wait().expect("wait TUI stand-in");
+        let reaped = registry.reap_dead_tui_owners().expect("reap dead TUI");
+        assert_eq!(reaped, vec![session_id]);
+        assert!(!registry.contains(session_id));
     }
 
     #[test]
@@ -2244,6 +2648,45 @@ mod tests {
             response.result,
             Some(serde_json::json!({"status": "accepted"}))
         );
+    }
+
+    #[test]
+    fn preclaim_decoder_rejects_controlled_paths_and_accepts_bounded_requests() {
+        let request_id = Uuid::new_v4();
+        let bridge_instance_id = Uuid::new_v4();
+        let frame = serde_json::json!({
+            "version": TUI_BRIDGE_PROTOCOL_VERSION,
+            "type": "preclaim",
+            "requestId": request_id,
+            "bridgeInstanceId": bridge_instance_id,
+            "targetSessionFile": "/tmp/session.jsonl"
+        });
+        let decoded = decode_inbound_frame(
+            serde_json::to_string(&frame)
+                .expect("preclaim JSON")
+                .as_bytes(),
+        )
+        .expect("decode preclaim");
+        assert!(matches!(
+            decoded,
+            super::TuiBridgeInboundFrame::Preclaim(request)
+                if request.request_id == request_id
+        ));
+        let invalid = serde_json::json!({
+            "version": TUI_BRIDGE_PROTOCOL_VERSION,
+            "type": "preclaim",
+            "requestId": request_id,
+            "bridgeInstanceId": bridge_instance_id,
+            "targetSessionFile": "/tmp/session\n.jsonl"
+        });
+        assert!(matches!(
+            decode_inbound_frame(
+                serde_json::to_string(&invalid)
+                    .expect("invalid preclaim JSON")
+                    .as_bytes()
+            ),
+            Err(TuiBridgeError::InvalidPreclaimPath)
+        ));
     }
 
     #[cfg(unix)]

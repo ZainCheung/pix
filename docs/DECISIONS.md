@@ -38,6 +38,15 @@ Host restart cannot silently fall back to a second RPC writer. Kernel-derived
 peer credentials and PID start identity are required before a TUI REGISTER is
 accepted.
 
+`/resume` uses a short host-local preclaim: the active extension asks Host to
+validate and reserve the discovered destination session before Pi tears down
+the current runtime. The reservation is represented by the same `PiTui`
+`SessionLease`, is consumed by a matching same-process REGISTER, and expires
+after five seconds. A target already owned by Pix or another TUI rejects the
+switch; a missing/unreachable bridge does not make Pi unusable as a standalone
+TUI. Session replacement and quit send an explicit `session_release` marker,
+whereas extension reload retains the lease for same-process reconnect.
+
 ## Relay privacy
 
 The relay forwards only authenticated encrypted frames. It does not decrypt,

@@ -771,6 +771,11 @@ impl RuntimeManager {
             .lifecycle
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A TUI bridge does not have a child handle for this manager to reap.
+        // Check its recorded process identity on the same maintenance cadence
+        // so `kill -9` eventually releases the shared session lease without
+        // treating a mere socket failure as a clean shutdown.
+        self.tui_bridge.reap_dead_tui_owners()?;
         let exited = {
             let runtimes = self
                 .runtimes
