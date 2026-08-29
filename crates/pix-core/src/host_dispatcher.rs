@@ -1337,6 +1337,16 @@ impl DispatchError {
                 "Concurrent turn capacity has been reached",
                 true,
             ),
+            Self::Runtime(RuntimeManagerError::TuiOwned(_)) => (
+                ErrorCode::Conflict,
+                "Session is owned by a local Pi TUI; its bridge backend is not available yet",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiUnavailable(_)) => (
+                ErrorCode::PiUnavailable,
+                "The local Pi TUI bridge is temporarily unreachable",
+                true,
+            ),
             Self::Runtime(
                 RuntimeManagerError::NotActive(_)
                 | RuntimeManagerError::NoAttachedClient(_)

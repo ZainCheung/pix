@@ -24,6 +24,20 @@ pinned Host release and do not copy Rust protocol code.
 Pi is the only agent runtime and its native JSONL session is the authoritative
 conversation store. Pix does not create a second message database.
 
+## Optional TUI integration boundary
+
+The TUI integration uses Pi's official Extension API and a separate host-local
+Unix-socket protocol. Pix must not shadow, wrap, patch, or replace the user's
+`pi` executable. The host-local bridge is not a `pix-wire` version and never
+becomes a second conversation store.
+
+One session has one live writer. `PixRpc` and `PiTui` claims use the same
+durable session lock; a disconnected TUI retains its owner record and is
+represented as an unavailable RuntimeManager placeholder, so a reconnect or
+Host restart cannot silently fall back to a second RPC writer. Kernel-derived
+peer credentials and PID start identity are required before a TUI REGISTER is
+accepted.
+
 ## Relay privacy
 
 The relay forwards only authenticated encrypted frames. It does not decrypt,

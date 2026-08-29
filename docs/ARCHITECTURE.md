@@ -11,8 +11,8 @@ truth; Host does not maintain a message database.
   Noise XX/IK handshakes, encryption, replay protection, and the UniFFI API
   consumed by the private iOS client.
 - `pix-core` owns workspace boundaries, pairing, Bonjour/direct TCP, relay
-  connections, Pi process lifecycle, RPC adaptation, and the one-writer
-  invariant.
+  connections, Pi process lifecycle, RPC adaptation, the one-writer invariant,
+  and the optional host-local TUI ownership harness.
 - `pix-cli` exposes `serve`, diagnostics, workspace management, pairing, and
   service operations on supported hosts.
 
@@ -69,6 +69,15 @@ frames. The relay is content-blind: it authenticates channel roles, forwards
 opaque binary frames, applies size/rate/connection limits, and stores no
 application payload.
 
+The optional Pi TUI bridge is a separate host-local NDJSON surface. Its Unix
+socket adapter obtains peer UID/PID from the operating system, rechecks the
+process start identity, and passes only those credentials into the ownership
+registry; REGISTER payloads never declare an owner PID. TUI owner records share
+the same session lock as Pix RPC, survive a Host disconnect, and appear to the
+runtime manager as an unavailable placeholder until a later event/snapshot
+adapter is installed. The bridge is not part of `pix-wire` and does not yet
+forward conversation events to remote clients.
+
 ## Apple boundary
 
 The public macOS client owns menu-bar/settings UI, native folder pickers,
@@ -82,6 +91,9 @@ session storage.
 
 - Only explicitly authorized canonical workspace roots are usable.
 - A Pi session has one writer process at a time.
+- A live `PiTui` owner blocks a Pix RPC spawn even when its bridge socket is
+  temporarily unreachable; TUI owners do not consume the Pix RPC process
+  capacity budget.
 - Relay loss changes reachability only; Pi continues locally.
 - Logs are payload-free and never contain prompts, files, model output, keys,
   tokens, or relay secrets.

@@ -11,7 +11,8 @@ use crate::host_environment::HostEnvironment;
 use crate::pi_rpc::{PiCommand, PiEvent, PiResponse, RpcError};
 use crate::runtime::{PiRuntime, PiRuntimeOptions, RuntimeError, SessionLaunch};
 use crate::session::{DiscoveredSession, SessionError, SessionSnapshot};
-use crate::session_lock::SessionId;
+use crate::session_lock::{RecoveredSessionOwner, SessionId, SessionRecoveryState};
+use crate::tui_bridge::{TuiBridgeConnectionState, TuiBridgeError, TuiBridgeRegistry};
 
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const AUTHORIZATION_REVOCATION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -22,6 +23,7 @@ pub struct ActiveRuntimeSummary {
     pub workspace: PathBuf,
     pub client_count: usize,
     pub completed: bool,
+    pub state: SessionState,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +96,7 @@ impl RuntimePhase {
 pub struct RuntimeManager {
     options: RuntimeManagerOptions,
     runtimes: Mutex<HashMap<SessionId, ManagedRuntime>>,
+    tui_bridge: Arc<TuiBridgeRegistry>,
     turns: Mutex<HashSet<SessionId>>,
     lifecycle: Mutex<()>,
 }
@@ -107,11 +110,51 @@ impl RuntimeManager {
     pub fn new(options: RuntimeManagerOptions) -> Result<Self, RuntimeManagerError> {
         options.validate()?;
         Ok(Self {
+            tui_bridge: Arc::new(TuiBridgeRegistry::new(options.lock_directory.clone())),
             options,
             runtimes: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashSet::new()),
             lifecycle: Mutex::new(()),
         })
+    }
+
+    /// Configures the optional TUI bridge authorization view.  The normal
+    /// host calls this before restoring ownership records and before accepting
+    /// protocol requests; tests may configure a smaller isolated view.
+    pub fn configure_tui_bridge(
+        &self,
+        authorized_workspaces: HashSet<PathBuf>,
+        expected_peer_uid: Option<u32>,
+    ) {
+        self.tui_bridge
+            .configure_authorization(authorized_workspaces, expected_peer_uid);
+    }
+
+    /// Returns the host-local TUI registry used by the bridge transport and
+    /// deterministic harnesses.
+    #[must_use]
+    pub fn tui_bridge(&self) -> Arc<TuiBridgeRegistry> {
+        Arc::clone(&self.tui_bridge)
+    }
+
+    /// Reinstates a live `PiTui` owner found during the startup recovery barrier.
+    /// The registry holds the external lease so a concurrent RPC `open` cannot
+    /// turn the recovered owner into Sleeping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the durable owner cannot be
+    /// revalidated or its lock cannot be held by this host.
+    pub fn restore_tui_owner(
+        &self,
+        owner: &RecoveredSessionOwner,
+        workspace: &Path,
+    ) -> Result<(), RuntimeManagerError> {
+        if owner.state != SessionRecoveryState::TuiUnreachable {
+            return Ok(());
+        }
+        self.tui_bridge.restore(&owner.record, workspace)?;
+        Ok(())
     }
 
     /// Reads Pi's persisted model preferences without starting a child
@@ -169,6 +212,7 @@ impl RuntimeManager {
                 return Ok(id);
             }
         }
+        self.reject_tui_owner(id)?;
         let directory = std::fs::canonicalize(session_directory.as_ref()).map_err(|source| {
             RuntimeManagerError::Canonicalize {
                 path: session_directory.as_ref().to_path_buf(),
@@ -204,9 +248,10 @@ impl RuntimeManager {
             .runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let managed = runtimes
-            .get_mut(&session_id)
-            .ok_or(RuntimeManagerError::NotActive(session_id))?;
+        let Some(managed) = runtimes.get_mut(&session_id) else {
+            drop(runtimes);
+            return Err(self.tui_owner_error(session_id));
+        };
         managed.client_count = managed.client_count.saturating_add(1);
         managed.last_used = Instant::now();
         Ok(())
@@ -353,9 +398,10 @@ impl RuntimeManager {
             .runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let managed = runtimes
-            .get_mut(&session_id)
-            .ok_or(RuntimeManagerError::NotActive(session_id))?;
+        let Some(managed) = runtimes.get_mut(&session_id) else {
+            drop(runtimes);
+            return Err(self.tui_owner_error(session_id));
+        };
         if managed.client_count == 0 {
             return Err(RuntimeManagerError::NoAttachedClient(session_id));
         }
@@ -393,10 +439,15 @@ impl RuntimeManager {
         &self,
         authorized: &HashSet<PathBuf>,
     ) -> Result<Vec<SessionId>, RuntimeManagerError> {
+        self.tui_bridge
+            .mark_unavailable_if_workspace_not_authorized(authorized);
         let session_ids = self
             .active_sessions()
             .into_iter()
-            .filter(|session| !authorized.contains(&session.workspace))
+            .filter(|session| {
+                !authorized.contains(&session.workspace)
+                    && !self.tui_bridge.contains(session.session_id)
+            })
             .map(|session| session.session_id)
             .collect::<Vec<_>>();
         let mut released = Vec::with_capacity(session_ids.len());
@@ -424,8 +475,10 @@ impl RuntimeManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
-            .map(|managed| Arc::clone(&managed.operation))
-            .ok_or(RuntimeManagerError::NotActive(session_id))?;
+            .map(|managed| Arc::clone(&managed.operation));
+        let Some(operation) = operation else {
+            return Err(self.tui_owner_error(session_id));
+        };
         let _operation = try_lock_operation(&operation, session_id)?;
         let managed = self
             .runtimes
@@ -538,7 +591,8 @@ impl RuntimeManager {
 
     #[must_use]
     pub fn active_sessions(&self) -> Vec<ActiveRuntimeSummary> {
-        self.runtimes
+        let mut sessions = self
+            .runtimes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
@@ -547,8 +601,22 @@ impl RuntimeManager {
                 workspace: managed.workspace.clone(),
                 client_count: managed.client_count,
                 completed: managed.completed,
+                state: managed.phase.session_state(),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        sessions.extend(
+            self.tui_bridge
+                .owners()
+                .into_iter()
+                .map(|owner| ActiveRuntimeSummary {
+                    session_id: owner.token.session_id,
+                    workspace: owner.workspace,
+                    client_count: owner.client_count,
+                    completed: matches!(owner.session_state, SessionState::Idle),
+                    state: owner.session_state,
+                }),
+        );
+        sessions
     }
 
     #[must_use]
@@ -565,6 +633,7 @@ impl RuntimeManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&session_id)
+            || self.tui_bridge.contains(session_id)
     }
 
     #[must_use]
@@ -574,6 +643,11 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| managed.completed)
+            .or_else(|| {
+                self.tui_bridge
+                    .owner(session_id)
+                    .map(|owner| matches!(owner.session_state, SessionState::Idle))
+            })
     }
 
     /// Returns the current wire-compatible state for an active runtime.
@@ -584,6 +658,11 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| managed.phase.session_state())
+            .or_else(|| {
+                self.tui_bridge
+                    .owner(session_id)
+                    .map(|owner| owner.session_state)
+            })
     }
 
     /// Refreshes an active runtime from Pi before a detached session is shown
@@ -598,6 +677,9 @@ impl RuntimeManager {
         &self,
         session_id: SessionId,
     ) -> Result<SessionState, RuntimeManagerError> {
+        if let Some(owner) = self.tui_bridge.owner(session_id) {
+            return Ok(owner.session_state);
+        }
         self.refresh_completed_with_timeout(session_id, self.probe_timeout())?;
         self.session_state(session_id)
             .ok_or(RuntimeManagerError::NotActive(session_id))
@@ -623,6 +705,12 @@ impl RuntimeManager {
                 managed.completed = matches!(managed.phase, RuntimePhase::Idle);
                 managed.last_used = Instant::now();
             }
+        }
+        if !self.is_active(session_id) {
+            return;
+        }
+        if self.tui_bridge.contains(session_id) {
+            let _ = self.tui_bridge.mark_state(session_id, state);
         }
         if matches!(
             state,
@@ -674,6 +762,11 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| managed.client_count)
+            .or_else(|| {
+                self.tui_bridge
+                    .owner(session_id)
+                    .map(|owner| owner.client_count)
+            })
     }
 
     #[must_use]
@@ -683,9 +776,15 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| managed.workspace.clone())
+            .or_else(|| {
+                self.tui_bridge
+                    .owner(session_id)
+                    .map(|owner| owner.workspace)
+            })
     }
 
     fn start(&self, workspace: &Path, launch: SessionLaunch) -> Result<(), RuntimeManagerError> {
+        self.reject_tui_owner(launch.id())?;
         self.make_capacity()?;
         let workspace = std::fs::canonicalize(workspace).map_err(|source| {
             RuntimeManagerError::Canonicalize {
@@ -758,7 +857,7 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| Arc::clone(&managed.runtime))
-            .ok_or(RuntimeManagerError::NotActive(session_id))
+            .ok_or_else(|| self.tui_owner_error(session_id))
     }
 
     fn try_admit_turn(&self, session_id: SessionId) -> Result<bool, RuntimeManagerError> {
@@ -801,7 +900,25 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&session_id)
             .map(|managed| (Arc::clone(&managed.runtime), Arc::clone(&managed.operation)))
-            .ok_or(RuntimeManagerError::NotActive(session_id))
+            .ok_or_else(|| self.tui_owner_error(session_id))
+    }
+
+    fn reject_tui_owner(&self, session_id: SessionId) -> Result<(), RuntimeManagerError> {
+        if self.tui_bridge.contains(session_id) {
+            Err(self.tui_owner_error(session_id))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn tui_owner_error(&self, session_id: SessionId) -> RuntimeManagerError {
+        match self.tui_bridge.owner(session_id).map(|owner| owner.state) {
+            Some(TuiBridgeConnectionState::Unreachable) => {
+                RuntimeManagerError::TuiUnavailable(session_id)
+            }
+            Some(TuiBridgeConnectionState::Attached) => RuntimeManagerError::TuiOwned(session_id),
+            None => RuntimeManagerError::NotActive(session_id),
+        }
     }
 
     fn refresh_completed_with_timeout(
@@ -889,6 +1006,10 @@ pub enum RuntimeManagerError {
     TurnCapacity { limit: usize },
     #[error("Pi session is not active: {0}")]
     NotActive(SessionId),
+    #[error("session is owned by a local Pi TUI: {0}")]
+    TuiOwned(SessionId),
+    #[error("local Pi TUI bridge is unreachable: {0}")]
+    TuiUnavailable(SessionId),
     #[error("Pi session has no attached client: {0}")]
     NoAttachedClient(SessionId),
     #[error("Pi session still has an operation in flight: {0}")]
@@ -903,4 +1024,6 @@ pub enum RuntimeManagerError {
     Rpc(#[from] RpcError),
     #[error(transparent)]
     Session(#[from] SessionError),
+    #[error(transparent)]
+    TuiBridge(#[from] TuiBridgeError),
 }
