@@ -2289,6 +2289,70 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn preclaim_reservation_is_consumed_by_same_process_register() {
+        let (workspace, registry, peer, current_session_id) = setup();
+        let store =
+            crate::session::PiSessionStore::for_workspace(workspace.path()).expect("session store");
+        let session_directory = store.session_directory().to_path_buf();
+        fs::create_dir_all(&session_directory).expect("session directory");
+        let target_session_id = SessionId::new();
+        let target_path = session_directory.join(format!("preclaim-{target_session_id}.jsonl"));
+        let cwd = serde_json::to_string(workspace.path().to_str().expect("workspace UTF-8"))
+            .expect("cwd JSON");
+        fs::write(
+            &target_path,
+            format!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"{target_session_id}\",\"timestamp\":\"2026-08-12T00:00:00Z\",\"cwd\":{cwd}}}\n"
+            ),
+        )
+        .expect("target session");
+        let harness = TuiBridgeHarness::new(Arc::clone(&registry));
+        let current = harness
+            .register_frame(
+                &serde_json::to_vec(&TuiBridgeRegister::new(
+                    current_session_id,
+                    workspace.path(),
+                    Uuid::new_v4(),
+                ))
+                .expect("current register frame"),
+                &peer,
+            )
+            .expect("current register");
+        let reserved_bridge_id = Uuid::new_v4();
+        let decision = registry
+            .preclaim(&current.token, &target_path, reserved_bridge_id)
+            .expect("preclaim target");
+        assert!(decision.allowed);
+        assert_eq!(decision.bridge_instance_id, Some(reserved_bridge_id));
+
+        let target_occupied = crate::session_lock::SessionLease::acquire_for_workspace(
+            &registry.lock_directory,
+            target_session_id,
+            workspace.path(),
+        );
+        assert!(matches!(
+            target_occupied,
+            Err(crate::session_lock::SessionLockError::AlreadyOwned { .. }
+                | crate::session_lock::SessionLockError::AlreadyOwnedInProcess(_))
+        ));
+
+        let mut target_request =
+            TuiBridgeRegister::new(target_session_id, workspace.path(), Uuid::new_v4());
+        target_request.session_file = Some(target_path.clone());
+        let target = harness
+            .register_frame(
+                &serde_json::to_vec(&target_request).expect("target register frame"),
+                &peer,
+            )
+            .expect("consume preclaim");
+        assert_eq!(target.token.bridge_instance_id, reserved_bridge_id);
+        harness.release(&target.token).expect("release target");
+        harness.release(&current.token).expect("release current");
+        fs::remove_file(&target_path).expect("remove target session");
+        let _ = fs::remove_dir(&session_directory);
+    }
+
     #[cfg(unix)]
     #[test]
     fn dead_tui_process_is_reaped_after_socket_disconnect() {
