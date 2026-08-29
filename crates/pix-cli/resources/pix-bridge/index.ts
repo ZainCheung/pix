@@ -66,8 +66,30 @@ function registerPayload(ctx, event) {
 	return payload;
 }
 
-function closeSocket() {
+function closeSocket(reason) {
 	const socket = activeSocket;
+	if (socket && active && reason && reason !== "reload" && !desynced) {
+		const releaseFrame = `${JSON.stringify({
+			version: BRIDGE_PROTOCOL_VERSION,
+			type: "event",
+			sessionId: activeSessionId,
+			streamEpoch: activeStreamEpoch,
+			sequence: sequence + 1,
+			eventType: "session_release",
+			payload: { reason },
+		})}\n`;
+		// Drop queued user-content frames so the release marker is not stranded
+		// behind a full backlog. Any frame already handed to the socket remains
+		// ordered before this marker by Node's stream write queue.
+		outgoing = [];
+		outgoingBytes = 0;
+		try {
+			socket.write(releaseFrame);
+			sequence += 1;
+		} catch {
+			// The Host will conservatively retain the lease until liveness recovery.
+		}
+	}
 	activeSocket = undefined;
 	activeSessionId = undefined;
 	activeStreamEpoch = undefined;
@@ -532,7 +554,7 @@ export default function pixTuiBridge(pi) {
 		});
 	});
 
-	pi.on("session_shutdown", () => {
-		closeSocket();
+	pi.on("session_shutdown", (event) => {
+		closeSocket(event.reason);
 	});
 }

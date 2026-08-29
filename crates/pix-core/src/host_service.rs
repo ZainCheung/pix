@@ -28,8 +28,8 @@ use crate::secure_connection::{
 };
 use crate::session_lock::SessionId;
 use crate::tui_bridge::{
-    TUI_BRIDGE_OUTBOUND_QUEUE, TuiBridgeError, TuiBridgeRegisterResponse, TuiBridgeToken,
-    TuiBridgeUnixSocket, decode_inbound_frame, encode_register_response,
+    TUI_BRIDGE_OUTBOUND_QUEUE, TUI_BRIDGE_RELEASE_EVENT, TuiBridgeError, TuiBridgeRegisterResponse,
+    TuiBridgeToken, TuiBridgeUnixSocket, decode_inbound_frame, encode_register_response,
 };
 use pix_wire::{NoiseHandshake, NoisePattern, WireError};
 
@@ -723,6 +723,12 @@ fn tui_bridge_connection_loop(
             crate::tui_bridge::TuiBridgeInboundFrame::Event(event) => {
                 if registry.publish_event(token, &event).is_err() {
                     let _ = registry.disconnect(token);
+                    break;
+                }
+                if event.event_type == TUI_BRIDGE_RELEASE_EVENT {
+                    if registry.release(token).is_err() {
+                        let _ = registry.disconnect(token);
+                    }
                     break;
                 }
             }

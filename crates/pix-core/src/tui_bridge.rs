@@ -36,6 +36,7 @@ const RESPONSE_MESSAGE_TYPE: &str = "response";
 const SNAPSHOT_COMMAND: &str = "snapshot";
 pub(crate) const TUI_BRIDGE_OUTBOUND_QUEUE: usize = 32;
 const TUI_BRIDGE_MAX_PENDING_REQUESTS: usize = 64;
+pub(crate) const TUI_BRIDGE_RELEASE_EVENT: &str = "session_release";
 
 /// REGISTER payload sent by the optional Pi extension.
 ///
