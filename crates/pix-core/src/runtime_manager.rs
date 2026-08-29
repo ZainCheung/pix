@@ -24,6 +24,38 @@ pub struct ActiveRuntimeSummary {
     pub client_count: usize,
     pub completed: bool,
     pub state: SessionState,
+    pub backend: RuntimeBackend,
+}
+
+impl ActiveRuntimeSummary {
+    #[must_use]
+    pub const fn state_name(&self) -> &'static str {
+        match self.state {
+            SessionState::Sleeping => "sleeping",
+            SessionState::Starting => "starting",
+            SessionState::Idle => "idle",
+            SessionState::Running => "running",
+            SessionState::Compacting => "compacting",
+            SessionState::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Identifies which local runtime owns an active session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeBackend {
+    Rpc,
+    Tui,
+}
+
+impl RuntimeBackend {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rpc => "rpc",
+            Self::Tui => "tui",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -602,6 +634,7 @@ impl RuntimeManager {
                 client_count: managed.client_count,
                 completed: managed.completed,
                 state: managed.phase.session_state(),
+                backend: RuntimeBackend::Rpc,
             })
             .collect::<Vec<_>>();
         sessions.extend(
@@ -614,6 +647,7 @@ impl RuntimeManager {
                     client_count: owner.client_count,
                     completed: matches!(owner.session_state, SessionState::Idle),
                     state: owner.session_state,
+                    backend: RuntimeBackend::Tui,
                 }),
         );
         sessions

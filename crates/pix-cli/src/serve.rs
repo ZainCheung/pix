@@ -884,6 +884,7 @@ pub(crate) fn session_list_json(service: &pix_core::HostServiceHandle) -> serde_
                 "workspace": session.workspace,
                 "clients": session.client_count,
                 "state": session.state,
+                "backend": session.backend.as_str(),
             })
         })
         .collect::<Vec<_>>();
@@ -1098,6 +1099,7 @@ pub(crate) struct SessionEvent {
     pub(crate) workspace: String,
     pub(crate) clients: usize,
     pub(crate) state: &'static str,
+    pub(crate) backend: &'static str,
 }
 
 /// Emits one service event to the log file (always) and stdout (best

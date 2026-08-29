@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use pix_core::{ConfigStore, HostEnvironment, PiProbe};
 
+use crate::commands::pi_bridge;
 use crate::output::CommandOutput;
 use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
 use crate::status::HostServiceStatus;
@@ -158,6 +159,7 @@ pub(crate) fn pi_command(
             }
             Ok(())
         }
+        PiCommand::Bridge { command } => pi_bridge::bridge_command(store, &command, output),
     }
 }
 

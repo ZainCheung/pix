@@ -53,7 +53,8 @@ pub use relay_client::{
 };
 pub use runtime::{PiRuntime, PiRuntimeOptions, SessionLaunch};
 pub use runtime_manager::{
-    ActiveRuntimeSummary, RuntimeManager, RuntimeManagerError, RuntimeManagerOptions,
+    ActiveRuntimeSummary, RuntimeBackend, RuntimeManager, RuntimeManagerError,
+    RuntimeManagerOptions,
 };
 pub use secure_connection::{AuthenticatedConnection, PendingPairingConnection};
 pub use session::{

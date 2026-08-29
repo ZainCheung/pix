@@ -58,7 +58,8 @@ pub(crate) fn emit_sessions_for(
             id: session.session_id.to_string(),
             workspace: session.workspace.display().to_string(),
             clients: session.client_count,
-            state: if session.completed { "idle" } else { "running" },
+            state: session.state_name(),
+            backend: session.backend.as_str(),
         })
         .collect();
     emit_event(
@@ -78,6 +79,12 @@ pub(crate) struct ActiveSessionSummary {
     workspace: String,
     clients: usize,
     state: String,
+    #[serde(default = "default_backend")]
+    backend: String,
+}
+
+fn default_backend() -> String {
+    "rpc".to_owned()
 }
 
 pub(crate) fn session(

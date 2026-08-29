@@ -8,9 +8,9 @@ use std::time::Duration;
 
 use pix_core::{
     ConfigStore, DirectTcpListener, DiscoveredSession, HostConfig, HostEnvironment, HostService,
-    HostState, PairingCoordinator, ProcessIdentity, RuntimeManager, RuntimeManagerError,
-    RuntimeManagerOptions, SessionId, SessionSummary, TuiBridgeHarness, TuiBridgePeer,
-    TuiBridgeRegister, WorkspaceRegistry, owner_uid,
+    HostState, PairingCoordinator, ProcessIdentity, RuntimeBackend, RuntimeManager,
+    RuntimeManagerError, RuntimeManagerOptions, SessionId, SessionSummary, TuiBridgeHarness,
+    TuiBridgePeer, TuiBridgeRegister, WorkspaceRegistry, owner_uid,
 };
 use pix_wire::generate_static_keypair;
 use tempfile::tempdir;
@@ -160,6 +160,7 @@ fn active_session_summary_exposes_tui_unreachable_without_wire_backend_identity(
         .find(|summary| summary.session_id == session_id)
         .expect("TUI summary");
     assert_eq!(summary.state, pix_wire::SessionState::Unavailable);
+    assert_eq!(summary.backend, RuntimeBackend::Tui);
     assert!(!summary.completed);
     assert_eq!(summary.client_count, 0);
     harness.release(&registration.token).expect("release");
