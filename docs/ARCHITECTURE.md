@@ -78,8 +78,13 @@ runtime manager as an unavailable placeholder until the TUI reconnects. After
 REGISTER, bounded sequenced event frames are mapped through the existing Pi
 compatibility adapter and can be forwarded to attached Pix clients. The bridge
 transport itself is not part of `pix-wire`; its snapshot cursor and partial
-assistant fields are additive wire data. Host-to-TUI commands remain separate
-follow-up work.
+assistant fields are additive wire data. Once attached, the Host can issue a
+bounded correlated command subset (`prompt`, `abort`, `model.list`, `model.set`,
+`thinking.set`, and `session.rename`) over the same local socket; the extension
+invokes Pi's official API and returns an acceptance result. Steer, follow-up,
+compact, fork, and shutdown remain intentionally unsupported for TUI owners.
+The v1 prompt path is text-only; host attachment references are rejected for a
+TUI owner until an image-content mapping is separately verified.
 
 ## Apple boundary
 

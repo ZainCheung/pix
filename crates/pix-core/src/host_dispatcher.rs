@@ -408,7 +408,7 @@ impl HostProtocolDispatcher {
             ClientRequest::SessionRename { session_id, name } => {
                 let session_id = self.require_attached(&session_id)?;
                 self.runtimes
-                    .request(session_id, &PiCommand::SetSessionName { name })?;
+                    .request_backend(session_id, &PiCommand::SetSessionName { name })?;
                 Ok(snapshot_after_ack(session_id, false))
             }
             ClientRequest::SessionRelease { session_id } => {
@@ -472,7 +472,7 @@ impl HostProtocolDispatcher {
                 let session_id = self.require_attached(&session_id)?;
                 let response = self
                     .runtimes
-                    .request(session_id, &PiCommand::GetAvailableModels)?;
+                    .request_backend(session_id, &PiCommand::GetAvailableModels)?;
                 Ok(vec![ready(ServerEvent::ModelList {
                     session_id: session_id.to_string(),
                     models: pi_bridge::available_models(&response)?,
@@ -840,7 +840,7 @@ impl HostProtocolDispatcher {
         command: &PiCommand,
     ) -> Result<Vec<PendingEvent>, DispatchError> {
         let session_id = self.require_attached(session_id)?;
-        self.runtimes.request(session_id, command)?;
+        self.runtimes.request_backend(session_id, command)?;
         Ok(vec![ready(ServerEvent::RequestAck)])
     }
 
@@ -886,7 +886,7 @@ impl HostProtocolDispatcher {
         session_id: SessionId,
     ) {
         if self.client_capabilities.contains(CAPABILITY_COMMANDS) {
-            match self.runtimes.request_with_timeout(
+            match self.runtimes.request_backend_with_timeout(
                 session_id,
                 &PiCommand::GetCommands,
                 RUNTIME_METADATA_TIMEOUT,
@@ -942,7 +942,7 @@ impl HostProtocolDispatcher {
                     return;
                 }
                 if include_commands
-                    && let Ok(response) = runtimes.request_with_timeout(
+                    && let Ok(response) = runtimes.request_backend_with_timeout(
                         session_id,
                         &PiCommand::GetCommands,
                         RUNTIME_METADATA_TIMEOUT,
@@ -994,6 +994,12 @@ impl HostProtocolDispatcher {
         content: String,
         attachments: &[String],
     ) -> Result<(String, Vec<PiImage>), DispatchError> {
+        if !attachments.is_empty() {
+            let parsed_session_id = self.require_attached(session_id)?;
+            if self.runtimes.is_tui_attached(parsed_session_id) {
+                return Err(RuntimeManagerError::TuiUnsupportedCommand(parsed_session_id).into());
+            }
+        }
         let (images, paths) = self.take_attachment_images(session_id, attachments)?;
         if paths.is_empty() {
             return Ok((content, images));
@@ -1378,7 +1384,17 @@ impl DispatchError {
             ),
             Self::Runtime(RuntimeManagerError::TuiOwned(_)) => (
                 ErrorCode::Conflict,
-                "Session is owned by a local Pi TUI; this operation is not supported yet",
+                "Session is owned by a local Pi TUI",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiUnsupportedCommand(_)) => (
+                ErrorCode::InvalidRequest,
+                "This operation is not supported for a local Pi TUI session",
+                false,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiCommandRejected(_)) => (
+                ErrorCode::Conflict,
+                "The local Pi TUI rejected this operation in its current state",
                 true,
             ),
             Self::Runtime(RuntimeManagerError::TuiUnavailable(_)) => (
@@ -1527,6 +1543,7 @@ mod tui_snapshot_tests {
                             active_tools: Vec::new(),
                             through_sequence: 1,
                         }),
+                        result: None,
                         error: None,
                     },
                 )

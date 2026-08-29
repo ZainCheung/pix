@@ -6,6 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pix_core::pi_rpc::PiCommand;
 use pix_core::{
     ConfigStore, DirectTcpListener, DiscoveredSession, HostConfig, HostEnvironment, HostService,
     HostState, PairingCoordinator, ProcessIdentity, RuntimeBackend, RuntimeManager,
@@ -369,6 +370,49 @@ fn host_service_accepts_register_and_marks_socket_disconnect_unreachable() {
     assert_eq!(
         manager.session_state(session_id),
         Some(pix_wire::SessionState::Running)
+    );
+
+    let command_manager = Arc::clone(&manager);
+    let command_thread = std::thread::spawn(move || {
+        command_manager.request_backend(
+            session_id,
+            &PiCommand::Prompt {
+                message: "hello from Pix".to_owned(),
+                streaming_behavior: None,
+                images: Vec::new(),
+            },
+        )
+    });
+    let mut command_request = String::new();
+    BufReader::new(stream.try_clone().expect("clone command stream"))
+        .read_line(&mut command_request)
+        .expect("read command request");
+    let command_request =
+        serde_json::from_str::<serde_json::Value>(&command_request).expect("command request JSON");
+    assert_eq!(command_request["type"], "request");
+    assert_eq!(command_request["command"], "prompt");
+    assert_eq!(command_request["payload"]["content"], "hello from Pix");
+    let command_response = serde_json::json!({
+        "version": 1,
+        "type": "response",
+        "requestId": command_request["requestId"],
+        "sessionId": session_id.to_string(),
+        "command": "prompt",
+        "success": true,
+        "result": {"status": "accepted"}
+    });
+    stream
+        .write_all(command_response.to_string().as_bytes())
+        .expect("write command response");
+    stream.write_all(b"\n").expect("write command newline");
+    stream.flush().expect("flush command response");
+    let command = command_thread
+        .join()
+        .expect("command thread")
+        .expect("command response");
+    assert_eq!(
+        command.data,
+        Some(serde_json::json!({"status": "accepted"}))
     );
     drop(stream);
 

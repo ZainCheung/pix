@@ -169,6 +169,14 @@ impl RuntimeManager {
         Arc::clone(&self.tui_bridge)
     }
 
+    /// Returns whether the current session owner is an attached Pi TUI.
+    #[must_use]
+    pub fn is_tui_attached(&self, session_id: SessionId) -> bool {
+        self.tui_bridge
+            .owner(session_id)
+            .is_some_and(|owner| owner.state == TuiBridgeConnectionState::Attached)
+    }
+
     /// Reinstates a live `PiTui` owner found during the startup recovery barrier.
     /// The registry holds the external lease so a concurrent RPC `open` cannot
     /// turn the recovered owner into Sleeping.
@@ -365,6 +373,97 @@ impl RuntimeManager {
             _ => {}
         }
         Ok(response)
+    }
+
+    /// Sends a command to the session's current owner. Native RPC sessions use
+    /// the existing Pi JSONL request path; attached TUI sessions use the
+    /// bounded host-local bridge command protocol instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the owner is unavailable, the
+    /// command is outside the TUI safe subset, or the backend rejects it.
+    pub fn request_backend_with_timeout(
+        &self,
+        session_id: SessionId,
+        command: &PiCommand,
+        timeout: Duration,
+    ) -> Result<PiResponse, RuntimeManagerError> {
+        if let Some(owner) = self.tui_bridge.owner(session_id) {
+            if owner.state != TuiBridgeConnectionState::Attached {
+                return Err(self.tui_owner_error(session_id));
+            }
+            return self.request_tui_command(session_id, command, timeout);
+        }
+        self.request_with_timeout(session_id, command, timeout)
+    }
+
+    /// Sends a command to the session's current owner using the configured
+    /// runtime deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the session is inactive, the TUI
+    /// bridge is unavailable, or the command is rejected.
+    pub fn request_backend(
+        &self,
+        session_id: SessionId,
+        command: &PiCommand,
+    ) -> Result<PiResponse, RuntimeManagerError> {
+        self.request_backend_with_timeout(session_id, command, self.options.request_timeout)
+    }
+
+    fn request_tui_command(
+        &self,
+        session_id: SessionId,
+        command: &PiCommand,
+        timeout: Duration,
+    ) -> Result<PiResponse, RuntimeManagerError> {
+        let (name, payload) = match command {
+            PiCommand::Prompt {
+                message, images, ..
+            } if images.is_empty() => ("prompt", Some(serde_json::json!({"content": message}))),
+            PiCommand::Prompt { .. } => {
+                return Err(RuntimeManagerError::TuiUnsupportedCommand(session_id));
+            }
+            PiCommand::Abort => ("abort", None),
+            PiCommand::GetAvailableModels => ("model.list", None),
+            PiCommand::GetCommands => ("commands.list", None),
+            PiCommand::SetModel { provider, model_id } => (
+                "model.set",
+                Some(serde_json::json!({
+                    "provider": provider,
+                    "modelId": model_id,
+                })),
+            ),
+            PiCommand::SetThinkingLevel { level } => (
+                "thinking.set",
+                Some(serde_json::json!({
+                    "level": serde_json::to_value(level).expect("thinking level serializes"),
+                })),
+            ),
+            PiCommand::SetSessionName { name } => {
+                ("session.rename", Some(serde_json::json!({"name": name})))
+            }
+            _ => return Err(RuntimeManagerError::TuiUnsupportedCommand(session_id)),
+        };
+        let response = self
+            .tui_bridge
+            .request_command(session_id, name, payload, timeout)
+            .map_err(|error| match error {
+                TuiBridgeError::CommandRejected(session_id) => {
+                    RuntimeManagerError::TuiCommandRejected(session_id)
+                }
+                TuiBridgeError::BridgeUnreachable(session_id)
+                | TuiBridgeError::CommandTimeout(session_id) => {
+                    RuntimeManagerError::TuiUnavailable(session_id)
+                }
+                other => RuntimeManagerError::TuiBridge(other),
+            })?;
+        Ok(PiResponse {
+            command: name.to_owned(),
+            data: response.result,
+        })
     }
 
     /// Subscribes to raw events from one active Pi runtime.
@@ -1117,6 +1216,10 @@ pub enum RuntimeManagerError {
     NotActive(SessionId),
     #[error("session is owned by a local Pi TUI: {0}")]
     TuiOwned(SessionId),
+    #[error("command is not supported for a local Pi TUI session: {0}")]
+    TuiUnsupportedCommand(SessionId),
+    #[error("local Pi TUI rejected the command: {0}")]
+    TuiCommandRejected(SessionId),
     #[error("local Pi TUI bridge is unreachable: {0}")]
     TuiUnavailable(SessionId),
     #[error("Pi session has no attached client: {0}")]

@@ -15,6 +15,17 @@ const BRIDGE_PROTOCOL_VERSION = 1;
 const BRIDGE_EXTENSION_VERSION = 1;
 const CLAIM_TIMEOUT_MS = 300;
 const MAX_OUTGOING_BYTES = 8 * 1024 * 1024;
+const MAX_INCOMING_BYTES = 16 * 1024 * 1024;
+const MAX_COMMAND_TEXT_BYTES = 512 * 1024;
+const SAFE_COMMANDS = new Set([
+	"prompt",
+	"abort",
+	"model.list",
+	"commands.list",
+	"model.set",
+	"thinking.set",
+	"session.rename",
+]);
 
 let activeSocket;
 let activeSessionId;
@@ -29,6 +40,7 @@ let agentRunning = false;
 let compacting = false;
 let inflightAssistant;
 let activeTools = new Map();
+let commandInFlight = false;
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -48,7 +60,7 @@ function registerPayload(ctx, event) {
 		sessionId: ctx.sessionManager.getSessionId(),
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
 		reason: event.reason,
-		capabilities: ["ownership.v1", "events.v1", "snapshot.v1"],
+		capabilities: ["ownership.v1", "events.v1", "snapshot.v1", "commands.v1"],
 		...(sessionFile ? { sessionFile } : {}),
 	};
 	return payload;
@@ -69,6 +81,7 @@ function closeSocket() {
 	compacting = false;
 	inflightAssistant = undefined;
 	activeTools = new Map();
+	commandInFlight = false;
 	if (socket) socket.end();
 }
 
@@ -131,7 +144,6 @@ function modelSnapshot(model) {
 		name: model.name,
 		api: model.api,
 		provider: model.provider,
-		baseUrl: model.baseUrl,
 		reasoning: model.reasoning,
 		input: model.input,
 		cost: model.cost,
@@ -186,7 +198,162 @@ function sendSnapshotResponse(request, ctx) {
 	enqueueOutgoing(frame);
 }
 
-function claim(ctx, event) {
+function commandText(value, field) {
+	if (typeof value !== "string" || Buffer.byteLength(value, "utf8") > MAX_COMMAND_TEXT_BYTES) {
+		throw new Error(`invalid_${field}`);
+	}
+	return value;
+}
+
+function commandPayload(request) {
+	if (!request.payload || typeof request.payload !== "object" || Array.isArray(request.payload)) {
+		throw new Error("invalid_payload");
+	}
+	return request.payload;
+}
+
+function scopedModels(ctx) {
+	return Array.isArray(ctx.scopedModels) ? ctx.scopedModels : [];
+}
+
+function modelList(ctx) {
+	const scope = scopedModels(ctx);
+	const models = scope.length > 0
+		? scope.map((scoped) => scoped.model)
+		: ctx.modelRegistry.getAvailable();
+	return {
+		models: models.map(modelSnapshot).filter((model) => model !== undefined),
+	};
+}
+
+function commandList(pi) {
+	return {
+		commands: pi.getCommands().map((command) => ({
+			name: command.name,
+			description: command.description,
+			source: command.source,
+			sourceInfo: command.sourceInfo ? { scope: command.sourceInfo.scope } : undefined,
+		})),
+	};
+}
+
+function modelInScope(ctx, provider, modelId) {
+	const scope = scopedModels(ctx);
+	return scope.length === 0 || scope.some(
+		(scoped) => scoped.model.provider === provider && scoped.model.id === modelId,
+	);
+}
+
+function sendCommandResponse(request, success, result, error) {
+	const response = {
+		version: BRIDGE_PROTOCOL_VERSION,
+		type: "response",
+		requestId: request.requestId,
+		sessionId: activeSessionId,
+		command: request.command,
+		success,
+		...(result !== undefined ? { result: cloneJson(result) ?? null } : {}),
+		...(error ? { error } : {}),
+	};
+	let frame;
+	try {
+		frame = `${JSON.stringify(response)}\n`;
+	} catch {
+		frame = `${JSON.stringify({
+			version: BRIDGE_PROTOCOL_VERSION,
+			type: "response",
+			requestId: request.requestId,
+			sessionId: activeSessionId,
+			command: request.command,
+			success: false,
+			error: "command_unavailable",
+		})}\n`;
+	}
+	enqueueOutgoing(frame);
+}
+
+async function handleCommand(request, ctx, pi) {
+	if (!SAFE_COMMANDS.has(request.command)) throw new Error("unsupported_command");
+	switch (request.command) {
+		case "prompt": {
+			if (!ctx.isIdle()) throw new Error("session_busy");
+			const payload = commandPayload(request);
+			const content = commandText(payload.content, "content");
+			if (payload.images !== undefined) throw new Error("images_not_supported");
+			// The ExtensionAPI intentionally exposes this as fire-and-forget. The
+			// subsequent user/message lifecycle events are the durable acceptance
+			// signal; this response only acknowledges dispatch to Pi.
+			pi.sendUserMessage(content);
+			return { status: "accepted" };
+		}
+		case "abort":
+			ctx.abort();
+			return { status: "accepted" };
+		case "model.list":
+			return modelList(ctx);
+		case "commands.list":
+			return commandList(pi);
+		case "model.set": {
+			const payload = commandPayload(request);
+			const provider = commandText(payload.provider, "provider");
+			const modelId = commandText(payload.modelId, "model_id");
+			if (!modelInScope(ctx, provider, modelId)) throw new Error("model_not_in_scope");
+			const model = ctx.modelRegistry.find(provider, modelId);
+			if (!model || !(await pi.setModel(model))) throw new Error("model_unavailable");
+			return { provider: model.provider, id: model.id, name: model.name };
+		}
+		case "thinking.set": {
+			const payload = commandPayload(request);
+			const level = commandText(payload.level, "thinking_level");
+			if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) {
+				throw new Error("thinking_level_invalid");
+			}
+			pi.setThinkingLevel(level);
+			return { level: pi.getThinkingLevel() };
+		}
+		case "session.rename": {
+			const payload = commandPayload(request);
+			const name = commandText(payload.name, "name");
+			pi.setSessionName(name);
+			return { name: ctx.sessionManager.getSessionName() ?? null };
+		}
+		default:
+			throw new Error("unsupported_command");
+	}
+}
+
+function handleRequest(request, ctx, pi) {
+	if (
+		request.sessionId !== activeSessionId ||
+		typeof request.requestId !== "string" ||
+		!/^[-0-9a-f]{36}$/i.test(request.requestId)
+	) {
+		activeSocket?.destroy();
+		return;
+	}
+	if (request.command === "snapshot") {
+		sendSnapshotResponse(request, ctx);
+		return;
+	}
+	if (commandInFlight) {
+		sendCommandResponse(request, false, undefined, "command_busy");
+		return;
+	}
+	commandInFlight = true;
+	void handleCommand(request, ctx, pi)
+		.then((result) => sendCommandResponse(request, true, result, undefined))
+		.catch((error) => sendCommandResponse(
+			request,
+			false,
+			undefined,
+			error instanceof Error && error.message ? error.message : "command_unavailable",
+		))
+		.finally(() => {
+			commandInFlight = false;
+		});
+}
+
+function claim(pi, ctx, event) {
 	const payload = registerPayload(ctx, event);
 
 	return new Promise((resolveClaim) => {
@@ -209,6 +376,10 @@ function claim(ctx, event) {
 		});
 		socket.on("data", (chunk) => {
 			buffer += chunk;
+			if (Buffer.byteLength(buffer, "utf8") > MAX_INCOMING_BYTES) {
+				socket.destroy();
+				return;
+			}
 			while (true) {
 				const newline = buffer.indexOf("\n");
 				if (newline < 0) return;
@@ -223,15 +394,7 @@ function claim(ctx, event) {
 					return;
 				}
 				if (response.type === "request") {
-					if (
-						response.command !== "snapshot" ||
-						response.sessionId !== activeSessionId ||
-						typeof response.requestId !== "string"
-					) {
-						socket.destroy();
-						return;
-					}
-					sendSnapshotResponse(response, ctx);
+					handleRequest(response, ctx, pi);
 					continue;
 				}
 				if (response.type !== "register_result") continue;
@@ -249,6 +412,7 @@ function claim(ctx, event) {
 					compacting = false;
 					inflightAssistant = undefined;
 					activeTools = new Map();
+					commandInFlight = false;
 					socket.on("close", () => {
 						if (activeSocket === socket) {
 							activeSocket = undefined;
@@ -264,6 +428,7 @@ function claim(ctx, event) {
 							compacting = false;
 							inflightAssistant = undefined;
 							activeTools = new Map();
+							commandInFlight = false;
 						}
 					});
 					finish({ kind: "attached", response });
@@ -282,7 +447,7 @@ export default function pixTuiBridge(pi) {
 	pi.on("session_start", async (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
-		const result = await claim(ctx, event);
+		const result = await claim(pi, ctx, event);
 		if (result.kind === "attached") {
 			ctx.ui.setStatus("pix-bridge", "attached");
 			return;

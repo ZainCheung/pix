@@ -35,6 +35,7 @@ const REQUEST_MESSAGE_TYPE: &str = "request";
 const RESPONSE_MESSAGE_TYPE: &str = "response";
 const SNAPSHOT_COMMAND: &str = "snapshot";
 pub(crate) const TUI_BRIDGE_OUTBOUND_QUEUE: usize = 32;
+const TUI_BRIDGE_MAX_PENDING_REQUESTS: usize = 64;
 
 /// REGISTER payload sent by the optional Pi extension.
 ///
@@ -72,7 +73,11 @@ impl TuiBridgeRegister {
             cwd: cwd.into(),
             session_file: None,
             reason: Some("startup".to_owned()),
-            capabilities: vec!["events.v1".to_owned(), "snapshot.v1".to_owned()],
+            capabilities: vec![
+                "events.v1".to_owned(),
+                "snapshot.v1".to_owned(),
+                "commands.v1".to_owned(),
+            ],
         }
     }
 }
@@ -189,9 +194,10 @@ impl TuiBridgeEventFrame {
     }
 }
 
-/// Host-to-extension request used to obtain the first authoritative TUI
-/// snapshot before live events are exposed to a remote client.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Host-to-extension request used for snapshot handoff and the bounded TUI
+/// command subset. The optional payload is command-specific and remains local
+/// to the bridge socket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TuiBridgeRequestFrame {
     pub version: u32,
@@ -200,18 +206,31 @@ pub struct TuiBridgeRequestFrame {
     pub request_id: Uuid,
     pub session_id: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 impl TuiBridgeRequestFrame {
     #[must_use]
-    pub fn snapshot(session_id: SessionId, request_id: Uuid) -> Self {
+    pub fn command(
+        session_id: SessionId,
+        request_id: Uuid,
+        command: impl Into<String>,
+        payload: Option<serde_json::Value>,
+    ) -> Self {
         Self {
             version: TUI_BRIDGE_PROTOCOL_VERSION,
             message_type: REQUEST_MESSAGE_TYPE.to_owned(),
             request_id,
             session_id: session_id.to_string(),
-            command: SNAPSHOT_COMMAND.to_owned(),
+            command: command.into(),
+            payload,
         }
+    }
+
+    #[must_use]
+    pub fn snapshot(session_id: SessionId, request_id: Uuid) -> Self {
+        Self::command(session_id, request_id, SNAPSHOT_COMMAND, None)
     }
 }
 
@@ -250,18 +269,27 @@ pub struct TuiBridgeResponseFrame {
     #[serde(default)]
     pub snapshot: Option<TuiBridgeSnapshot>,
     #[serde(default)]
+    pub result: Option<serde_json::Value>,
+    #[serde(default)]
     pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum TuiBridgeInboundFrame {
     Event(TuiBridgeEventFrame),
-    SnapshotResponse(TuiBridgeResponseFrame),
+    Response(Box<TuiBridgeResponseFrame>),
+}
+
+struct PendingTuiBridgeRequest {
+    command: String,
+    sender: mpsc::SyncSender<TuiBridgeResponseFrame>,
 }
 
 pub(crate) struct TuiBridgeBroker {
+    session_id: SessionId,
     outbound: mpsc::SyncSender<Vec<u8>>,
-    pending: Mutex<HashMap<Uuid, mpsc::SyncSender<TuiBridgeResponseFrame>>>,
+    pending: Mutex<HashMap<Uuid, PendingTuiBridgeRequest>>,
     closed: AtomicBool,
 }
 
@@ -273,10 +301,25 @@ impl TuiBridgeBroker {
     pub(crate) fn close(&self) {
         self.closed
             .store(true, std::sync::atomic::Ordering::Release);
-        self.pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+        let pending = std::mem::take(
+            &mut *self
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (request_id, pending) in pending {
+            let _ = pending.sender.send(TuiBridgeResponseFrame {
+                version: TUI_BRIDGE_PROTOCOL_VERSION,
+                message_type: RESPONSE_MESSAGE_TYPE.to_owned(),
+                request_id,
+                session_id: self.session_id.to_string(),
+                command: pending.command,
+                success: false,
+                snapshot: None,
+                result: None,
+                error: Some("bridge_disconnected".to_owned()),
+            });
+        }
     }
 }
 
@@ -582,6 +625,9 @@ impl TuiBridgeRegistry {
         ensure_token(owner, token)?;
         owner.state = TuiBridgeConnectionState::Unreachable;
         owner.session_state = SessionState::Unavailable;
+        if let Some(broker) = owner.broker.take() {
+            broker.close();
+        }
         let subscribers = std::mem::take(&mut owner.subscribers);
         for subscriber in subscribers {
             let _ = subscriber.send(PiEvent::Closed);
@@ -673,6 +719,7 @@ impl TuiBridgeRegistry {
             return Err(TuiBridgeError::BridgeUnreachable(token.session_id));
         }
         if let Some(previous) = owner.broker.replace(Arc::new(TuiBridgeBroker {
+            session_id: token.session_id,
             outbound,
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
@@ -680,6 +727,136 @@ impl TuiBridgeRegistry {
             previous.close();
         }
         Ok(Arc::clone(owner.broker.as_ref().expect("broker inserted")))
+    }
+
+    fn attached_broker(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Arc<TuiBridgeBroker>, TuiBridgeError> {
+        let owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = owners
+            .get(&session_id)
+            .ok_or(TuiBridgeError::UnknownSession(session_id))?;
+        if owner.state != TuiBridgeConnectionState::Attached {
+            return Err(TuiBridgeError::BridgeUnreachable(session_id));
+        }
+        owner
+            .broker
+            .clone()
+            .ok_or(TuiBridgeError::BridgeUnreachable(session_id))
+    }
+
+    /// Sends one bounded command to the attached Pi TUI and waits for its
+    /// correlated response. The request is host-local and never enters the
+    /// encrypted Pix wire protocol directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] when the bridge is unavailable, the request
+    /// queue is full, the response is rejected, or the extension misses the
+    /// deadline.
+    pub fn request_command(
+        &self,
+        session_id: SessionId,
+        command: impl Into<String>,
+        payload: Option<serde_json::Value>,
+        timeout: Duration,
+    ) -> Result<TuiBridgeResponseFrame, TuiBridgeError> {
+        let command = command.into();
+        validate_bridge_text(&command, 128).map_err(|()| TuiBridgeError::InvalidRequestCommand)?;
+        let request_id = Uuid::new_v4();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let broker = self.attached_broker(session_id)?;
+        if broker.is_closed() {
+            return Err(TuiBridgeError::BridgeUnreachable(session_id));
+        }
+        {
+            let mut pending = broker
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if pending.len() >= TUI_BRIDGE_MAX_PENDING_REQUESTS {
+                return Err(TuiBridgeError::BridgeBackpressure(session_id));
+            }
+            pending.insert(
+                request_id,
+                PendingTuiBridgeRequest {
+                    command: command.clone(),
+                    sender,
+                },
+            );
+        }
+        if broker.is_closed() {
+            broker
+                .pending
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&request_id);
+            return Err(TuiBridgeError::BridgeUnreachable(session_id));
+        }
+        let mut frame = match serde_json::to_vec(&TuiBridgeRequestFrame::command(
+            session_id,
+            request_id,
+            command.clone(),
+            payload,
+        )) {
+            Ok(frame) => frame,
+            Err(error) => {
+                broker
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&request_id);
+                return Err(TuiBridgeError::Encode(error));
+            }
+        };
+        frame.push(b'\n');
+        match broker.outbound.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                broker
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&request_id);
+                return Err(TuiBridgeError::BridgeBackpressure(session_id));
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                broker
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&request_id);
+                return Err(TuiBridgeError::BridgeUnreachable(session_id));
+            }
+        }
+        let response = match receiver.recv_timeout(timeout) {
+            Ok(response) => response,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                broker
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&request_id);
+                return Err(TuiBridgeError::CommandTimeout(session_id));
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(TuiBridgeError::BridgeUnreachable(session_id));
+            }
+        };
+        if response.command != command {
+            return Err(TuiBridgeError::ResponseCommandMismatch(session_id));
+        }
+        if !response.success {
+            if response.error.as_deref() == Some("bridge_disconnected") {
+                return Err(TuiBridgeError::BridgeUnreachable(session_id));
+            }
+            return Err(TuiBridgeError::CommandRejected(session_id));
+        }
+        Ok(response)
     }
 
     /// Requests a bounded authoritative snapshot from the attached Pi TUI.
@@ -695,76 +872,24 @@ impl TuiBridgeRegistry {
         session_id: SessionId,
         timeout: Duration,
     ) -> Result<TuiBridgeSnapshot, TuiBridgeError> {
-        let request_id = Uuid::new_v4();
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let broker = {
-            let owners = self
-                .owners
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let owner = owners
-                .get(&session_id)
-                .ok_or(TuiBridgeError::UnknownSession(session_id))?;
-            if owner.state != TuiBridgeConnectionState::Attached {
-                return Err(TuiBridgeError::BridgeUnreachable(session_id));
-            }
-            owner
-                .broker
-                .clone()
-                .ok_or(TuiBridgeError::BridgeUnreachable(session_id))?
-        };
-        if broker.closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(TuiBridgeError::BridgeUnreachable(session_id));
-        }
-        broker
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(request_id, sender);
-        if broker.is_closed() {
-            broker
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&request_id);
-            return Err(TuiBridgeError::BridgeUnreachable(session_id));
-        }
-        let mut frame =
-            serde_json::to_vec(&TuiBridgeRequestFrame::snapshot(session_id, request_id))
-                .map_err(TuiBridgeError::Encode)?;
-        frame.push(b'\n');
-        if broker.outbound.try_send(frame).is_err() {
-            broker
-                .pending
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&request_id);
-            return Err(TuiBridgeError::BridgeBackpressure(session_id));
-        }
-        let response = match receiver.recv_timeout(timeout) {
-            Ok(response) => response,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                broker
-                    .pending
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .remove(&request_id);
-                return Err(TuiBridgeError::SnapshotTimeout(session_id));
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(TuiBridgeError::BridgeUnreachable(session_id));
-            }
-        };
-        if !response.success {
-            return Err(TuiBridgeError::SnapshotRejected(session_id));
-        }
+        let response = self
+            .request_command(session_id, SNAPSHOT_COMMAND, None, timeout)
+            .map_err(|error| match error {
+                TuiBridgeError::CommandRejected(session_id) => {
+                    TuiBridgeError::SnapshotRejected(session_id)
+                }
+                TuiBridgeError::CommandTimeout(session_id) => {
+                    TuiBridgeError::SnapshotTimeout(session_id)
+                }
+                other => other,
+            })?;
         response
             .snapshot
             .ok_or(TuiBridgeError::InvalidSnapshotResponse(session_id))
     }
 
     /// Resolves one response received by the socket reader.
-    pub(crate) fn resolve_snapshot_response(
+    pub(crate) fn resolve_response(
         &self,
         token: &TuiBridgeToken,
         response: TuiBridgeResponseFrame,
@@ -779,9 +904,6 @@ impl TuiBridgeRegistry {
         ensure_token(owner, token)?;
         if response.session_id != token.session_id.to_string() {
             return Err(TuiBridgeError::ResponseSessionMismatch(token.session_id));
-        }
-        if response.command != SNAPSHOT_COMMAND {
-            return Err(TuiBridgeError::InvalidResponseCommand);
         }
         if response
             .snapshot
@@ -800,8 +922,24 @@ impl TuiBridgeRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&response.request_id)
             .ok_or(TuiBridgeError::UnknownRequest(response.request_id))?;
-        let _ = sender.send(response);
+        if sender.command != response.command {
+            return Err(TuiBridgeError::ResponseCommandMismatch(token.session_id));
+        }
+        let _ = sender.sender.send(response);
         Ok(())
+    }
+
+    /// Compatibility wrapper for callers that only accept snapshot responses.
+    #[cfg(test)]
+    pub(crate) fn resolve_snapshot_response(
+        &self,
+        token: &TuiBridgeToken,
+        response: TuiBridgeResponseFrame,
+    ) -> Result<(), TuiBridgeError> {
+        if response.command != SNAPSHOT_COMMAND {
+            return Err(TuiBridgeError::InvalidResponseCommand);
+        }
+        self.resolve_response(token, response)
     }
 
     /// Accepts one event frame from the registered TUI connection and
@@ -880,6 +1018,9 @@ impl TuiBridgeRegistry {
             owners.insert(token.session_id, owner);
             return Err(TuiBridgeError::SessionLock(error));
         }
+        if let Some(broker) = owner.broker.take() {
+            broker.close();
+        }
         for subscriber in owner.subscribers.drain(..) {
             let _ = subscriber.send(PiEvent::Closed);
         }
@@ -907,6 +1048,9 @@ impl TuiBridgeRegistry {
         owner.session_state = state;
         if matches!(state, SessionState::Unavailable) {
             owner.state = TuiBridgeConnectionState::Unreachable;
+            if let Some(broker) = owner.broker.take() {
+                broker.close();
+            }
             for subscriber in owner.subscribers.drain(..) {
                 let _ = subscriber.send(PiEvent::Closed);
             }
@@ -953,6 +1097,9 @@ impl TuiBridgeRegistry {
             if !authorized.contains(&owner.workspace) {
                 owner.state = TuiBridgeConnectionState::Unreachable;
                 owner.session_state = SessionState::Unavailable;
+                if let Some(broker) = owner.broker.take() {
+                    broker.close();
+                }
                 for subscriber in owner.subscribers.drain(..) {
                     let _ = subscriber.send(PiEvent::Closed);
                 }
@@ -1246,8 +1393,8 @@ pub fn decode_event_frame(frame: &[u8]) -> Result<TuiBridgeEventFrame, TuiBridge
     Ok(event)
 }
 
-/// Decodes one host-local frame after REGISTER. Only event frames and the
-/// correlated snapshot response are accepted on the TUI connection.
+/// Decodes one host-local frame after REGISTER. Only event frames and
+/// correlated command responses are accepted on the TUI connection.
 pub(crate) fn decode_inbound_frame(frame: &[u8]) -> Result<TuiBridgeInboundFrame, TuiBridgeError> {
     if frame.len() > TUI_BRIDGE_MAX_FRAME_BYTES {
         return Err(TuiBridgeError::FrameTooLarge);
@@ -1256,20 +1403,22 @@ pub(crate) fn decode_inbound_frame(frame: &[u8]) -> Result<TuiBridgeInboundFrame
         .map_err(|_| TuiBridgeError::MalformedFrame)?;
     match value.get("type").and_then(serde_json::Value::as_str) {
         Some(EVENT_MESSAGE_TYPE) => Ok(TuiBridgeInboundFrame::Event(decode_event_frame(frame)?)),
-        Some(RESPONSE_MESSAGE_TYPE) => Ok(TuiBridgeInboundFrame::SnapshotResponse(
-            decode_snapshot_response(frame)?,
-        )),
+        Some(RESPONSE_MESSAGE_TYPE) => Ok(TuiBridgeInboundFrame::Response(Box::new(
+            decode_response_frame(frame)?,
+        ))),
         _ => Err(TuiBridgeError::InvalidInboundMessageType),
     }
 }
 
-/// Decodes and validates a snapshot response from the extension.
+/// Decodes and validates one response from the extension.
 ///
 /// # Errors
 ///
 /// Returns [`TuiBridgeError`] when the response is oversized, malformed, or
-/// violates the correlated snapshot schema.
-pub fn decode_snapshot_response(frame: &[u8]) -> Result<TuiBridgeResponseFrame, TuiBridgeError> {
+/// violates the correlated command schema.
+pub(crate) fn decode_response_frame(
+    frame: &[u8],
+) -> Result<TuiBridgeResponseFrame, TuiBridgeError> {
     if frame.len() > TUI_BRIDGE_MAX_FRAME_BYTES {
         return Err(TuiBridgeError::FrameTooLarge);
     }
@@ -1288,27 +1437,47 @@ pub fn decode_snapshot_response(frame: &[u8]) -> Result<TuiBridgeResponseFrame, 
         .session_id
         .parse::<SessionId>()
         .map_err(|_| TuiBridgeError::InvalidResponseSessionId)?;
-    if response.command != SNAPSHOT_COMMAND {
-        return Err(TuiBridgeError::InvalidResponseCommand);
+    validate_bridge_text(&response.command, 128)
+        .map_err(|()| TuiBridgeError::InvalidResponseCommand)?;
+    if response.snapshot.is_some() && response.result.is_some() {
+        return Err(TuiBridgeError::InvalidCommandResponse(session_id));
     }
     if response.success {
-        let snapshot = response
-            .snapshot
-            .as_ref()
-            .ok_or(TuiBridgeError::InvalidSnapshotResponse(session_id))?;
-        validate_snapshot(snapshot)?;
         if response.error.is_some() {
-            return Err(TuiBridgeError::InvalidSnapshotResponse(session_id));
+            return Err(TuiBridgeError::InvalidCommandResponse(session_id));
+        }
+        if response.command == SNAPSHOT_COMMAND {
+            let snapshot = response
+                .snapshot
+                .as_ref()
+                .ok_or(TuiBridgeError::InvalidSnapshotResponse(session_id))?;
+            validate_snapshot(snapshot)?;
+        } else if response.snapshot.is_some() {
+            return Err(TuiBridgeError::InvalidCommandResponse(session_id));
         }
     } else {
-        if response.snapshot.is_some() {
-            return Err(TuiBridgeError::InvalidSnapshotResponse(session_id));
+        if response.snapshot.is_some() || response.result.is_some() {
+            return Err(TuiBridgeError::InvalidCommandResponse(session_id));
         }
         let Some(error) = response.error.as_deref() else {
-            return Err(TuiBridgeError::InvalidSnapshotResponse(session_id));
+            return Err(TuiBridgeError::InvalidCommandResponse(session_id));
         };
         validate_bridge_text(error, 512)
-            .map_err(|()| TuiBridgeError::InvalidSnapshotResponse(session_id))?;
+            .map_err(|()| TuiBridgeError::InvalidCommandResponse(session_id))?;
+    }
+    Ok(response)
+}
+
+/// Decodes and validates a snapshot response from the extension.
+///
+/// # Errors
+///
+/// Returns [`TuiBridgeError`] when the response is malformed, oversized, or
+/// does not contain a valid snapshot response.
+pub fn decode_snapshot_response(frame: &[u8]) -> Result<TuiBridgeResponseFrame, TuiBridgeError> {
+    let response = decode_response_frame(frame)?;
+    if response.command != SNAPSHOT_COMMAND {
+        return Err(TuiBridgeError::InvalidResponseCommand);
     }
     Ok(response)
 }
@@ -1586,8 +1755,14 @@ pub enum TuiBridgeError {
     SnapshotTimeout(SessionId),
     #[error("TUI bridge snapshot request was rejected")]
     SnapshotRejected(SessionId),
+    #[error("TUI bridge command request timed out")]
+    CommandTimeout(SessionId),
+    #[error("TUI bridge command request was rejected")]
+    CommandRejected(SessionId),
     #[error("TUI bridge snapshot response is invalid")]
     InvalidSnapshotResponse(SessionId),
+    #[error("TUI bridge command response is invalid")]
+    InvalidCommandResponse(SessionId),
     #[error("TUI bridge snapshot payload is invalid")]
     InvalidSnapshotPayload,
     #[error("TUI bridge response has an unknown request ID")]
@@ -1602,10 +1777,14 @@ pub enum TuiBridgeError {
     InvalidResponseMessageType,
     #[error("TUI bridge request ID is invalid")]
     InvalidRequestId,
+    #[error("TUI bridge request command is invalid")]
+    InvalidRequestCommand,
     #[error("TUI bridge inbound message type is invalid")]
     InvalidInboundMessageType,
     #[error("TUI bridge response snapshot session ID is invalid")]
     InvalidSnapshotSessionId,
+    #[error("TUI bridge response command does not match the request")]
+    ResponseCommandMismatch(SessionId),
     #[error("TUI bridge record is not a PiTui owner")]
     InvalidOwnerKind,
     #[error("TUI bridge owner workspace fingerprint does not match")]
@@ -1927,6 +2106,7 @@ mod tests {
                 active_tools: Vec::new(),
                 through_sequence: 4,
             }),
+            result: None,
             error: None,
         };
         let frame = serde_json::to_vec(&response).expect("snapshot response");
@@ -1991,6 +2171,7 @@ mod tests {
                 active_tools: Vec::new(),
                 through_sequence: 3,
             }),
+            result: None,
             error: None,
         };
         registry
@@ -2001,6 +2182,67 @@ mod tests {
             .expect("snapshot request thread")
             .expect("snapshot response");
         assert_eq!(snapshot.through_sequence, 3);
+    }
+
+    #[test]
+    fn command_request_round_trip_preserves_payload_and_result() {
+        let (workspace, registry, peer, session_id) = setup();
+        let harness = TuiBridgeHarness::new(Arc::clone(&registry));
+        let request_frame = serde_json::to_vec(&TuiBridgeRegister::new(
+            session_id,
+            workspace.path(),
+            Uuid::new_v4(),
+        ))
+        .expect("register frame");
+        let registration = harness
+            .register_frame(&request_frame, &peer)
+            .expect("register owner");
+        let (outbound, requests) = mpsc::sync_channel(1);
+        let _broker = registry
+            .bind_transport(&registration.token, outbound)
+            .expect("bind transport");
+        let command_registry = Arc::clone(&registry);
+        let command_token = registration.token.clone();
+        let command_thread = std::thread::spawn(move || {
+            command_registry.request_command(
+                session_id,
+                "prompt",
+                Some(serde_json::json!({"content": "hi"})),
+                Duration::from_secs(2),
+            )
+        });
+        let request = requests
+            .recv_timeout(Duration::from_secs(1))
+            .expect("read command request");
+        let request =
+            serde_json::from_slice::<TuiBridgeRequestFrame>(&request[..request.len() - 1])
+                .expect("decode command request");
+        assert_eq!(request.command, "prompt");
+        assert_eq!(request.payload, Some(serde_json::json!({"content": "hi"})));
+        registry
+            .resolve_response(
+                &command_token,
+                TuiBridgeResponseFrame {
+                    version: TUI_BRIDGE_PROTOCOL_VERSION,
+                    message_type: "response".to_owned(),
+                    request_id: request.request_id,
+                    session_id: session_id.to_string(),
+                    command: "prompt".to_owned(),
+                    success: true,
+                    snapshot: None,
+                    result: Some(serde_json::json!({"status": "accepted"})),
+                    error: None,
+                },
+            )
+            .expect("resolve command response");
+        let response = command_thread
+            .join()
+            .expect("command response thread")
+            .expect("command response");
+        assert_eq!(
+            response.result,
+            Some(serde_json::json!({"status": "accepted"}))
+        );
     }
 
     #[cfg(unix)]

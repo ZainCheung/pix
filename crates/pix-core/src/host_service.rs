@@ -726,8 +726,8 @@ fn tui_bridge_connection_loop(
                     break;
                 }
             }
-            crate::tui_bridge::TuiBridgeInboundFrame::SnapshotResponse(response) => {
-                if registry.resolve_snapshot_response(token, response).is_err() {
+            crate::tui_bridge::TuiBridgeInboundFrame::Response(response) => {
+                if registry.resolve_response(token, *response).is_err() {
                     let _ = registry.disconnect(token);
                     break;
                 }
