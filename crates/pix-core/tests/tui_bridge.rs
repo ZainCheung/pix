@@ -9,8 +9,8 @@ use std::time::Duration;
 use pix_core::{
     ConfigStore, DirectTcpListener, DiscoveredSession, HostConfig, HostEnvironment, HostService,
     HostState, PairingCoordinator, ProcessIdentity, RuntimeBackend, RuntimeManager,
-    RuntimeManagerError, RuntimeManagerOptions, SessionId, SessionSummary, TuiBridgeHarness,
-    TuiBridgePeer, TuiBridgeRegister, WorkspaceRegistry, owner_uid,
+    RuntimeManagerError, RuntimeManagerOptions, SessionId, SessionSummary, TuiBridgeEventFrame,
+    TuiBridgeHarness, TuiBridgePeer, TuiBridgeRegister, WorkspaceRegistry, owner_uid,
 };
 use pix_wire::generate_static_keypair;
 use tempfile::tempdir;
@@ -146,10 +146,11 @@ fn tui_placeholder_blocks_rpc_without_consuming_rpc_capacity() {
 #[test]
 fn active_session_summary_exposes_tui_unreachable_without_wire_backend_identity() {
     let (_fake_directory, workspace, _locks, manager, harness, peer, session_id) = manager_setup();
+    let bridge_instance_id = uuid::Uuid::new_v4();
     let frame = serde_json::to_vec(&TuiBridgeRegister::new(
         session_id,
         workspace.path(),
-        uuid::Uuid::new_v4(),
+        bridge_instance_id,
     ))
     .expect("register frame");
     let registration = harness.register_frame(&frame, &peer).expect("register TUI");
@@ -277,10 +278,11 @@ fn host_service_accepts_register_and_marks_socket_disconnect_unreachable() {
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .expect("set bridge timeout");
+    let bridge_instance_id = uuid::Uuid::new_v4();
     let frame = serde_json::to_vec(&TuiBridgeRegister::new(
         session_id,
         workspace.path(),
-        uuid::Uuid::new_v4(),
+        bridge_instance_id,
     ))
     .expect("register frame");
     stream.write_all(&frame).expect("write register");
@@ -299,6 +301,25 @@ fn host_service_accepts_register_and_marks_socket_disconnect_unreachable() {
         manager.session_state(session_id),
         Some(pix_wire::SessionState::Idle)
     );
+    let receiver = manager.subscribe(session_id).expect("subscribe TUI events");
+    let event = TuiBridgeEventFrame::new(
+        session_id,
+        bridge_instance_id,
+        1,
+        "agent_start",
+        serde_json::json!({}),
+    );
+    stream
+        .write_all(&serde_json::to_vec(&event).expect("event frame"))
+        .expect("write event");
+    stream.write_all(b"\n").expect("write event newline");
+    stream.flush().expect("flush event");
+    assert!(matches!(
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .expect("receive TUI event"),
+        pix_core::pi_rpc::PiEvent::Event { event_type, .. } if event_type == "agent_start"
+    ));
     drop(stream);
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);

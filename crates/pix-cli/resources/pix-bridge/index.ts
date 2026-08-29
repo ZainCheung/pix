@@ -1,8 +1,9 @@
 // Pix TUI Bridge ownership extension.
 //
-// This first revision intentionally implements only the ownership handshake.
-// Pi remains fully usable when the host or socket is unavailable; realtime
-// event forwarding is added by a later bridge protocol revision.
+// The extension owns only the host-local bridge connection. This ownership handshake
+// remains optional: Pi stays usable when the host or socket is
+// unavailable; event delivery is bounded and fail-closed so it can never
+// stall the interactive TUI.
 
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
@@ -12,10 +13,17 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 const BRIDGE_PROTOCOL_VERSION = 1;
 const BRIDGE_EXTENSION_VERSION = 1;
 const CLAIM_TIMEOUT_MS = 300;
+const MAX_OUTGOING_BYTES = 8 * 1024 * 1024;
 
 let activeSocket;
 let activeSessionId;
+let activeStreamEpoch;
 let active = false;
+let sequence = 0;
+let outgoing = [];
+let outgoingBytes = 0;
+let writing = false;
+let desynced = false;
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -37,7 +45,7 @@ function registerPayload(ctx, event) {
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
 		sessionFile,
 		reason: event.reason,
-		capabilities: ["ownership.v1"],
+		capabilities: ["ownership.v1", "events.v1", "snapshot.v1"],
 	};
 }
 
@@ -45,8 +53,53 @@ function closeSocket() {
 	const socket = activeSocket;
 	activeSocket = undefined;
 	activeSessionId = undefined;
+	activeStreamEpoch = undefined;
 	active = false;
+	sequence = 0;
+	outgoing = [];
+	outgoingBytes = 0;
+	writing = false;
+	desynced = false;
 	if (socket) socket.end();
+}
+
+function flushOutgoing() {
+	const socket = activeSocket;
+	if (!socket || writing || outgoing.length === 0) return;
+	const frame = outgoing.shift();
+	outgoingBytes -= Buffer.byteLength(frame, "utf8");
+	writing = true;
+	socket.write(frame, () => {
+		writing = false;
+		flushOutgoing();
+	});
+}
+
+function sendEvent(eventType, payload) {
+	const socket = activeSocket;
+	if (!socket || !active || desynced) return;
+	const nextSequence = sequence + 1;
+	const frame = `${JSON.stringify({
+		version: BRIDGE_PROTOCOL_VERSION,
+		type: "event",
+		sessionId: activeSessionId,
+		streamEpoch: activeStreamEpoch,
+		sequence: nextSequence,
+		eventType,
+		payload,
+	})}\n`;
+	const frameBytes = Buffer.byteLength(frame, "utf8");
+	if (frameBytes > MAX_OUTGOING_BYTES || outgoingBytes + frameBytes > MAX_OUTGOING_BYTES) {
+		desynced = true;
+		outgoing = [];
+		outgoingBytes = 0;
+		socket.destroy();
+		return;
+	}
+	sequence = nextSequence;
+	outgoing.push(frame);
+	outgoingBytes += frameBytes;
+	flushOutgoing();
 }
 
 function claim(ctx, event) {
@@ -90,12 +143,24 @@ function claim(ctx, event) {
 				if (response.granted === true) {
 					activeSocket = socket;
 					activeSessionId = payload.sessionId;
+					activeStreamEpoch = response.bridgeInstanceId;
 					active = true;
+					sequence = 0;
+					outgoing = [];
+					outgoingBytes = 0;
+					writing = false;
+					desynced = false;
 					socket.on("close", () => {
 						if (activeSocket === socket) {
 							activeSocket = undefined;
 							activeSessionId = undefined;
+							activeStreamEpoch = undefined;
 							active = false;
+							outgoing = [];
+							outgoingBytes = 0;
+							writing = false;
+							sequence = 0;
+							desynced = false;
 						}
 					});
 					finish({ kind: "attached", response });
@@ -127,11 +192,55 @@ export default function pixTuiBridge(pi) {
 			ctx.shutdown();
 			return;
 		}
-		ctx.ui.setStatus("pix-bridge", "standalone");
+	ctx.ui.setStatus("pix-bridge", "standalone");
 	});
+
+	pi.on("agent_start", () => sendEvent("agent_start", {}));
+	pi.on("agent_settled", () => sendEvent("agent_settled", {}));
+	pi.on("message_start", (event) =>
+		sendEvent("message_start", { message: event.message }),
+	);
+	pi.on("message_update", (event) =>
+		sendEvent("message_update", {
+			message: event.message,
+			assistantMessageEvent: event.assistantMessageEvent,
+		}),
+	);
+	pi.on("message_end", (event) => sendEvent("message_end", { message: event.message }));
+	pi.on("tool_execution_start", (event) =>
+		sendEvent("tool_execution_start", {
+			toolCallId: event.toolCallId,
+			toolName: event.toolName,
+			args: event.args,
+		}),
+	);
+	pi.on("tool_execution_update", (event) =>
+		sendEvent("tool_execution_update", {
+			toolCallId: event.toolCallId,
+			toolName: event.toolName,
+			args: event.args,
+			partialResult: event.partialResult,
+		}),
+	);
+	pi.on("tool_execution_end", (event) =>
+		sendEvent("tool_execution_end", {
+			toolCallId: event.toolCallId,
+			toolName: event.toolName,
+			result: event.result,
+			isError: event.isError,
+		}),
+	);
+	pi.on("session_before_compact", (event) =>
+		sendEvent("compaction_start", { reason: event.reason }),
+	);
+	pi.on("session_compact", (event) =>
+		sendEvent("compaction_end", {
+			reason: event.reason,
+			result: event.compactionEntry,
+		}),
+	);
 
 	pi.on("session_shutdown", () => {
 		closeSocket();
 	});
 }
-

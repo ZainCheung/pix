@@ -10,12 +10,13 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::pi_rpc::PiEvent;
 use crate::session::{PiSessionStore, SessionError};
 use crate::session_lock::{
     ProcessIdentity, SessionId, SessionLease, SessionLockError, SessionOwnerKind,
@@ -28,6 +29,7 @@ pub const TUI_BRIDGE_PROTOCOL_VERSION: u32 = 1;
 /// Maximum size of one newline-delimited bridge frame.
 pub const TUI_BRIDGE_MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const REGISTER_MESSAGE_TYPE: &str = "register";
+const EVENT_MESSAGE_TYPE: &str = "event";
 
 /// REGISTER payload sent by the optional Pi extension.
 ///
@@ -142,6 +144,46 @@ pub struct TuiBridgeRegisterResponse {
     pub error: Option<String>,
 }
 
+/// One bounded, sequenced event emitted by the Pi TUI extension after a
+/// successful ownership claim. The payload keeps Pi-specific fields inside
+/// the host compatibility boundary; the existing `pi_bridge` adapter maps it
+/// before anything reaches `pix-wire`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TuiBridgeEventFrame {
+    pub version: u32,
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub session_id: String,
+    /// Identifies one bridge stream. Pi creates a fresh value for every
+    /// REGISTER/reconnect so sequence numbers may safely restart at one.
+    pub stream_epoch: Uuid,
+    pub sequence: u64,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+}
+
+impl TuiBridgeEventFrame {
+    #[must_use]
+    pub fn new(
+        session_id: SessionId,
+        stream_epoch: Uuid,
+        sequence: u64,
+        event_type: impl Into<String>,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            version: TUI_BRIDGE_PROTOCOL_VERSION,
+            message_type: EVENT_MESSAGE_TYPE.to_owned(),
+            session_id: session_id.to_string(),
+            stream_epoch,
+            sequence,
+            event_type: event_type.into(),
+            payload,
+        }
+    }
+}
+
 impl TuiBridgeRegisterResponse {
     #[must_use]
     pub fn granted(registration: &TuiBridgeRegistration) -> Self {
@@ -199,6 +241,8 @@ pub struct TuiBridgeOwnerSnapshot {
     pub session_state: SessionState,
     pub client_count: usize,
     pub provisional: bool,
+    /// Highest event sequence accepted by the host for this owner.
+    pub through_sequence: u64,
 }
 
 struct TuiOwner {
@@ -208,6 +252,8 @@ struct TuiOwner {
     session_state: SessionState,
     client_count: usize,
     provisional: bool,
+    last_sequence: u64,
+    subscribers: Vec<mpsc::Sender<PiEvent>>,
 }
 
 /// Host-local registry for external TUI ownership.
@@ -298,8 +344,11 @@ impl TuiBridgeRegistry {
         {
             return Err(TuiBridgeError::OwnerConflict(session_id));
         }
-        let previous = owners.remove(&session_id);
-        drop(previous);
+        if let Some(mut previous) = owners.remove(&session_id) {
+            for subscriber in previous.subscribers.drain(..) {
+                let _ = subscriber.send(PiEvent::Closed);
+            }
+        }
 
         let lease = SessionLease::acquire_for_tui(
             &self.lock_directory,
@@ -324,6 +373,8 @@ impl TuiBridgeRegistry {
                 session_state: SessionState::Idle,
                 client_count: 0,
                 provisional,
+                last_sequence: 0,
+                subscribers: Vec::new(),
             },
         );
         Ok(TuiBridgeRegistration {
@@ -405,6 +456,8 @@ impl TuiBridgeRegistry {
                 session_state: SessionState::Unavailable,
                 client_count: 0,
                 provisional: false,
+                last_sequence: 0,
+                subscribers: Vec::new(),
             },
         );
         Ok(registration)
@@ -427,7 +480,123 @@ impl TuiBridgeRegistry {
         ensure_token(owner, token)?;
         owner.state = TuiBridgeConnectionState::Unreachable;
         owner.session_state = SessionState::Unavailable;
+        let subscribers = std::mem::take(&mut owner.subscribers);
+        for subscriber in subscribers {
+            let _ = subscriber.send(PiEvent::Closed);
+        }
         Ok(())
+    }
+
+    /// Attaches one remote Pix client to an online TUI owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] when the owner is missing or unreachable.
+    pub fn attach_client(&self, session_id: SessionId) -> Result<(), TuiBridgeError> {
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = owners
+            .get_mut(&session_id)
+            .ok_or(TuiBridgeError::UnknownSession(session_id))?;
+        if owner.state != TuiBridgeConnectionState::Attached {
+            return Err(TuiBridgeError::BridgeUnreachable(session_id));
+        }
+        owner.client_count = owner.client_count.saturating_add(1);
+        Ok(())
+    }
+
+    /// Detaches one remote Pix client from an online TUI owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] when the owner is missing or has no client.
+    pub fn detach_client(&self, session_id: SessionId) -> Result<(), TuiBridgeError> {
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = owners
+            .get_mut(&session_id)
+            .ok_or(TuiBridgeError::UnknownSession(session_id))?;
+        if owner.client_count == 0 {
+            return Err(TuiBridgeError::NoAttachedClient(session_id));
+        }
+        owner.client_count -= 1;
+        Ok(())
+    }
+
+    /// Subscribes one remote Pix connection to sequenced TUI events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] when the owner is missing or unreachable.
+    pub fn subscribe(
+        &self,
+        session_id: SessionId,
+    ) -> Result<mpsc::Receiver<PiEvent>, TuiBridgeError> {
+        let (sender, receiver) = mpsc::channel();
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = owners
+            .get_mut(&session_id)
+            .ok_or(TuiBridgeError::UnknownSession(session_id))?;
+        if owner.state != TuiBridgeConnectionState::Attached {
+            return Err(TuiBridgeError::BridgeUnreachable(session_id));
+        }
+        owner.subscribers.push(sender);
+        Ok(receiver)
+    }
+
+    /// Accepts one event frame from the registered TUI connection and
+    /// broadcasts it to subscribed Pix connections. The sequence is strictly
+    /// monotonic per owner; stale or duplicate frames are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] for a stale token, mismatched session, or
+    /// non-monotonic sequence.
+    pub fn publish_event(
+        &self,
+        token: &TuiBridgeToken,
+        frame: &TuiBridgeEventFrame,
+    ) -> Result<usize, TuiBridgeError> {
+        let session_id = frame
+            .session_id
+            .parse::<SessionId>()
+            .map_err(|_| TuiBridgeError::InvalidEventSessionId)?;
+        if session_id != token.session_id {
+            return Err(TuiBridgeError::EventSessionMismatch(token.session_id));
+        }
+        if frame.stream_epoch != token.bridge_instance_id {
+            return Err(TuiBridgeError::EventStreamEpochMismatch(token.session_id));
+        }
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let owner = owners
+            .get_mut(&token.session_id)
+            .ok_or(TuiBridgeError::OwnershipTokenMismatch(token.session_id))?;
+        ensure_token(owner, token)?;
+        if owner.state != TuiBridgeConnectionState::Attached {
+            return Err(TuiBridgeError::BridgeUnreachable(token.session_id));
+        }
+        if frame.sequence == 0 || frame.sequence <= owner.last_sequence {
+            return Err(TuiBridgeError::EventSequence(token.session_id));
+        }
+        owner.last_sequence = frame.sequence;
+        let event = PiEvent::Event {
+            event_type: frame.event_type.clone(),
+            payload: frame.payload.clone(),
+        };
+        owner
+            .subscribers
+            .retain(|subscriber| subscriber.send(event.clone()).is_ok());
+        Ok(owner.subscribers.len())
     }
 
     /// Explicitly releases the current TUI owner.  Repeating a release after
@@ -457,6 +626,9 @@ impl TuiBridgeRegistry {
             owners.insert(token.session_id, owner);
             return Err(TuiBridgeError::SessionLock(error));
         }
+        for subscriber in owner.subscribers.drain(..) {
+            let _ = subscriber.send(PiEvent::Closed);
+        }
         Ok(())
     }
 
@@ -481,6 +653,9 @@ impl TuiBridgeRegistry {
         owner.session_state = state;
         if matches!(state, SessionState::Unavailable) {
             owner.state = TuiBridgeConnectionState::Unreachable;
+            for subscriber in owner.subscribers.drain(..) {
+                let _ = subscriber.send(PiEvent::Closed);
+            }
         }
         Ok(())
     }
@@ -524,6 +699,9 @@ impl TuiBridgeRegistry {
             if !authorized.contains(&owner.workspace) {
                 owner.state = TuiBridgeConnectionState::Unreachable;
                 owner.session_state = SessionState::Unavailable;
+                for subscriber in owner.subscribers.drain(..) {
+                    let _ = subscriber.send(PiEvent::Closed);
+                }
             }
         }
     }
@@ -738,6 +916,21 @@ impl TuiBridgeHarness {
         self.registry.release(token)
     }
 
+    /// Decodes and publishes one bounded event frame for a registered owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TuiBridgeError`] for an invalid frame, stale token, or
+    /// non-monotonic event sequence.
+    pub fn publish_event_frame(
+        &self,
+        frame: &[u8],
+        token: &TuiBridgeToken,
+    ) -> Result<usize, TuiBridgeError> {
+        let event = decode_event_frame(frame)?;
+        self.registry.publish_event(token, &event)
+    }
+
     #[must_use]
     pub fn registry(&self) -> &Arc<TuiBridgeRegistry> {
         &self.registry
@@ -760,6 +953,43 @@ pub fn decode_register_frame(frame: &[u8]) -> Result<TuiBridgeRegister, TuiBridg
         .map_err(|_| TuiBridgeError::MalformedFrame)?;
     validate_register(&request)?;
     Ok(request)
+}
+
+/// Decodes one bounded JSONL event frame emitted after a successful REGISTER.
+/// UIDs, PIDs, and filesystem paths are not accepted as event ownership data.
+///
+/// # Errors
+///
+/// Returns [`TuiBridgeError`] for oversized, malformed, or non-event frames.
+pub fn decode_event_frame(frame: &[u8]) -> Result<TuiBridgeEventFrame, TuiBridgeError> {
+    if frame.len() > TUI_BRIDGE_MAX_FRAME_BYTES {
+        return Err(TuiBridgeError::FrameTooLarge);
+    }
+    let event = serde_json::from_slice::<TuiBridgeEventFrame>(frame)
+        .map_err(|_| TuiBridgeError::MalformedFrame)?;
+    if event.version != TUI_BRIDGE_PROTOCOL_VERSION {
+        return Err(TuiBridgeError::UnsupportedVersion(event.version));
+    }
+    if event.message_type != EVENT_MESSAGE_TYPE {
+        return Err(TuiBridgeError::InvalidEventMessageType);
+    }
+    if event.sequence == 0 || event.event_type.is_empty() {
+        return Err(TuiBridgeError::InvalidEventFrame);
+    }
+    if event.stream_epoch.is_nil() {
+        return Err(TuiBridgeError::InvalidEventStreamEpoch);
+    }
+    if event.event_type.len() > 128 || event.event_type.chars().any(char::is_control) {
+        return Err(TuiBridgeError::InvalidEventFrame);
+    }
+    if !event.payload.is_object() {
+        return Err(TuiBridgeError::InvalidEventPayload);
+    }
+    event
+        .session_id
+        .parse::<SessionId>()
+        .map_err(|_| TuiBridgeError::InvalidEventSessionId)?;
+    Ok(event)
 }
 
 /// Returns the owner UID for a trusted config/run directory.  This is used by
@@ -921,6 +1151,7 @@ fn owner_snapshot(owner: &TuiOwner) -> TuiBridgeOwnerSnapshot {
         session_state: owner.session_state,
         client_count: owner.client_count,
         provisional: owner.provisional,
+        through_sequence: owner.last_sequence,
     }
 }
 
@@ -968,6 +1199,26 @@ pub enum TuiBridgeError {
     Io(#[from] io::Error),
     #[error("TUI bridge session is unknown")]
     UnknownSession(SessionId),
+    #[error("TUI bridge connection is unreachable")]
+    BridgeUnreachable(SessionId),
+    #[error("TUI bridge session has no attached client")]
+    NoAttachedClient(SessionId),
+    #[error("TUI bridge event session does not match its owner")]
+    EventSessionMismatch(SessionId),
+    #[error("TUI bridge event sequence is stale or invalid")]
+    EventSequence(SessionId),
+    #[error("TUI bridge event stream epoch does not match its owner")]
+    EventStreamEpochMismatch(SessionId),
+    #[error("TUI bridge event session ID is invalid")]
+    InvalidEventSessionId,
+    #[error("TUI bridge event stream epoch is invalid")]
+    InvalidEventStreamEpoch,
+    #[error("TUI bridge message is not an event")]
+    InvalidEventMessageType,
+    #[error("TUI bridge event frame is invalid")]
+    InvalidEventFrame,
+    #[error("TUI bridge event payload must be an object")]
+    InvalidEventPayload,
     #[error("TUI bridge record is not a PiTui owner")]
     InvalidOwnerKind,
     #[error("TUI bridge owner workspace fingerprint does not match")]
@@ -984,12 +1235,14 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{
         TUI_BRIDGE_MAX_FRAME_BYTES, TUI_BRIDGE_PROTOCOL_VERSION, TuiBridgeConnectionState,
-        TuiBridgeError, TuiBridgeHarness, TuiBridgePeer, TuiBridgeRegister, TuiBridgeRegistry,
-        decode_register_frame, owner_uid,
+        TuiBridgeError, TuiBridgeEventFrame, TuiBridgeHarness, TuiBridgePeer, TuiBridgeRegister,
+        TuiBridgeRegistry, decode_event_frame, decode_register_frame, owner_uid,
     };
+    use crate::pi_rpc::PiEvent;
     use crate::session_lock::{ProcessIdentity, SessionId};
 
     fn setup() -> (
@@ -1036,7 +1289,31 @@ mod tests {
         let first = harness
             .register_frame(&first_frame, &peer)
             .expect("first claim");
+        let receiver = registry
+            .subscribe(session_id)
+            .expect("subscribe first stream");
+        let first_event = TuiBridgeEventFrame::new(
+            session_id,
+            first.token.bridge_instance_id,
+            1,
+            "agent_start",
+            serde_json::json!({}),
+        );
+        harness
+            .publish_event_frame(
+                &serde_json::to_vec(&first_event).expect("first event"),
+                &first.token,
+            )
+            .expect("publish first event");
+        assert!(matches!(
+            receiver.recv().expect("first event received"),
+            PiEvent::Event { .. }
+        ));
         harness.disconnect(&first.token).expect("disconnect");
+        assert!(matches!(
+            receiver.recv().expect("first stream closed"),
+            PiEvent::Closed
+        ));
         assert_eq!(
             registry.owner(session_id).expect("owner").state,
             TuiBridgeConnectionState::Unreachable
@@ -1050,6 +1327,26 @@ mod tests {
         let second = harness
             .register_frame(&second_frame, &peer)
             .expect("reconnect");
+        let second_receiver = registry
+            .subscribe(session_id)
+            .expect("subscribe second stream");
+        let second_event = TuiBridgeEventFrame::new(
+            session_id,
+            second.token.bridge_instance_id,
+            1,
+            "agent_settled",
+            serde_json::json!({}),
+        );
+        harness
+            .publish_event_frame(
+                &serde_json::to_vec(&second_event).expect("second event"),
+                &second.token,
+            )
+            .expect("publish second event");
+        assert!(matches!(
+            second_receiver.recv().expect("second event received"),
+            PiEvent::Event { event_type, .. } if event_type == "agent_settled"
+        ));
         assert!(second.token.generation > first.token.generation);
         assert_ne!(second.token.claim_nonce, first.token.claim_nonce);
         assert!(matches!(
@@ -1132,6 +1429,90 @@ mod tests {
             Err(TuiBridgeError::FrameTooLarge)
         ));
         assert_eq!(TUI_BRIDGE_PROTOCOL_VERSION, 1);
+    }
+
+    #[test]
+    fn event_frames_are_bounded_sequenced_and_broadcast() {
+        let (workspace, registry, peer, session_id) = setup();
+        let harness = TuiBridgeHarness::new(Arc::clone(&registry));
+        let register = serde_json::to_vec(&TuiBridgeRegister::new(
+            session_id,
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("register frame");
+        let registration = harness
+            .register_frame(&register, &peer)
+            .expect("register owner");
+        let receiver = registry.subscribe(session_id).expect("subscribe events");
+        let event = TuiBridgeEventFrame::new(
+            session_id,
+            registration.token.bridge_instance_id,
+            1,
+            "agent_start",
+            serde_json::json!({}),
+        );
+        let frame = serde_json::to_vec(&event).expect("event frame");
+        assert_eq!(
+            harness
+                .publish_event_frame(&frame, &registration.token)
+                .expect("publish event"),
+            1
+        );
+        assert!(matches!(
+            receiver.recv().expect("event"),
+            PiEvent::Event { event_type, .. } if event_type == "agent_start"
+        ));
+        assert!(matches!(
+            harness.publish_event_frame(&frame, &registration.token),
+            Err(TuiBridgeError::EventSequence(id)) if id == session_id
+        ));
+        let wrong_session = TuiBridgeEventFrame::new(
+            SessionId::new(),
+            registration.token.bridge_instance_id,
+            2,
+            "agent_start",
+            serde_json::json!({}),
+        );
+        let wrong_frame = serde_json::to_vec(&wrong_session).expect("wrong event frame");
+        assert!(matches!(
+            harness.publish_event_frame(&wrong_frame, &registration.token),
+            Err(TuiBridgeError::EventSessionMismatch(id)) if id == session_id
+        ));
+        let wrong_epoch = TuiBridgeEventFrame::new(
+            session_id,
+            Uuid::new_v4(),
+            2,
+            "agent_start",
+            serde_json::json!({}),
+        );
+        assert!(matches!(
+            harness.publish_event_frame(
+                &serde_json::to_vec(&wrong_epoch).expect("wrong epoch frame"),
+                &registration.token,
+            ),
+            Err(TuiBridgeError::EventStreamEpochMismatch(id)) if id == session_id
+        ));
+        harness.disconnect(&registration.token).expect("disconnect");
+        assert!(matches!(
+            receiver.recv().expect("closed event"),
+            PiEvent::Closed
+        ));
+    }
+
+    #[test]
+    fn event_decoder_rejects_non_object_payload() {
+        let event = TuiBridgeEventFrame::new(
+            SessionId::new(),
+            Uuid::new_v4(),
+            1,
+            "agent_start",
+            serde_json::json!("not-an-object"),
+        );
+        assert!(matches!(
+            decode_event_frame(&serde_json::to_vec(&event).expect("event frame")),
+            Err(TuiBridgeError::InvalidEventPayload)
+        ));
     }
 
     #[cfg(unix)]

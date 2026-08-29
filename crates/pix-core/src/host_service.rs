@@ -29,7 +29,7 @@ use crate::secure_connection::{
 use crate::session_lock::SessionId;
 use crate::tui_bridge::{
     TuiBridgeError, TuiBridgeRegisterResponse, TuiBridgeToken, TuiBridgeUnixSocket,
-    encode_register_response,
+    decode_event_frame, encode_register_response,
 };
 use pix_wire::{NoiseHandshake, NoisePattern, WireError};
 
@@ -677,25 +677,53 @@ fn tui_bridge_connection_loop(
         let _ = registry.disconnect(token);
         return;
     }
-    // Event/command frames are intentionally not interpreted in this phase.
-    // Read and discard bounded chunks so a connected extension cannot grow a
-    // host-side buffer while the future TUI runtime adapter is developed.
-    let mut scratch = [0_u8; 4096];
+    let mut reader = TuiBridgeFrameReader::default();
     while !stop.load(Ordering::Acquire) {
-        match stream.read(&mut scratch) {
-            Ok(0) => {
-                let _ = registry.disconnect(token);
-                break;
+        let Ok(Some(frame)) = reader.next(&mut stream) else {
+            let _ = registry.disconnect(token);
+            break;
+        };
+        let Ok(event) = decode_event_frame(&frame) else {
+            let _ = registry.disconnect(token);
+            break;
+        };
+        if registry.publish_event(token, &event).is_err() {
+            let _ = registry.disconnect(token);
+            break;
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct TuiBridgeFrameReader {
+    pending: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl TuiBridgeFrameReader {
+    fn next(
+        &mut self,
+        stream: &mut std::os::unix::net::UnixStream,
+    ) -> Result<Option<Vec<u8>>, TuiBridgeError> {
+        loop {
+            if let Some(position) = self.pending.iter().position(|byte| *byte == b'\n') {
+                return Ok(Some(self.pending.drain(..=position).collect()));
             }
-            Ok(_) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => {
-                let _ = registry.disconnect(token);
-                break;
+            if self.pending.len() > crate::tui_bridge::TUI_BRIDGE_MAX_FRAME_BYTES {
+                return Err(TuiBridgeError::FrameTooLarge);
+            }
+            let mut chunk = [0_u8; 4096];
+            match stream.read(&mut chunk) {
+                Ok(0) if self.pending.is_empty() => return Ok(None),
+                Ok(0) => return Err(TuiBridgeError::MalformedFrame),
+                Ok(count) => self.pending.extend_from_slice(&chunk[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(TuiBridgeError::Io(error)),
             }
         }
     }

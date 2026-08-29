@@ -282,6 +282,14 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(managed) = runtimes.get_mut(&session_id) else {
             drop(runtimes);
+            if self
+                .tui_bridge
+                .owner(session_id)
+                .is_some_and(|owner| owner.state == TuiBridgeConnectionState::Attached)
+            {
+                self.tui_bridge.attach_client(session_id)?;
+                return Ok(());
+            }
             return Err(self.tui_owner_error(session_id));
         };
         managed.client_count = managed.client_count.saturating_add(1);
@@ -370,6 +378,12 @@ impl RuntimeManager {
         &self,
         session_id: SessionId,
     ) -> Result<mpsc::Receiver<PiEvent>, RuntimeManagerError> {
+        if let Some(owner) = self.tui_bridge.owner(session_id) {
+            if owner.state != TuiBridgeConnectionState::Attached {
+                return Err(self.tui_owner_error(session_id));
+            }
+            return Ok(self.tui_bridge.subscribe(session_id)?);
+        }
         Ok(self.active_runtime(session_id)?.rpc().subscribe())
     }
 
@@ -432,6 +446,14 @@ impl RuntimeManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(managed) = runtimes.get_mut(&session_id) else {
             drop(runtimes);
+            if self
+                .tui_bridge
+                .owner(session_id)
+                .is_some_and(|owner| owner.state == TuiBridgeConnectionState::Attached)
+            {
+                self.tui_bridge.detach_client(session_id)?;
+                return Ok(());
+            }
             return Err(self.tui_owner_error(session_id));
         };
         if managed.client_count == 0 {

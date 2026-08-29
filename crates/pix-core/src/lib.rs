@@ -69,8 +69,8 @@ pub use session_lock::{
 pub use tui_bridge::TuiBridgeUnixSocket;
 pub use tui_bridge::{
     TUI_BRIDGE_MAX_FRAME_BYTES, TUI_BRIDGE_PROTOCOL_VERSION, TuiBridgeConnectionState,
-    TuiBridgeError, TuiBridgeHarness, TuiBridgeOwnerSnapshot, TuiBridgePeer, TuiBridgeRegister,
-    TuiBridgeRegisterResponse, TuiBridgeRegistration, TuiBridgeRegistry, TuiBridgeToken,
-    decode_register_frame, encode_register_response, owner_uid,
+    TuiBridgeError, TuiBridgeEventFrame, TuiBridgeHarness, TuiBridgeOwnerSnapshot, TuiBridgePeer,
+    TuiBridgeRegister, TuiBridgeRegisterResponse, TuiBridgeRegistration, TuiBridgeRegistry,
+    TuiBridgeToken, decode_event_frame, decode_register_frame, encode_register_response, owner_uid,
 };
 pub use workspace::WorkspaceRegistry;
