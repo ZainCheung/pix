@@ -61,6 +61,14 @@ impl HostServiceStatus {
             .join("host-events.sock")
     }
 
+    pub fn tui_bridge_socket_path_for(config_path: &Path) -> PathBuf {
+        config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("run")
+            .join("tui-bridge.sock")
+    }
+
     /// Writes a new status file atomically.
     ///
     /// # Errors

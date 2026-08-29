@@ -6,7 +6,7 @@
 //! protocol payloads never cross this boundary.
 
 use std::collections::HashMap;
-use std::io;
+use std::io::{self, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
@@ -27,11 +27,17 @@ use crate::secure_connection::{
     AuthenticatedConnection, PendingPairingConnection, SecureConnectionError,
 };
 use crate::session_lock::SessionId;
+use crate::tui_bridge::{
+    TuiBridgeError, TuiBridgeRegisterResponse, TuiBridgeToken, TuiBridgeUnixSocket,
+    encode_register_response,
+};
 use pix_wire::{NoiseHandshake, NoisePattern, WireError};
 
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+const TUI_ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const TUI_CONNECTION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A privacy-bounded view of a device waiting for host approval.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +111,8 @@ pub struct HostServiceHandle {
     events: mpsc::Receiver<HostServiceEvent>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    tui_stop: Arc<AtomicBool>,
+    tui_thread: Option<JoinHandle<()>>,
 }
 
 impl HostServiceHandle {
@@ -313,7 +321,11 @@ impl HostServiceHandle {
     /// Requests service shutdown and waits for its accept loop to exit.
     pub fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
+        self.tui_stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        if let Some(thread) = self.tui_thread.take() {
             let _ = thread.join();
         }
         let pending = self
@@ -360,6 +372,33 @@ impl HostService {
             coordinator,
             host_state,
             runtimes,
+            None,
+        )
+    }
+
+    /// Starts the Bonjour-advertised endpoint together with the optional
+    /// host-local TUI bridge socket.  The socket is intentionally separate
+    /// from the encrypted `pix-wire` listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostServiceError`] if either listener cannot be started.
+    #[cfg(unix)]
+    pub fn start_with_tui_socket(
+        endpoint: LanEndpoint,
+        host_private_key: Vec<u8>,
+        coordinator: Arc<PairingCoordinator>,
+        host_state: Arc<HostState>,
+        runtimes: Arc<RuntimeManager>,
+        tui_socket: TuiBridgeUnixSocket,
+    ) -> Result<HostServiceHandle, HostServiceError> {
+        Self::start_listener(
+            ServiceListener::Lan(endpoint),
+            host_private_key,
+            coordinator,
+            host_state,
+            runtimes,
+            Some(tui_socket),
         )
     }
 
@@ -383,6 +422,32 @@ impl HostService {
             coordinator,
             host_state,
             runtimes,
+            None,
+        )
+    }
+
+    /// Starts a direct test listener together with a host-local TUI bridge
+    /// socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HostServiceError`] if either listener cannot be started.
+    #[cfg(unix)]
+    pub fn start_direct_with_tui_socket(
+        listener: DirectTcpListener,
+        host_private_key: Vec<u8>,
+        coordinator: Arc<PairingCoordinator>,
+        host_state: Arc<HostState>,
+        runtimes: Arc<RuntimeManager>,
+        tui_socket: TuiBridgeUnixSocket,
+    ) -> Result<HostServiceHandle, HostServiceError> {
+        Self::start_listener(
+            ServiceListener::Direct(listener),
+            host_private_key,
+            coordinator,
+            host_state,
+            runtimes,
+            Some(tui_socket),
         )
     }
 
@@ -392,6 +457,7 @@ impl HostService {
         coordinator: Arc<PairingCoordinator>,
         host_state: Arc<HostState>,
         runtimes: Arc<RuntimeManager>,
+        tui_socket: Option<TuiBridgeUnixSocket>,
     ) -> Result<HostServiceHandle, HostServiceError> {
         NoiseHandshake::responder(NoisePattern::PairingXx, &host_private_key)?;
         listener.set_nonblocking(true)?;
@@ -412,11 +478,38 @@ impl HostService {
             .name("pix-host-accept".to_owned())
             .spawn(move || accept_loop(&listener, &thread_shared, &thread_stop))
             .map_err(HostServiceError::Spawn)?;
+        let tui_stop = Arc::new(AtomicBool::new(false));
+        #[cfg(unix)]
+        let tui_thread = if let Some(tui_socket) = tui_socket {
+            let tui_shared = Arc::clone(&shared);
+            let tui_stop_for_thread = Arc::clone(&tui_stop);
+            match thread::Builder::new()
+                .name("pix-tui-bridge-accept".to_owned())
+                .spawn(move || {
+                    tui_bridge_accept_loop(tui_socket, &tui_shared, &tui_stop_for_thread);
+                }) {
+                Ok(thread) => Some(thread),
+                Err(error) => {
+                    stop.store(true, Ordering::Release);
+                    let _ = thread.join();
+                    return Err(HostServiceError::Spawn(error));
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let tui_thread = {
+            let _ = tui_socket;
+            None
+        };
         Ok(HostServiceHandle {
             shared,
             events: events_rx,
             stop,
             thread: Some(thread),
+            tui_stop,
+            tui_thread,
         })
     }
 }
@@ -490,6 +583,135 @@ fn accept_loop(
             }
             Err(_) => break,
         }
+    }
+}
+
+#[cfg(unix)]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "The listener's owned socket must be dropped with its accept thread."
+)]
+fn tui_bridge_accept_loop(
+    listener: TuiBridgeUnixSocket,
+    shared: &Arc<HostServiceShared>,
+    stop: &Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Acquire) {
+        match listener.try_accept_register() {
+            Ok(Some((peer, request, stream))) => {
+                let connection_shared = Arc::clone(shared);
+                let connection_stop = Arc::clone(stop);
+                let _ = thread::Builder::new()
+                    .name("pix-tui-bridge-connection".to_owned())
+                    .spawn(move || {
+                        handle_tui_bridge_connection(
+                            &peer,
+                            request,
+                            stream,
+                            &connection_shared,
+                            &connection_stop,
+                        );
+                    });
+            }
+            Ok(None) | Err(_) => {
+                // A malformed or short-lived local client must not stop the host.
+                // The listener remains available for the next REGISTER attempt.
+                thread::sleep(TUI_ACCEPT_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn handle_tui_bridge_connection(
+    peer: &crate::tui_bridge::TuiBridgePeer,
+    request: crate::tui_bridge::TuiBridgeRegister,
+    mut stream: std::os::unix::net::UnixStream,
+    shared: &Arc<HostServiceShared>,
+    stop: &Arc<AtomicBool>,
+) {
+    let registry = shared.runtimes.tui_bridge();
+    let registration = match registry.register(&request, peer) {
+        Ok(registration) => registration,
+        Err(error) => {
+            let response = TuiBridgeRegisterResponse::denied(
+                request.session_id,
+                tui_bridge_error_code(&error),
+            );
+            let _ = write_tui_bridge_response(&mut stream, &response);
+            return;
+        }
+    };
+    let response = TuiBridgeRegisterResponse::granted(&registration);
+    if write_tui_bridge_response(&mut stream, &response).is_err() {
+        let _ = registry.disconnect(&registration.token);
+        return;
+    }
+    tui_bridge_connection_loop(stream, &registration.token, &registry, stop);
+}
+
+#[cfg(unix)]
+fn write_tui_bridge_response(
+    stream: &mut std::os::unix::net::UnixStream,
+    response: &TuiBridgeRegisterResponse,
+) -> Result<(), HostServiceError> {
+    stream
+        .set_write_timeout(Some(HANDSHAKE_TIMEOUT))
+        .map_err(HostServiceError::Io)?;
+    let frame = encode_register_response(response).map_err(HostServiceError::TuiBridgeEncode)?;
+    stream.write_all(&frame).map_err(HostServiceError::Io)?;
+    stream.flush().map_err(HostServiceError::Io)
+}
+
+#[cfg(unix)]
+fn tui_bridge_connection_loop(
+    mut stream: std::os::unix::net::UnixStream,
+    token: &TuiBridgeToken,
+    registry: &Arc<crate::tui_bridge::TuiBridgeRegistry>,
+    stop: &Arc<AtomicBool>,
+) {
+    if stream
+        .set_read_timeout(Some(TUI_CONNECTION_POLL_INTERVAL))
+        .is_err()
+    {
+        let _ = registry.disconnect(token);
+        return;
+    }
+    // Event/command frames are intentionally not interpreted in this phase.
+    // Read and discard bounded chunks so a connected extension cannot grow a
+    // host-side buffer while the future TUI runtime adapter is developed.
+    let mut scratch = [0_u8; 4096];
+    while !stop.load(Ordering::Acquire) {
+        match stream.read(&mut scratch) {
+            Ok(0) => {
+                let _ = registry.disconnect(token);
+                break;
+            }
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => {
+                let _ = registry.disconnect(token);
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn tui_bridge_error_code(error: &TuiBridgeError) -> &'static str {
+    match error {
+        TuiBridgeError::UnsupportedVersion(_) => "unsupported_version",
+        TuiBridgeError::OwnerConflict(_) => "conflict",
+        TuiBridgeError::PeerUserMismatch { .. }
+        | TuiBridgeError::PeerProcessNotFound(_)
+        | TuiBridgeError::PeerIdentityMismatch(_)
+        | TuiBridgeError::WorkspaceNotAuthorized
+        | TuiBridgeError::SessionFileMismatch(_) => "unauthorized",
+        _ => "invalid_request",
     }
 }
 
@@ -657,6 +879,10 @@ pub enum HostServiceError {
     Pairing(#[from] PairingError),
     #[error(transparent)]
     Runtime(#[from] RuntimeManagerError),
+    #[error("failed to encode TUI bridge response: {0}")]
+    TuiBridgeEncode(serde_json::Error),
+    #[error("TUI bridge socket I/O failed: {0}")]
+    Io(io::Error),
     #[error("invalid session identifier: {0}")]
     InvalidSession(String),
     #[error("failed to start Pix host thread: {0}")]
