@@ -47,6 +47,11 @@ switch; a missing/unreachable bridge does not make Pi unusable as a standalone
 TUI. Session replacement and quit send an explicit `session_release` marker,
 whereas extension reload retains the lease for same-process reconnect.
 
+After a successful TUI claim, an unexpected bridge disconnect is retried in
+the background with bounded delays (1s, 2s, 5s, 10s, then a 30s cap). A TUI
+that started standalone because Host was unavailable never performs this late
+claim automatically; `/reload` is the explicit opt-in retry.
+
 ## Relay privacy
 
 The relay forwards only authenticated encrypted frames. It does not decrypt,

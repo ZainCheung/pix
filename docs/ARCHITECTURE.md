@@ -86,6 +86,11 @@ compact, fork, and shutdown remain intentionally unsupported for TUI owners.
 The v1 prompt path is text-only; host attachment references are rejected for a
 TUI owner until an image-content mapping is separately verified.
 
+After a TUI has successfully attached, a socket loss starts bounded background
+reconnect attempts (1s, 2s, 5s, 10s, then a 30s cap). A session that was
+standalone because the Host was absent is not late-bound automatically; the
+user can start the Host and use `/reload` when they explicitly want to attach.
+
 Session replacement has an explicit lifecycle boundary. Before Pi handles a
 `/resume`, the extension sends a bounded `preclaim` containing only the target
 session file. Host validates that the file is a discovered session in the

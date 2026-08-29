@@ -15,6 +15,7 @@ const BRIDGE_PROTOCOL_VERSION = 1;
 const BRIDGE_EXTENSION_VERSION = 1;
 const CLAIM_TIMEOUT_MS = 300;
 const PRECLAIM_TIMEOUT_MS = 500;
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
 const MAX_OUTGOING_BYTES = 8 * 1024 * 1024;
 const MAX_INCOMING_BYTES = 16 * 1024 * 1024;
 const MAX_COMMAND_TEXT_BYTES = 512 * 1024;
@@ -44,6 +45,12 @@ let activeTools = new Map();
 let commandInFlight = false;
 let pendingPreclaims = new Map();
 let reservedBridgeInstanceId;
+let everAttached = false;
+let reconnectTimer;
+let reconnectAttempt = 0;
+let reconnectInFlight = false;
+let lifecycleClosing = false;
+let lifecycleGeneration = 0;
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -79,9 +86,18 @@ function clearPendingPreclaims() {
 	pendingPreclaims.clear();
 }
 
+function cancelReconnect(resetAttempt = true) {
+	if (reconnectTimer) clearTimeout(reconnectTimer);
+	reconnectTimer = undefined;
+	if (resetAttempt) reconnectAttempt = 0;
+}
+
 function closeSocket(reason) {
 	const socket = activeSocket;
 	const preserveReservedBridge = reason === "resume" && reservedBridgeInstanceId;
+	lifecycleClosing = true;
+	lifecycleGeneration += 1;
+	cancelReconnect();
 	if (socket && active && reason && reason !== "reload" && !desynced) {
 		const releaseFrame = `${JSON.stringify({
 			version: BRIDGE_PROTOCOL_VERSION,
@@ -121,6 +137,43 @@ function closeSocket(reason) {
 	clearPendingPreclaims();
 	if (!preserveReservedBridge) reservedBridgeInstanceId = undefined;
 	if (socket) socket.end();
+}
+
+function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
+	if (
+		!everAttached ||
+		lifecycleClosing ||
+		active ||
+		reconnectTimer ||
+		reconnectInFlight ||
+		generation !== lifecycleGeneration
+	) return;
+	const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
+	reconnectAttempt = Math.min(reconnectAttempt + 1, RECONNECT_DELAYS_MS.length - 1);
+	ctx.ui.setStatus("pix-bridge", "reconnecting");
+	reconnectTimer = setTimeout(async () => {
+		reconnectTimer = undefined;
+		if (lifecycleClosing || active || generation !== lifecycleGeneration) return;
+		reconnectInFlight = true;
+		let result;
+		try {
+			result = await claim(pi, ctx, { reason: "reconnect" }, generation);
+		} catch {
+			result = { kind: "standalone" };
+		}
+		reconnectInFlight = false;
+		if (lifecycleClosing || generation !== lifecycleGeneration) return;
+		if (result.kind === "attached") {
+			reconnectAttempt = 0;
+			ctx.ui.setStatus("pix-bridge", "attached");
+			return;
+		}
+		if (result.kind === "conflict") {
+			ctx.ui.setStatus("pix-bridge", "conflict");
+			return;
+		}
+		scheduleReconnect(pi, ctx, generation);
+	}, delay);
 }
 
 function flushOutgoing() {
@@ -418,7 +471,7 @@ function handleRequest(request, ctx, pi) {
 		});
 }
 
-function claim(pi, ctx, event) {
+function claim(pi, ctx, event, generation = lifecycleGeneration) {
 	const payload = registerPayload(ctx, event);
 
 	return new Promise((resolveClaim) => {
@@ -476,6 +529,11 @@ function claim(pi, ctx, event) {
 				}
 				if (response.type !== "register_result") continue;
 				if (response.granted === true) {
+					if (lifecycleClosing || generation !== lifecycleGeneration) {
+						socket.destroy();
+						finish({ kind: "standalone" });
+						return;
+					}
 					activeSocket = socket;
 					activeSessionId = payload.sessionId;
 					activeStreamEpoch = response.bridgeInstanceId;
@@ -490,6 +548,8 @@ function claim(pi, ctx, event) {
 					inflightAssistant = undefined;
 					activeTools = new Map();
 					commandInFlight = false;
+					everAttached = true;
+					cancelReconnect();
 					socket.on("close", () => {
 						if (activeSocket === socket) {
 							activeSocket = undefined;
@@ -511,6 +571,9 @@ function claim(pi, ctx, event) {
 							// later, unrelated REGISTER attempt. The Host-side reservation is
 							// independently bounded and will expire if it is still present.
 							reservedBridgeInstanceId = undefined;
+							if (!lifecycleClosing && generation === lifecycleGeneration) {
+								scheduleReconnect(pi, ctx, generation);
+							}
 						}
 					});
 					finish({ kind: "attached", response });
@@ -529,7 +592,10 @@ export default function pixTuiBridge(pi) {
 	pi.on("session_start", async (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
-		const result = await claim(pi, ctx, event);
+		lifecycleClosing = false;
+		const generation = ++lifecycleGeneration;
+		cancelReconnect();
+		const result = await claim(pi, ctx, event, generation);
 		if (result.kind === "attached") {
 			ctx.ui.setStatus("pix-bridge", "attached");
 			return;
