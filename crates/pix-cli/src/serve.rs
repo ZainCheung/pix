@@ -127,7 +127,9 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     let _status_guard = HostServiceStatusGuard::create(store.path(), port)
         .context("writing host service status")?;
     drop(startup_config);
-    let environment = HostEnvironment::resolve_for("pi");
+    let pi_config_path = std::path::absolute(store.path()).context("resolving Pix config path")?;
+    let environment = HostEnvironment::resolve_for("pi")
+        .with_override("PIX_CONFIG", pi_config_path.as_os_str().to_owned());
     let executable = configured_pi_executable(&config, &environment);
     let pi_executable = executable.display().to_string();
     let runtime_manager = std::sync::Arc::new(

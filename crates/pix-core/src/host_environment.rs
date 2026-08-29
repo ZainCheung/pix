@@ -47,6 +47,9 @@ pub struct HostEnvironment {
     source: EnvironmentSource,
     /// Captured variables; `None` leaves the process environment untouched.
     variables: Option<Vec<(OsString, OsString)>>,
+    /// Explicit values that must be visible to spawned children even when the
+    /// source environment was captured from a login shell.
+    overrides: Vec<(OsString, OsString)>,
 }
 
 impl HostEnvironment {
@@ -83,6 +86,7 @@ impl HostEnvironment {
         Self {
             source: EnvironmentSource::Process,
             variables: None,
+            overrides: Vec::new(),
         }
     }
 
@@ -95,6 +99,7 @@ impl HostEnvironment {
                         shell: candidate.program,
                     },
                     variables: Some(variables),
+                    overrides: Vec::new(),
                 };
             }
         }
@@ -120,6 +125,9 @@ impl HostEnvironment {
     /// The `PATH` value this environment would give a spawned child.
     #[must_use]
     pub fn path(&self) -> Option<OsString> {
+        if let Some((_, value)) = self.overrides.iter().find(|(key, _)| key == "PATH") {
+            return Some(value.clone());
+        }
         match &self.variables {
             Some(variables) => variables
                 .iter()
@@ -143,6 +151,9 @@ impl HostEnvironment {
     /// honor the same `PI_CODING_AGENT_DIR` that a spawned Pi child sees.
     #[must_use]
     pub fn value(&self, name: &str) -> Option<OsString> {
+        if let Some((_, value)) = self.overrides.iter().find(|(key, _)| key == name) {
+            return Some(value.clone());
+        }
         match &self.variables {
             Some(variables) => variables
                 .iter()
@@ -174,6 +185,24 @@ impl HostEnvironment {
         command
     }
 
+    /// Adds or replaces one value for commands spawned with this environment.
+    ///
+    /// Overrides are applied only to child commands; they never mutate the
+    /// Pix process environment. This is used for per-host paths such as the
+    /// selected `PIX_CONFIG` file that a Pi extension must resolve after its
+    /// working directory changes to an authorized workspace.
+    #[must_use]
+    pub fn with_override(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        let name = name.into();
+        let value = value.into();
+        if let Some((_, existing)) = self.overrides.iter_mut().find(|(key, _)| key == &name) {
+            *existing = value;
+        } else {
+            self.overrides.push((name, value));
+        }
+        self
+    }
+
     /// Replaces the command's environment with the captured variables.
     /// Process-sourced environments leave the command inheriting as usual.
     ///
@@ -188,6 +217,7 @@ impl HostEnvironment {
             command.env_clear();
             command.envs(variables.iter().map(|(key, value)| (key, value)));
         }
+        command.envs(self.overrides.iter().map(|(key, value)| (key, value)));
         if let Some(path) = self.path_with_program_directory(&program) {
             command.env("PATH", path);
         }
@@ -210,6 +240,7 @@ impl HostEnvironment {
         Self {
             source: EnvironmentSource::LoginShell { shell },
             variables: Some(variables),
+            overrides: Vec::new(),
         }
     }
 }
@@ -229,6 +260,7 @@ impl fmt::Debug for HostEnvironment {
             .debug_struct("HostEnvironment")
             .field("source", &self.source)
             .field("variables", &self.variables.as_ref().map(Vec::len))
+            .field("overrides", &self.overrides.len())
             .finish()
     }
 }
@@ -608,6 +640,35 @@ mod tests {
         // The process environment always carries HOME; the capture does not,
         // which proves the child environment was replaced, not extended.
         assert!(!stdout.contains("HOME="));
+    }
+
+    #[test]
+    fn child_overrides_are_visible_without_mutating_the_process_environment() {
+        let environment = HostEnvironment::captured_for_tests(
+            PathBuf::from("/bin/zsh"),
+            vec![(
+                OsString::from("PIX_TEST_SENTINEL"),
+                OsString::from("captured"),
+            )],
+        )
+        .with_override("PIX_TEST_SENTINEL", "overridden")
+        .with_override("PIX_CONFIG", "/tmp/custom-pix/config.json");
+
+        assert_eq!(
+            environment.value("PIX_TEST_SENTINEL").as_deref(),
+            Some(OsStr::new("overridden"))
+        );
+        assert_eq!(
+            environment.value("PIX_CONFIG").as_deref(),
+            Some(OsStr::new("/tmp/custom-pix/config.json"))
+        );
+        let output = environment
+            .command("/usr/bin/env")
+            .output()
+            .expect("run env with child overrides");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("PIX_TEST_SENTINEL=overridden"));
+        assert!(stdout.contains("PIX_CONFIG=/tmp/custom-pix/config.json"));
     }
 
     #[test]
