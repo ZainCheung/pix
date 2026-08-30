@@ -69,12 +69,15 @@ frames. The relay is content-blind: it authenticates channel roles, forwards
 opaque binary frames, applies size/rate/connection limits, and stores no
 application payload.
 
-The optional Pi TUI bridge is a separate host-local NDJSON surface. Its Unix
-socket adapter obtains peer UID/PID from the operating system, rechecks the
-process start identity, and passes only those credentials into the ownership
-registry; REGISTER payloads never declare an owner PID. TUI owner records share
-the same session lock as Pix RPC, survive a Host disconnect, and appear to the
-runtime manager as an unavailable placeholder until the TUI reconnects. After
+The optional Pi TUI bridge is a separate host-local NDJSON surface. The Pi-side
+extension is distributed independently as the `@zaincheung/pix` package and is
+installed by Pi's package manager; Pix Host does not copy or replace Pi
+extensions. Its Unix socket adapter obtains peer UID/PID from the operating
+system, rechecks the process start identity, and passes only those credentials
+into the ownership registry; REGISTER payloads never declare an owner PID. TUI
+owner records share the same session lock as Pix RPC, survive a Host disconnect,
+and appear to the runtime manager as an unavailable placeholder until the TUI
+reconnects. After
 REGISTER, bounded sequenced event frames are mapped through the existing Pi
 compatibility adapter and can be forwarded to attached Pix clients. The bridge
 transport itself is not part of `pix-wire`; its snapshot cursor and partial

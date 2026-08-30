@@ -27,9 +27,10 @@ conversation store. Pix does not create a second message database.
 ## Optional TUI integration boundary
 
 The TUI integration uses Pi's official Extension API and a separate host-local
-Unix-socket protocol. Pix must not shadow, wrap, patch, or replace the user's
-`pi` executable. The host-local bridge is not a `pix-wire` version and never
-becomes a second conversation store.
+Unix-socket protocol. The Pi-side extension is an independent `@zaincheung/pix`
+package installed by Pi; Pix must not shadow, wrap, patch, or replace the
+user's `pi` executable. The host-local bridge is not a `pix-wire` version and
+never becomes a second conversation store.
 
 One session has one live writer. `PixRpc` and `PiTui` claims use the same
 durable session lock; a disconnected TUI retains its owner record and is
