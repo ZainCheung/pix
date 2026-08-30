@@ -500,15 +500,30 @@ impl TuiBridgeRegistry {
         let authorized_workspaces = authorized_workspaces
             .into_iter()
             .filter_map(|path| fs::canonicalize(path).ok())
-            .collect();
-        *self
-            .authorized_workspaces
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = authorized_workspaces;
+            .collect::<HashSet<_>>();
+        self.refresh_authorized_workspaces(&authorized_workspaces);
         *self
             .expected_peer_uid
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = expected_peer_uid;
+    }
+
+    /// Replaces the authorized workspace view without changing the expected
+    /// peer UID.  Host configuration refreshes use this narrower update so a
+    /// workspace added while the service is running becomes eligible for a
+    /// new REGISTER without reopening the ownership trust boundary.
+    ///
+    /// Paths are canonicalized defensively; entries that no longer resolve
+    /// are omitted from the live authorization view.
+    pub fn refresh_authorized_workspaces(&self, authorized_workspaces: &HashSet<PathBuf>) {
+        let authorized_workspaces = authorized_workspaces
+            .iter()
+            .filter_map(|path| fs::canonicalize(path).ok())
+            .collect::<HashSet<_>>();
+        *self
+            .authorized_workspaces
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = authorized_workspaces;
     }
 
     /// Claims one session for a peer whose credentials were obtained outside

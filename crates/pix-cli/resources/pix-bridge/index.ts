@@ -6,6 +6,7 @@
 // stall the interactive TUI.
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -51,6 +52,7 @@ let reconnectAttempt = 0;
 let reconnectInFlight = false;
 let lifecycleClosing = false;
 let lifecycleGeneration = 0;
+let pendingPersistenceClaim = false;
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -478,6 +480,7 @@ function handleRequest(request, ctx, pi) {
 
 function claim(pi, ctx, event, generation = lifecycleGeneration) {
 	const payload = registerPayload(ctx, event);
+	const missingSessionFile = Boolean(payload.sessionFile && !existsSync(payload.sessionFile));
 
 	return new Promise((resolveClaim) => {
 		const socket = createConnection({ path: bridgeSocketPath() });
@@ -589,7 +592,16 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 					// the optional bridge stays standalone and Pi remains usable.
 					finish({ kind: "conflict", response });
 				} else {
-					finish({ kind: "standalone", response });
+					finish({
+						kind: "standalone",
+						response,
+						// Pi creates the first JSONL file after its message_end
+						// extension callbacks have returned.  Remember this one
+						// specific fail-open case so agent_settled can retry after
+						// persistence, while an unavailable Host still remains
+						// standalone until an explicit /reload.
+						retryAfterPersistence: missingSessionFile && response.error === "unauthorized",
+					});
 				}
 				return;
 			}
@@ -608,6 +620,7 @@ export default function pixTuiBridge(pi) {
 		cancelReconnect();
 		const result = await claim(pi, ctx, event, generation);
 		if (result.kind === "attached") {
+			pendingPersistenceClaim = false;
 			ctx.ui.setStatus("pix-bridge", "attached");
 			return;
 		}
@@ -619,6 +632,7 @@ export default function pixTuiBridge(pi) {
 			ctx.shutdown();
 			return;
 		}
+		pendingPersistenceClaim = result.retryAfterPersistence === true;
 		ctx.ui.setStatus("pix-bridge", "standalone");
 	});
 
@@ -647,9 +661,38 @@ export default function pixTuiBridge(pi) {
 		agentRunning = true;
 		sendEvent("agent_start", {});
 	});
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", async (_event, ctx) => {
 		agentRunning = false;
 		sendEvent("agent_settled", {});
+		if (
+			!pendingPersistenceClaim ||
+			active ||
+			reconnectInFlight ||
+			lifecycleClosing ||
+			ctx.mode !== "tui"
+		) return;
+		pendingPersistenceClaim = false;
+		reconnectInFlight = true;
+		let result;
+		try {
+			result = await claim(pi, ctx, { reason: "session_persisted" }, lifecycleGeneration);
+		} catch {
+			result = { kind: "standalone" };
+		}
+		reconnectInFlight = false;
+		if (lifecycleClosing || ctx.mode !== "tui") return;
+		if (result.kind === "attached") {
+			ctx.ui.setStatus("pix-bridge", "attached");
+			return;
+		}
+		if (result.kind === "conflict") {
+			ctx.ui.notify(
+				"This session is currently active in Pix. Release the Pix-hosted runtime before continuing in Pi TUI.",
+				"warning",
+			);
+			ctx.ui.setStatus("pix-bridge", "conflict");
+			ctx.shutdown();
+		}
 	});
 	pi.on("message_start", (event) =>
 		sendEvent("message_start", { message: event.message }),

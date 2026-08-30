@@ -82,6 +82,107 @@ fn manager_setup() -> (
 }
 
 #[test]
+fn runtime_refresh_updates_tui_workspace_authorization() {
+    let (_fake_directory, workspace, _locks, manager, harness, peer, _session_id) = manager_setup();
+    let newly_authorized_workspace = tempdir().expect("new workspace");
+    let session_id = SessionId::new();
+    let frame = serde_json::to_vec(&TuiBridgeRegister::new(
+        session_id,
+        newly_authorized_workspace.path(),
+        uuid::Uuid::new_v4(),
+    ))
+    .expect("register frame");
+
+    assert!(matches!(
+        harness.register_frame(&frame, &peer),
+        Err(pix_core::TuiBridgeError::WorkspaceNotAuthorized)
+    ));
+
+    let authorized = [
+        workspace.path().to_path_buf(),
+        newly_authorized_workspace.path().to_path_buf(),
+    ]
+    .into_iter()
+    .collect();
+    manager
+        .release_outside_workspaces(&authorized)
+        .expect("refresh authorization");
+
+    let wrong_uid = if peer.uid == u32::MAX {
+        0
+    } else {
+        peer.uid + 1
+    };
+    let wrong_peer = TuiBridgePeer::new(wrong_uid, peer.process.clone());
+    assert!(matches!(
+        harness.register_frame(&frame, &wrong_peer),
+        Err(pix_core::TuiBridgeError::PeerUserMismatch { .. })
+    ));
+
+    let registration = harness
+        .register_frame(&frame, &peer)
+        .expect("register newly authorized workspace");
+    assert!(registration.provisional);
+    harness.release(&registration.token).expect("release TUI");
+}
+
+#[test]
+fn host_service_refreshes_tui_workspace_authorization() {
+    let (_fake_directory, workspace, _locks, manager, harness, peer, _session_id) = manager_setup();
+    let newly_authorized_workspace = tempdir().expect("new workspace");
+    let service_directory = tempdir().expect("service directory");
+    let config_path = service_directory.path().join("config.json");
+    let mut config = HostConfig::new("TUI workspace refresh host");
+    WorkspaceRegistry::new(&mut config)
+        .add(workspace.path(), Some("Initial".to_owned()))
+        .expect("authorize initial workspace");
+    let store = ConfigStore::new(config_path);
+    store.save(&config).expect("save initial config");
+    let coordinator = Arc::new(PairingCoordinator::new(store.clone()));
+    let host = generate_static_keypair().expect("host key");
+    let listener = DirectTcpListener::bind(0).expect("direct listener");
+    let socket_directory = tempdir().expect("bridge socket directory");
+    let socket_path = socket_directory.path().join("tui-bridge.sock");
+    let tui_socket = pix_core::TuiBridgeUnixSocket::bind(&socket_path).expect("bind bridge");
+    let mut service = HostService::start_direct_with_tui_socket(
+        listener,
+        host.private_key,
+        coordinator,
+        Arc::new(HostState::with_asset_root(
+            config,
+            workspace.path().join(".pix-attachments"),
+        )),
+        Arc::clone(&manager),
+        tui_socket,
+    )
+    .expect("start host service");
+
+    let mut updated = store.load().expect("load config for update");
+    WorkspaceRegistry::new(&mut updated)
+        .add(
+            newly_authorized_workspace.path(),
+            Some("Added while running".to_owned()),
+        )
+        .expect("authorize new workspace");
+    store.save(&updated).expect("save updated config");
+    let report = service.refresh_config().expect("refresh host config");
+    assert!(report.authorization_changed);
+
+    let frame = serde_json::to_vec(&TuiBridgeRegister::new(
+        SessionId::new(),
+        newly_authorized_workspace.path(),
+        uuid::Uuid::new_v4(),
+    ))
+    .expect("register frame");
+    let registration = harness
+        .register_frame(&frame, &peer)
+        .expect("register newly authorized workspace");
+    assert!(registration.provisional);
+    harness.release(&registration.token).expect("release TUI");
+    service.shutdown();
+}
+
+#[test]
 fn tui_placeholder_blocks_rpc_without_consuming_rpc_capacity() {
     let (_fake_directory, workspace, _locks, manager, harness, peer, session_id) = manager_setup();
     let frame = serde_json::to_vec(&TuiBridgeRegister::new(

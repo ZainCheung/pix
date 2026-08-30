@@ -49,8 +49,11 @@ whereas extension reload retains the lease for same-process reconnect.
 
 After a successful TUI claim, an unexpected bridge disconnect is retried in
 the background with bounded delays (1s, 2s, 5s, 10s, then a 30s cap). A TUI
-that started standalone because Host was unavailable never performs this late
-claim automatically; `/reload` is the explicit opt-in retry.
+that starts standalone because Host is reachable but its first session has not
+been persisted yet gets one bounded retry after `agent_settled`, when Pi has
+written the first JSONL entry. A TUI that started standalone because Host was
+unavailable never performs this late claim automatically; `/reload` is the
+explicit opt-in retry.
 
 ## Relay privacy
 

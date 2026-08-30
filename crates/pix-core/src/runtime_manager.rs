@@ -645,6 +645,7 @@ impl RuntimeManager {
         &self,
         authorized: &HashSet<PathBuf>,
     ) -> Result<Vec<SessionId>, RuntimeManagerError> {
+        self.tui_bridge.refresh_authorized_workspaces(authorized);
         self.tui_bridge
             .mark_unavailable_if_workspace_not_authorized(authorized);
         let session_ids = self

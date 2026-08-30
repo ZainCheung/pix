@@ -70,11 +70,10 @@ fn bridge_install_status_and_uninstall_are_integrity_checked() {
 
     let extension = home.path().join(".pi/agent/extensions/pix-bridge/index.ts");
     assert!(extension.is_file());
-    assert!(
-        fs::read_to_string(&extension)
-            .expect("read installed extension")
-            .contains("ownership handshake")
-    );
+    let extension_source = fs::read_to_string(&extension).expect("read installed extension");
+    assert!(extension_source.contains("ownership handshake"));
+    assert!(extension_source.contains("pendingPersistenceClaim"));
+    assert!(extension_source.contains("existsSync(payload.sessionFile)"));
 
     let repeat = run_pix(
         home.path(),
