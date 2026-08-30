@@ -13,7 +13,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 
 const BRIDGE_PROTOCOL_VERSION = 1;
-const BRIDGE_EXTENSION_VERSION = 2;
+const BRIDGE_EXTENSION_VERSION = 3;
 const CLAIM_TIMEOUT_MS = 300;
 const PRECLAIM_TIMEOUT_MS = 500;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
@@ -583,9 +583,13 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 								scheduleReconnect(pi, ctx, generation);
 							}
 						}
-					});
-					finish({ kind: "attached", response });
-				} else if (response.error === "conflict") {
+						});
+						finish({ kind: "attached", response });
+						// A Host writer may coalesce register_result with the first
+						// snapshot request. Keep draining this same data chunk so
+						// frames that follow the grant are not stranded in `buffer`.
+						continue;
+					} else if (response.error === "conflict") {
 					// A live owner conflict means this Pi process must not continue
 					// writing the session. Other denials (for example an
 					// unauthorized workspace or a stale session hint) are fail-open:

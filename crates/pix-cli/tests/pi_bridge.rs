@@ -74,6 +74,27 @@ fn bridge_install_status_and_uninstall_are_integrity_checked() {
     assert!(extension_source.contains("ownership handshake"));
     assert!(extension_source.contains("pendingPersistenceClaim"));
     assert!(extension_source.contains("existsSync(payload.sessionFile)"));
+    let grant = extension_source
+        .find("finish({ kind: \"attached\", response });")
+        .expect("attached result handler");
+    let grant_tail = &extension_source[grant..];
+    let coalesced_marker = "// A Host writer may coalesce register_result with the first";
+    let marker = grant_tail
+        .find(coalesced_marker)
+        .expect("coalesced frame guard");
+    let marker_tail = &grant_tail[marker..];
+    let continue_pos = marker_tail
+        .find("continue;")
+        .expect("coalesced frame continue");
+    let conflict_branch_pos = marker_tail
+        .find("} else if (response.error === \"conflict\")")
+        .expect("conflict branch after attached result");
+    assert!(
+        marker_tail.contains("snapshot request. Keep draining this same data chunk")
+            && marker_tail.contains("frames that follow the grant are not stranded")
+            && continue_pos < conflict_branch_pos,
+        "coalesced snapshot request must not be stranded after attachment"
+    );
 
     let repeat = run_pix(
         home.path(),
