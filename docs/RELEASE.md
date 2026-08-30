@@ -123,3 +123,22 @@ filter: set Build watch paths on the Worker to include `website/*` and exclude
 nothing, or a docs-only push to `main` will still deploy the site. The Worker
 root directory (`website/`) is the build working directory, not the watch
 filter. See [website/README.md](../website/README.md).
+
+## Pi package release
+
+The Pi TUI bridge is a separately versioned npm package:
+`@zaincheung/pix`. Its source and manifest live entirely under
+`packages/pix/`.
+
+`.github/workflows/publish-pix-package.yml` validates package changes in pull
+requests. It publishes only a push to `main` whose changed paths include
+`packages/pix/**`; changes to Rust, the Host, the app, documentation, or the
+workflow itself do not publish the npm package. The publish job also creates npm
+provenance metadata.
+
+Before enabling the workflow, configure the repository Actions secret
+`NPM_TOKEN` with a token that can publish the public `@zaincheung` scope. npm
+versions are immutable, so every package publication must bump the `version` in
+`packages/pix/package.json`. A package-only change that reuses an already
+published version intentionally fails the workflow instead of silently
+publishing stale contents.
