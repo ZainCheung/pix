@@ -228,21 +228,6 @@ enum PiCommand {
     Set { path: PathBuf },
     /// Forget the saved Pi executable and return to PATH discovery.
     Clear,
-    /// Install and inspect the optional Pi TUI bridge extension.
-    Bridge {
-        #[command(subcommand)]
-        command: PiBridgeCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub(crate) enum PiBridgeCommand {
-    /// Install or upgrade the Pix-managed Pi extension.
-    Install,
-    /// Remove the Pix-managed Pi extension when its integrity is intact.
-    Uninstall,
-    /// Show extension, Pi, host listener, and active TUI status.
-    Status,
 }
 
 #[derive(Debug, Subcommand)]

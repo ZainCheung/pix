@@ -1,0 +1,28 @@
+{
+  "name": "@zaincheung/pix",
+  "version": "0.1.1",
+  "description": "Pix bridge extension for the Pi coding agent.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "keywords": ["pi-package", "pi-extension"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZainCheung/pix.git",
+    "directory": "packages/pix"
+  },
+  "homepage": "https://github.com/ZainCheung/pix",
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "package.json"
+  ],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

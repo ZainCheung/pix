@@ -4,7 +4,6 @@
 
 pub(crate) mod device;
 pub(crate) mod pi;
-pub(crate) mod pi_bridge;
 pub(crate) mod relay;
 pub(crate) mod session;
 pub(crate) mod setup;
