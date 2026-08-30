@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool, mpsc};
 use std::time::{Duration, Instant};
 
+use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -570,7 +571,7 @@ impl TuiBridgeRegistry {
         {
             return Err(TuiBridgeError::OwnerConflict(session_id));
         }
-        let reserved = {
+        let mut reserved = {
             let mut preclaims = self
                 .preclaims
                 .lock()
@@ -583,6 +584,12 @@ impl TuiBridgeRegistry {
                 None => None,
             }
         };
+        if let Some(preclaim) = reserved.as_mut() {
+            preclaim
+                .lease
+                .clear_preclaim_expiry()
+                .map_err(TuiBridgeError::SessionLock)?;
+        }
         if let Some(mut previous) = owners.remove(&session_id) {
             if let Some(broker) = previous.broker.take() {
                 broker.close();
@@ -656,6 +663,69 @@ impl TuiBridgeRegistry {
                 (record.generation, record.claim_nonce)
             };
             let _ = preclaim.lease.release_external(generation, claim_nonce);
+        }
+
+        // A preclaim restored during Host startup is represented as an
+        // unreachable owner until the TUI reconnects.  Keep the durable TTL
+        // effective for that recovered in-memory owner as well.
+        let expired_owner_ids = {
+            let owners = self
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let now = Utc::now();
+            owners
+                .iter()
+                .filter(|(_, owner)| {
+                    owner
+                        .lease
+                        .record()
+                        .preclaim_expires_at
+                        .is_some_and(|expires_at| expires_at <= now)
+                })
+                .map(|(session_id, _)| *session_id)
+                .collect::<Vec<_>>()
+        };
+        for session_id in expired_owner_ids {
+            let mut owners = self
+                .owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(owner) = owners.get_mut(&session_id) else {
+                continue;
+            };
+            let Some(expires_at) = owner.lease.record().preclaim_expires_at else {
+                // The owner may have been replaced after the candidate scan;
+                // never let an old expiry snapshot release a fresh owner.
+                continue;
+            };
+            if expires_at > Utc::now() {
+                // The owner may have been replaced after the candidate scan;
+                // never let an old expiry snapshot release a fresh owner.
+                continue;
+            }
+            let (generation, claim_nonce) = {
+                let record = owner.lease.record();
+                (record.generation, record.claim_nonce)
+            };
+            if owner
+                .lease
+                .release_external(generation, claim_nonce)
+                .is_err()
+            {
+                // Keep the owner as a safety barrier if durable cleanup could
+                // not prove that this exact preclaim still owns the sidecar.
+                continue;
+            }
+            let Some(mut removed) = owners.remove(&session_id) else {
+                continue;
+            };
+            if let Some(broker) = removed.broker.take() {
+                broker.close();
+            }
+            for subscriber in removed.subscribers.drain(..) {
+                let _ = subscriber.send(PiEvent::Closed);
+            }
         }
     }
 
@@ -749,16 +819,23 @@ impl TuiBridgeRegistry {
                 error: Some("session_owned"),
             });
         }
-        let lease = match SessionLease::acquire_for_tui(
+        let expires_at = Utc::now() + ChronoDuration::seconds(5);
+        let lease = match SessionLease::acquire_for_tui_preclaim(
             &self.lock_directory,
             target.summary.id,
             &workspace,
             &owner_identity,
             bridge_instance_id,
+            expires_at,
         ) {
             Ok(lease) => lease,
             Err(
-                SessionLockError::AlreadyOwned { .. } | SessionLockError::AlreadyOwnedInProcess(_),
+                SessionLockError::AlreadyOwned { .. }
+                | SessionLockError::AlreadyOwnedInProcess(_)
+                | SessionLockError::UnknownWriter { .. }
+                | SessionLockError::ProcessInspection(_)
+                | SessionLockError::ProcessIdentityEncoding(_)
+                | SessionLockError::UnsupportedPlatform,
             ) => {
                 return Ok(TuiBridgePreclaimDecision {
                     allowed: false,
@@ -827,13 +904,24 @@ impl TuiBridgeRegistry {
             return Err(TuiBridgeError::OwnerNotLive(record.session_id));
         }
         let bridge_instance_id = record.bridge_instance_id.unwrap_or_else(Uuid::new_v4);
-        let lease = SessionLease::acquire_for_tui(
-            &self.lock_directory,
-            record.session_id,
-            &canonical_workspace,
-            &owner,
-            bridge_instance_id,
-        )
+        let lease = if let Some(expires_at) = record.preclaim_expires_at {
+            SessionLease::acquire_for_tui_preclaim(
+                &self.lock_directory,
+                record.session_id,
+                &canonical_workspace,
+                &owner,
+                bridge_instance_id,
+                expires_at,
+            )
+        } else {
+            SessionLease::acquire_for_tui(
+                &self.lock_directory,
+                record.session_id,
+                &canonical_workspace,
+                &owner,
+                bridge_instance_id,
+            )
+        }
         .map_err(TuiBridgeError::SessionLock)?;
         let token = token_from_lease(&lease);
         let registration = TuiBridgeRegistration {

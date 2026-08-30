@@ -66,10 +66,15 @@ impl PiRuntime {
             return Err(RuntimeError::WorkspaceNotDirectory(workspace));
         }
 
-        let mut lease = SessionLease::acquire_for_workspace(
+        let writer_reference = match &options.launch {
+            SessionLaunch::Create { id, .. } => Some(id.to_string()),
+            SessionLaunch::Existing { reference, .. } => Some(reference.clone()),
+        };
+        let mut lease = SessionLease::acquire_for_workspace_with_reference(
             &options.lock_directory,
             options.launch.id(),
             &workspace,
+            writer_reference,
         )?;
         let mut command = Command::new(executable);
         options.environment.apply(&mut command);

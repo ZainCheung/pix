@@ -85,7 +85,10 @@ function registerPayload(ctx, event) {
 		cwd: ctx.sessionManager.getCwd() || ctx.cwd,
 		reason: event.reason,
 		capabilities: ["ownership.v1", "events.v1", "snapshot.v1", "commands.v1"],
-		...(sessionFile ? { sessionFile } : {}),
+		// Pi may expose the eventual JSONL path before it has created the file.
+		// Do not send a non-existent hint: the Host can then perform its
+		// documented provisional claim instead of rejecting this first attach.
+		...(sessionFile && existsSync(sessionFile) ? { sessionFile } : {}),
 	};
 	return payload;
 }
@@ -151,9 +154,14 @@ function closeSocket(reason) {
 	if (socket) socket.end();
 }
 
-function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
+function scheduleReconnect(
+	pi,
+	ctx,
+	generation = lifecycleGeneration,
+	allowBeforeAttach = false,
+) {
 	if (
-		!everAttached ||
+		(!everAttached && !allowBeforeAttach) ||
 		lifecycleClosing ||
 		active ||
 		reconnectTimer ||
@@ -189,7 +197,9 @@ function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
 			ctx.shutdown();
 			return;
 		}
-		scheduleReconnect(pi, ctx, generation);
+		if (everAttached || (allowBeforeAttach && result.retryAfterTimeout === true)) {
+			scheduleReconnect(pi, ctx, generation, allowBeforeAttach);
+		}
 	}, delay);
 }
 
@@ -490,13 +500,19 @@ function handleRequest(request, ctx, pi) {
 
 function claim(pi, ctx, event, generation = lifecycleGeneration) {
 	const payload = registerPayload(ctx, event);
-	const missingSessionFile = Boolean(payload.sessionFile && !existsSync(payload.sessionFile));
+	const sessionFile = ctx.sessionManager.getSessionFile();
+	const missingSessionFile = Boolean(sessionFile && !existsSync(sessionFile));
 
 	return new Promise((resolveClaim) => {
 		const socket = createConnection({ path: bridgeSocketPath() });
 		let buffer = "";
 		let settled = false;
 		let timer;
+		let connected = false;
+		const standaloneResult = () => ({
+			kind: "standalone",
+			retryAfterTimeout: connected,
+		});
 		const finish = (result) => {
 			if (settled) return;
 			settled = true;
@@ -505,9 +521,10 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 			resolveClaim(result);
 		};
 
-		timer = setTimeout(() => finish({ kind: "standalone" }), CLAIM_TIMEOUT_MS);
+		timer = setTimeout(() => finish(standaloneResult()), CLAIM_TIMEOUT_MS);
 		socket.setEncoding("utf8");
 		socket.on("connect", () => {
+			connected = true;
 			socket.write(`${JSON.stringify(payload)}\n`);
 		});
 		socket.on("data", (chunk) => {
@@ -526,7 +543,7 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 				try {
 					response = JSON.parse(line);
 				} catch {
-					finish({ kind: "standalone" });
+					finish(standaloneResult());
 					return;
 				}
 				if (response.type === "preclaim_result") {
@@ -549,7 +566,7 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 				if (response.granted === true) {
 					if (lifecycleClosing || generation !== lifecycleGeneration) {
 						socket.destroy();
-						finish({ kind: "standalone" });
+						finish(standaloneResult());
 						return;
 					}
 					activeSocket = socket;
@@ -593,13 +610,13 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 								scheduleReconnect(pi, ctx, generation);
 							}
 						}
-						});
-						finish({ kind: "attached", response });
-						// A Host writer may coalesce register_result with the first
-						// snapshot request. Keep draining this same data chunk so
-						// frames that follow the grant are not stranded in `buffer`.
-						continue;
-					} else if (response.error === "conflict") {
+					});
+					finish({ kind: "attached", response });
+					// A Host writer may coalesce register_result with the first
+					// snapshot request. Keep draining this same data chunk so
+					// frames that follow the grant are not stranded in `buffer`.
+					continue;
+				} else if (response.error === "conflict") {
 					// A live owner conflict means this Pi process must not continue
 					// writing the session. Other denials (for example an
 					// unauthorized workspace or a stale session hint) are fail-open:
@@ -620,8 +637,8 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 				return;
 			}
 		});
-		socket.on("error", () => finish({ kind: "standalone" }));
-		socket.on("close", () => finish({ kind: "standalone" }));
+		socket.on("error", () => finish(standaloneResult()));
+		socket.on("close", () => finish(standaloneResult()));
 	});
 }
 
@@ -648,11 +665,24 @@ export default function pixTuiBridge(pi) {
 			return;
 		}
 		pendingPersistenceClaim = result.retryAfterPersistence === true;
+		if (result.retryAfterTimeout === true) {
+			scheduleReconnect(pi, ctx, generation, true);
+		}
 		clearPixStatus(ctx);
 	});
 
 	pi.on("session_before_switch", async (event, ctx) => {
-		if (!active || event.reason !== "resume") return { cancel: false };
+		if (event.reason !== "resume") return { cancel: false };
+		if (!active) {
+			if (everAttached) {
+				ctx.ui.notify(
+					"Pix is reconnecting to this session; switching sessions is temporarily unavailable.",
+					"warning",
+				);
+				return { cancel: true };
+			}
+			return { cancel: false };
+		}
 		if (!event.targetSessionFile) {
 			ctx.ui.notify("The session switch could not be verified by Pix.", "warning");
 			return { cancel: true };
@@ -707,6 +737,10 @@ export default function pixTuiBridge(pi) {
 			);
 			clearPixStatus(ctx);
 			ctx.shutdown();
+			return;
+		}
+		if (result.retryAfterTimeout === true) {
+			scheduleReconnect(pi, ctx, lifecycleGeneration, true);
 		}
 	});
 	pi.on("message_start", (event) =>

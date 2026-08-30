@@ -646,16 +646,20 @@ fn handle_tui_bridge_connection(
     };
     let response = TuiBridgeRegisterResponse::granted(&registration);
     if write_tui_bridge_response(&mut stream, &response).is_err() {
-        let _ = registry.disconnect(&registration.token);
+        // The grant never reached the peer, so this registration was never a
+        // usable bridge.  Release it instead of converting it into an
+        // unreachable owner that can strand the session after a client-side
+        // registration timeout.
+        let _ = registry.release(&registration.token);
         return;
     }
     let Ok(writer_stream) = stream.try_clone() else {
-        let _ = registry.disconnect(&registration.token);
+        let _ = registry.release(&registration.token);
         return;
     };
     let (outbound, outbound_receiver) = mpsc::sync_channel(TUI_BRIDGE_OUTBOUND_QUEUE);
     let Ok(broker) = registry.bind_transport(&registration.token, outbound) else {
-        let _ = registry.disconnect(&registration.token);
+        let _ = registry.release(&registration.token);
         return;
     };
     let writer_broker = Arc::clone(&broker);
@@ -677,7 +681,7 @@ fn handle_tui_bridge_connection(
         .is_err()
     {
         broker.close();
-        let _ = registry.disconnect(&registration.token);
+        let _ = registry.release(&registration.token);
         return;
     }
     tui_bridge_connection_loop(stream, &registration.token, &registry, &broker, stop);
@@ -840,7 +844,10 @@ impl TuiBridgeFrameReader {
 fn tui_bridge_error_code(error: &TuiBridgeError) -> &'static str {
     match error {
         TuiBridgeError::UnsupportedVersion(_) => "unsupported_version",
-        TuiBridgeError::OwnerConflict(_) => "conflict",
+        // Any lock-layer failure is ownership-sensitive.  Keep the extension
+        // fail-closed so it cannot fall back to a standalone Pi runtime while
+        // the durable sidecar is uncertain.
+        TuiBridgeError::OwnerConflict(_) | TuiBridgeError::SessionLock(_) => "conflict",
         TuiBridgeError::PeerUserMismatch { .. }
         | TuiBridgeError::PeerProcessNotFound(_)
         | TuiBridgeError::PeerIdentityMismatch(_)

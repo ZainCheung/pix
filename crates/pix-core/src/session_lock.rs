@@ -110,6 +110,11 @@ pub struct SessionLockRecord {
     pub owner_process_start_identity: String,
     pub writer_pid: Option<u32>,
     pub writer_process_start_identity: Option<String>,
+    /// Session argument used to identify the Pi RPC child during recovery.
+    /// Older records omit this field and remain conservatively blocked when
+    /// the writer PID was never persisted.
+    #[serde(default)]
+    pub writer_reference: Option<String>,
     pub lease_holder_pid: u32,
     pub lease_holder_process_start_identity: String,
     pub bridge_instance_id: Option<Uuid>,
@@ -117,15 +122,21 @@ pub struct SessionLockRecord {
     pub claim_nonce: Uuid,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Durable expiry for a TUI preclaim.  A preclaim may outlive a Host
+    /// process, but never beyond this timestamp.
+    #[serde(default)]
+    pub preclaim_expires_at: Option<DateTime<Utc>>,
 }
 
 impl SessionLockRecord {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         owner_kind: SessionOwnerKind,
         session_id: SessionId,
         workspace_fingerprint: Option<String>,
         owner: &ProcessIdentity,
         writer: Option<&ProcessIdentity>,
+        writer_reference: Option<String>,
         bridge_instance_id: Option<Uuid>,
         lease_holder: &ProcessIdentity,
     ) -> Self {
@@ -140,6 +151,7 @@ impl SessionLockRecord {
             writer_pid: writer.map(|identity| identity.pid),
             writer_process_start_identity: writer
                 .map(|identity| identity.process_start_identity.clone()),
+            writer_reference,
             lease_holder_pid: lease_holder.pid,
             lease_holder_process_start_identity: lease_holder.process_start_identity.clone(),
             bridge_instance_id,
@@ -147,6 +159,7 @@ impl SessionLockRecord {
             claim_nonce: Uuid::new_v4(),
             created_at: now,
             updated_at: now,
+            preclaim_expires_at: None,
         }
     }
 
@@ -160,6 +173,7 @@ impl SessionLockRecord {
             owner_process_start_identity: legacy.process_start_identity.clone(),
             writer_pid: None,
             writer_process_start_identity: None,
+            writer_reference: None,
             lease_holder_pid: legacy.pid,
             lease_holder_process_start_identity: legacy.process_start_identity,
             bridge_instance_id: None,
@@ -167,6 +181,7 @@ impl SessionLockRecord {
             claim_nonce: Uuid::nil(),
             created_at: legacy.created_at,
             updated_at: legacy.created_at,
+            preclaim_expires_at: None,
         }
     }
 }
@@ -296,6 +311,20 @@ impl SessionLockStore {
             let lock_path = lock_path_for_owner_path(&owner_path);
             match read_record_path(&owner_path) {
                 Ok(record) => {
+                    // Preclaims carry their own wall-clock expiry so an
+                    // abrupt Host exit cannot strand the destination session
+                    // indefinitely.  Check this before workspace
+                    // authorization: an expired reservation is safe to clear
+                    // even if the workspace was removed from the live auth
+                    // configuration.
+                    if preclaim_expired(&record) {
+                        if clear_expired_preclaim_record(&lock_path, &owner_path, &record)? {
+                            recovery.stale_cleared = recovery.stale_cleared.saturating_add(1);
+                        } else {
+                            recovery.blocked = recovery.blocked.saturating_add(1);
+                        }
+                        continue;
+                    }
                     if !workspace_is_authorized(&record, authorized_workspace_fingerprints) {
                         recovery.owners.push(RecoveredSessionOwner {
                             record,
@@ -428,6 +457,7 @@ impl SessionLease {
             None,
             &owner,
             None,
+            Some(session_id.to_string()),
             None,
             &host,
         );
@@ -446,6 +476,29 @@ impl SessionLease {
         session_id: SessionId,
         workspace: &Path,
     ) -> Result<Self, SessionLockError> {
+        Self::acquire_for_workspace_with_reference(
+            lock_directory,
+            session_id,
+            workspace,
+            Some(session_id.to_string()),
+        )
+    }
+
+    /// Claims a session while also recording the Pi session argument used by
+    /// the RPC child.  The reference lets Host recovery perform a conservative
+    /// process census when the writer PID update was interrupted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionLockError`] when the workspace cannot be fingerprinted,
+    /// the process identity cannot be read, the session is already owned, or
+    /// the lock state cannot be updated.
+    pub fn acquire_for_workspace_with_reference(
+        lock_directory: &Path,
+        session_id: SessionId,
+        workspace: &Path,
+        writer_reference: Option<String>,
+    ) -> Result<Self, SessionLockError> {
         let owner = ProcessIdentity::current()?;
         let host = owner.clone();
         let record = SessionLockRecord::new(
@@ -454,6 +507,7 @@ impl SessionLease {
             Some(workspace_fingerprint(workspace)?),
             &owner,
             None,
+            writer_reference,
             None,
             &host,
         );
@@ -481,9 +535,35 @@ impl SessionLease {
             Some(workspace_fingerprint(workspace)?),
             owner,
             None,
+            None,
             Some(bridge_instance_id),
             &host,
         );
+        Self::acquire_record(lock_directory, &record, false)
+    }
+
+    /// Claims a destination session for a TUI preclaim whose reservation
+    /// remains recoverable for the supplied wall-clock TTL.
+    pub(crate) fn acquire_for_tui_preclaim(
+        lock_directory: &Path,
+        session_id: SessionId,
+        workspace: &Path,
+        owner: &ProcessIdentity,
+        bridge_instance_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, SessionLockError> {
+        let host = ProcessIdentity::current()?;
+        let mut record = SessionLockRecord::new(
+            SessionOwnerKind::PiTui,
+            session_id,
+            Some(workspace_fingerprint(workspace)?),
+            owner,
+            None,
+            None,
+            Some(bridge_instance_id),
+            &host,
+        );
+        record.preclaim_expires_at = Some(expires_at);
         Self::acquire_record(lock_directory, &record, false)
     }
 
@@ -537,45 +617,54 @@ impl SessionLease {
         }
 
         if let Some(existing) = read_existing_record(&mut file, &lock_path, &owner_path)? {
-            match owner_liveness(&existing)? {
-                OwnerLiveness::Live => {
-                    if existing.owner_kind == SessionOwnerKind::PiTui
-                        && record.owner_kind == SessionOwnerKind::PiTui
-                        && existing.owner_pid == record.owner_pid
-                        && existing.owner_process_start_identity
-                            == record.owner_process_start_identity
-                        && existing.workspace_fingerprint == record.workspace_fingerprint
-                    {
-                        let mut replacement = record;
-                        replacement.generation = existing.generation.saturating_add(1);
-                        replacement.created_at = existing.created_at;
-                        replacement.updated_at = Utc::now();
-                        write_owner_record(&owner_path, &replacement)?;
-                        clear_legacy_record(&mut file, &lock_path)?;
-                        return Ok(Self {
-                            lock_path,
-                            owner_path,
-                            record: replacement,
-                            file,
-                            clear_on_drop,
-                            released: false,
+            if preclaim_expired(&existing) {
+                remove_owner_record(&mut file, &lock_path, &owner_path)?;
+            } else {
+                match owner_liveness(&existing)? {
+                    OwnerLiveness::Live => {
+                        if existing.owner_kind == SessionOwnerKind::PiTui
+                            && record.owner_kind == SessionOwnerKind::PiTui
+                            && existing.owner_pid == record.owner_pid
+                            && existing.owner_process_start_identity
+                                == record.owner_process_start_identity
+                            && existing.workspace_fingerprint == record.workspace_fingerprint
+                        {
+                            let mut replacement = record;
+                            replacement.generation = existing.generation.saturating_add(1);
+                            replacement.created_at = existing.created_at;
+                            replacement.updated_at = Utc::now();
+                            write_owner_record(&owner_path, &replacement)?;
+                            clear_legacy_record(&mut file, &lock_path)?;
+                            return Ok(Self {
+                                lock_path,
+                                owner_path,
+                                record: replacement,
+                                file,
+                                clear_on_drop,
+                                released: false,
+                            });
+                        }
+                        return Err(SessionLockError::AlreadyOwned {
+                            session_id: record.session_id,
+                            pid: existing.owner_pid,
+                            created_at: existing.created_at,
                         });
                     }
-                    return Err(SessionLockError::AlreadyOwned {
-                        session_id: record.session_id,
-                        pid: existing.owner_pid,
-                        created_at: existing.created_at,
-                    });
-                }
-                OwnerLiveness::UnknownWriter => {
-                    return Err(SessionLockError::UnknownWriter {
-                        session_id: record.session_id,
-                        pid: existing.owner_pid,
-                        path: owner_path,
-                    });
-                }
-                OwnerLiveness::Dead => {
-                    remove_owner_record(&mut file, &lock_path, &owner_path)?;
+                    OwnerLiveness::UnknownWriter => match rpc_writer_census(&existing)? {
+                        WriterCensus::NoMatch => {
+                            remove_owner_record(&mut file, &lock_path, &owner_path)?;
+                        }
+                        WriterCensus::Live | WriterCensus::Unknown => {
+                            return Err(SessionLockError::UnknownWriter {
+                                session_id: record.session_id,
+                                pid: existing.owner_pid,
+                                path: owner_path,
+                            });
+                        }
+                    },
+                    OwnerLiveness::Dead => {
+                        remove_owner_record(&mut file, &lock_path, &owner_path)?;
+                    }
                 }
             }
         }
@@ -606,6 +695,31 @@ impl SessionLease {
         }
         self.record.writer_pid = Some(writer.pid);
         self.record.writer_process_start_identity = Some(writer.process_start_identity);
+        self.record.updated_at = Utc::now();
+        write_owner_record(&self.owner_path, &self.record)
+    }
+
+    /// Consumes the durable preclaim marker when the TUI registers.  Clearing
+    /// it prevents the normal attached owner from being reaped by the
+    /// preclaim TTL after a Host restart.
+    pub(crate) fn clear_preclaim_expiry(&mut self) -> Result<(), SessionLockError> {
+        if self.record.owner_kind != SessionOwnerKind::PiTui {
+            return Err(SessionLockError::InvalidOperation(
+                "only PiTui leases can clear a preclaim expiry",
+            ));
+        }
+        if self.record.preclaim_expires_at.is_none() {
+            return Ok(());
+        }
+        if let Some(current) =
+            read_existing_record(&mut self.file, &self.lock_path, &self.owner_path)?
+            && !same_ownership_token(&current, &self.record)
+        {
+            return Err(SessionLockError::OwnershipTokenMismatch {
+                session_id: self.record.session_id,
+            });
+        }
+        self.record.preclaim_expires_at = None;
         self.record.updated_at = Utc::now();
         write_owner_record(&self.owner_path, &self.record)
     }
@@ -1001,7 +1115,37 @@ fn clear_stale_record(
     if current != *expected {
         return Ok(false);
     }
-    if !matches!(owner_liveness(&current)?, OwnerLiveness::Dead) {
+    if !matches!(recovery_state(&current)?, RecoveryDisposition::Stale) {
+        return Ok(false);
+    }
+    remove_owner_record(&mut file, lock_path, owner_path)?;
+    FileExt::unlock(&file).map_err(|source| SessionLockError::Io {
+        path: lock_path.to_path_buf(),
+        source,
+    })?;
+    Ok(true)
+}
+
+fn clear_expired_preclaim_record(
+    lock_path: &Path,
+    owner_path: &Path,
+    expected: &SessionLockRecord,
+) -> Result<bool, SessionLockError> {
+    let mut file = open_lock_file(lock_path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+        Err(source) => {
+            return Err(SessionLockError::Io {
+                path: lock_path.to_path_buf(),
+                source,
+            });
+        }
+    }
+    let Some(current) = read_existing_record(&mut file, lock_path, owner_path)? else {
+        return Ok(true);
+    };
+    if current != *expected || !preclaim_expired(&current) {
         return Ok(false);
     }
     remove_owner_record(&mut file, lock_path, owner_path)?;
@@ -1055,7 +1199,13 @@ fn recovery_state(record: &SessionLockRecord) -> Result<RecoveryDisposition, Ses
             Ok(RecoveryDisposition::Live(state))
         }
         OwnerLiveness::Dead => Ok(RecoveryDisposition::Stale),
-        OwnerLiveness::UnknownWriter => Ok(RecoveryDisposition::UnknownWriter),
+        OwnerLiveness::UnknownWriter => match rpc_writer_census(record)? {
+            WriterCensus::NoMatch => Ok(RecoveryDisposition::Stale),
+            WriterCensus::Live => Ok(RecoveryDisposition::Live(
+                SessionRecoveryState::RpcOrphanSuspect,
+            )),
+            WriterCensus::Unknown => Ok(RecoveryDisposition::UnknownWriter),
+        },
     }
 }
 
@@ -1064,6 +1214,89 @@ enum OwnerLiveness {
     Live,
     Dead,
     UnknownWriter,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterCensus {
+    NoMatch,
+    Live,
+    Unknown,
+}
+
+fn preclaim_expired(record: &SessionLockRecord) -> bool {
+    record.owner_kind == SessionOwnerKind::PiTui
+        && record
+            .preclaim_expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+}
+
+/// Looks for the RPC child using the exact session argument persisted in the
+/// v2 owner record.  A missing/ambiguous reference is intentionally treated as
+/// unknown rather than guessed from the workspace or process name; clearing an
+/// uncertain record could allow two writers to append to one JSONL session.
+#[cfg(unix)]
+fn rpc_writer_census(record: &SessionLockRecord) -> Result<WriterCensus, SessionLockError> {
+    let reference = record
+        .writer_reference
+        .as_deref()
+        .filter(|reference| !reference.trim().is_empty());
+    let output = Command::new("ps")
+        .args(["-ww", "-axo", "pid=,command="])
+        .output()
+        .map_err(SessionLockError::ProcessInspection)?;
+    if !output.status.success() {
+        return Ok(WriterCensus::Unknown);
+    }
+    let stdout =
+        String::from_utf8(output.stdout).map_err(SessionLockError::ProcessIdentityEncoding)?;
+    let session_id = record.session_id.to_string();
+    let session_id_flag = format!("--session-id {session_id}");
+    let session_id_equals_flag = format!("--session-id={session_id}");
+    let session_path_flag = reference.map(|reference| format!("--session {reference}"));
+    let session_path_equals_flag = reference.map(|reference| format!("--session={reference}"));
+    let current_pid = std::process::id();
+    for line in stdout.lines() {
+        let mut fields = line.trim_start().splitn(2, char::is_whitespace);
+        let Some(pid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid == current_pid {
+            continue;
+        }
+        let Some(command) = fields.next() else {
+            continue;
+        };
+        if !command.contains("--mode rpc") {
+            continue;
+        }
+        let matches_session = command.contains(&session_id_flag)
+            || command.contains(&session_id_equals_flag)
+            || session_path_flag
+                .as_deref()
+                .is_some_and(|flag| command.contains(flag))
+            || session_path_equals_flag
+                .as_deref()
+                .is_some_and(|flag| command.contains(flag))
+            || reference.is_some_and(|reference| {
+                command.contains("--session ") && command.contains(reference)
+            });
+        if matches_session {
+            return Ok(WriterCensus::Live);
+        }
+    }
+    Ok(if reference.is_some() {
+        WriterCensus::NoMatch
+    } else {
+        // Old v2 records did not persist the session argument.  A positive
+        // session-id match is still useful, but a zero match is not enough
+        // evidence to clear such a record safely.
+        WriterCensus::Unknown
+    })
+}
+
+#[cfg(not(unix))]
+fn rpc_writer_census(_record: &SessionLockRecord) -> Result<WriterCensus, SessionLockError> {
+    Ok(WriterCensus::Unknown)
 }
 
 fn owner_liveness(record: &SessionLockRecord) -> Result<OwnerLiveness, SessionLockError> {
@@ -1212,6 +1445,7 @@ mod tests {
     use fs2::FileExt;
     use serde_json::json;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     use super::{
         ProcessIdentity, SESSION_LOCK_RECORD_VERSION, SessionId, SessionLease, SessionLockError,
@@ -1592,6 +1826,90 @@ mod tests {
         assert_eq!(recovery.blocked(), 1);
         assert!(recovery.owners().is_empty());
         drop(lease);
+    }
+
+    #[test]
+    fn recovery_clears_an_expired_tui_preclaim() {
+        let directory = tempdir().expect("temporary directory");
+        let session_id = SessionId::new();
+        let owner = ProcessIdentity::current().expect("current identity");
+        let lease = SessionLease::acquire_for_tui_preclaim(
+            directory.path(),
+            session_id,
+            directory.path(),
+            &owner,
+            Uuid::new_v4(),
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .expect("expired preclaim");
+        let owner_path = lease.owner_path().to_path_buf();
+        let fingerprint = super::workspace_fingerprint(directory.path()).expect("fingerprint");
+        drop(lease);
+
+        let mut authorized = std::collections::HashSet::new();
+        authorized.insert(fingerprint);
+        let recovery = SessionLockStore::new(directory.path())
+            .recover(&authorized)
+            .expect("recover expired preclaim");
+        assert_eq!(recovery.stale_cleared(), 1);
+        assert!(recovery.owners().is_empty());
+        assert!(!owner_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_censuses_an_rpc_writer_when_its_pid_was_not_persisted() {
+        use std::process::Command;
+
+        let directory = tempdir().expect("temporary directory");
+        let session_id = SessionId::new();
+        let lease = SessionLease::acquire_for_workspace_with_reference(
+            directory.path(),
+            session_id,
+            directory.path(),
+            Some(session_id.to_string()),
+        )
+        .expect("RPC lease");
+        let mut record = lease.record().clone();
+        let owner_path = lease.owner_path().to_path_buf();
+        let fingerprint = super::workspace_fingerprint(directory.path()).expect("fingerprint");
+        drop(lease);
+        record.writer_pid = None;
+        record.writer_process_start_identity = None;
+        super::write_owner_record(&owner_path, &record).expect("rewrite pre-writer record");
+
+        let session_argument = session_id.to_string();
+        let mut child = Command::new("sh")
+            .args([
+                "-c",
+                "while true; do sleep 1; done",
+                "pix-rpc-census",
+                "--mode",
+                "rpc",
+                "--session-id",
+                &session_argument,
+            ])
+            .spawn()
+            .expect("spawn RPC census stand-in");
+        let mut authorized = std::collections::HashSet::new();
+        authorized.insert(fingerprint);
+        let recovery = SessionLockStore::new(directory.path())
+            .recover(&authorized)
+            .expect("recover live RPC stand-in");
+        assert_eq!(recovery.owners().len(), 1);
+        assert_eq!(
+            recovery.owners()[0].state,
+            SessionRecoveryState::RpcOrphanSuspect
+        );
+
+        child.kill().expect("kill RPC census stand-in");
+        child.wait().expect("wait RPC census stand-in");
+        let recovery = SessionLockStore::new(directory.path())
+            .recover(&authorized)
+            .expect("recover after RPC stand-in exits");
+        assert_eq!(recovery.stale_cleared(), 1);
+        assert!(recovery.owners().is_empty());
+        assert!(!owner_path.exists());
     }
 
     #[test]
