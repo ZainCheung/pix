@@ -18,7 +18,7 @@ use crate::commands::shared::home_directory;
 use crate::output::CommandOutput;
 use crate::status::{HostServiceStatus, request_control_rpc};
 
-const BRIDGE_EXTENSION_VERSION: u32 = 3;
+const BRIDGE_EXTENSION_VERSION: u32 = 4;
 const BRIDGE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BRIDGE_DIRECTORY: &str = "pix-bridge";
 const BRIDGE_FILENAME: &str = "index.ts";

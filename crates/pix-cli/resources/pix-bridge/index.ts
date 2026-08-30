@@ -13,7 +13,9 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 
 const BRIDGE_PROTOCOL_VERSION = 1;
-const BRIDGE_EXTENSION_VERSION = 3;
+const BRIDGE_EXTENSION_VERSION = 4;
+const PIX_BRIDGE_STATUS_KEY = "pix-bridge";
+const PIX_RUNNING_STATUS = "Pix running";
 const CLAIM_TIMEOUT_MS = 300;
 const PRECLAIM_TIMEOUT_MS = 500;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
@@ -53,6 +55,14 @@ let reconnectInFlight = false;
 let lifecycleClosing = false;
 let lifecycleGeneration = 0;
 let pendingPersistenceClaim = false;
+
+function clearPixStatus(ctx) {
+	ctx.ui.setStatus(PIX_BRIDGE_STATUS_KEY, undefined);
+}
+
+function setPixRunningStatus(ctx) {
+	ctx.ui.setStatus(PIX_BRIDGE_STATUS_KEY, PIX_RUNNING_STATUS);
+}
 
 function bridgeSocketPath() {
 	const configured = process.env.PIX_CONFIG;
@@ -152,7 +162,7 @@ function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
 	) return;
 	const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)];
 	reconnectAttempt = Math.min(reconnectAttempt + 1, RECONNECT_DELAYS_MS.length - 1);
-	ctx.ui.setStatus("pix-bridge", "reconnecting");
+	clearPixStatus(ctx);
 	reconnectTimer = setTimeout(async () => {
 		reconnectTimer = undefined;
 		if (lifecycleClosing || active || generation !== lifecycleGeneration) return;
@@ -167,7 +177,7 @@ function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
 		if (lifecycleClosing || generation !== lifecycleGeneration) return;
 		if (result.kind === "attached") {
 			reconnectAttempt = 0;
-			ctx.ui.setStatus("pix-bridge", "attached");
+			setPixRunningStatus(ctx);
 			return;
 		}
 		if (result.kind === "conflict") {
@@ -175,7 +185,7 @@ function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
 				"This session is currently active in Pix or another Pi TUI. The current Pi TUI will close to preserve single-writer ownership.",
 				"warning",
 			);
-			ctx.ui.setStatus("pix-bridge", "conflict");
+			clearPixStatus(ctx);
 			ctx.shutdown();
 			return;
 		}
@@ -619,13 +629,14 @@ export default function pixTuiBridge(pi) {
 	pi.on("session_start", async (event, ctx) => {
 		if (ctx.mode !== "tui") return;
 
+		clearPixStatus(ctx);
 		lifecycleClosing = false;
 		const generation = ++lifecycleGeneration;
 		cancelReconnect();
 		const result = await claim(pi, ctx, event, generation);
 		if (result.kind === "attached") {
 			pendingPersistenceClaim = false;
-			ctx.ui.setStatus("pix-bridge", "attached");
+			setPixRunningStatus(ctx);
 			return;
 		}
 		if (result.kind === "conflict") {
@@ -637,7 +648,7 @@ export default function pixTuiBridge(pi) {
 			return;
 		}
 		pendingPersistenceClaim = result.retryAfterPersistence === true;
-		ctx.ui.setStatus("pix-bridge", "standalone");
+		clearPixStatus(ctx);
 	});
 
 	pi.on("session_before_switch", async (event, ctx) => {
@@ -686,7 +697,7 @@ export default function pixTuiBridge(pi) {
 		reconnectInFlight = false;
 		if (lifecycleClosing || ctx.mode !== "tui") return;
 		if (result.kind === "attached") {
-			ctx.ui.setStatus("pix-bridge", "attached");
+			setPixRunningStatus(ctx);
 			return;
 		}
 		if (result.kind === "conflict") {
@@ -694,7 +705,7 @@ export default function pixTuiBridge(pi) {
 				"This session is currently active in Pix. Release the Pix-hosted runtime before continuing in Pi TUI.",
 				"warning",
 			);
-			ctx.ui.setStatus("pix-bridge", "conflict");
+			clearPixStatus(ctx);
 			ctx.shutdown();
 		}
 	});
@@ -759,7 +770,8 @@ export default function pixTuiBridge(pi) {
 		});
 	});
 
-	pi.on("session_shutdown", (event) => {
+	pi.on("session_shutdown", (event, ctx) => {
+		clearPixStatus(ctx);
 		closeSocket(event.reason);
 	});
 }

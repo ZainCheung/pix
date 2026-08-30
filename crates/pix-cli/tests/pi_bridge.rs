@@ -74,6 +74,12 @@ fn bridge_install_status_and_uninstall_are_integrity_checked() {
     assert!(extension_source.contains("ownership handshake"));
     assert!(extension_source.contains("pendingPersistenceClaim"));
     assert!(extension_source.contains("existsSync(payload.sessionFile)"));
+    assert!(extension_source.contains("const PIX_RUNNING_STATUS = \"Pix running\";"));
+    assert!(extension_source.contains("function clearPixStatus(ctx)"));
+    assert!(extension_source.contains("ctx.ui.setStatus(PIX_BRIDGE_STATUS_KEY, undefined);"));
+    assert!(!extension_source.contains("setStatus(\"pix-bridge\", \"standalone\")"));
+    assert!(!extension_source.contains("setStatus(\"pix-bridge\", \"attached\")"));
+    assert!(!extension_source.contains("setStatus(\"pix-bridge\", \"reconnecting\")"));
     let grant = extension_source
         .find("finish({ kind: \"attached\", response });")
         .expect("attached result handler");
