@@ -169,7 +169,12 @@ function scheduleReconnect(pi, ctx, generation = lifecycleGeneration) {
 			return;
 		}
 		if (result.kind === "conflict") {
+			ctx.ui.notify(
+				"This session is currently active in Pix or another Pi TUI. The current Pi TUI will close to preserve single-writer ownership.",
+				"warning",
+			);
 			ctx.ui.setStatus("pix-bridge", "conflict");
+			ctx.shutdown();
 			return;
 		}
 		scheduleReconnect(pi, ctx, generation);
