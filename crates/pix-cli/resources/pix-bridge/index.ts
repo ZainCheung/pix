@@ -577,8 +577,14 @@ function claim(pi, ctx, event, generation = lifecycleGeneration) {
 						}
 					});
 					finish({ kind: "attached", response });
-				} else {
+				} else if (response.error === "conflict") {
+					// A live owner conflict means this Pi process must not continue
+					// writing the session. Other denials (for example an
+					// unauthorized workspace or a stale session hint) are fail-open:
+					// the optional bridge stays standalone and Pi remains usable.
 					finish({ kind: "conflict", response });
+				} else {
+					finish({ kind: "standalone", response });
 				}
 				return;
 			}
