@@ -24,6 +24,7 @@ use crate::pi_rpc::{
 };
 use crate::runtime_manager::{RuntimeManager, RuntimeManagerError};
 use crate::session::{DiscoveredSession, PiSessionStore, SessionError, SessionMetadataIndex};
+use crate::session_history::{self, HistoryError};
 use crate::session_lock::SessionId;
 use crate::workspace::{WorkspaceError, WorkspaceRegistry};
 
@@ -43,6 +44,7 @@ const CAPABILITY_USAGE: &str = "usage.v1";
 const CAPABILITY_THINKING_LEVELS: &str = "thinking_levels.v1";
 const CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
 const CAPABILITY_IMAGE_REFS: &str = "image_refs.v1";
+const CAPABILITY_SESSION_HISTORY: &str = "session_history.v1";
 const SESSION_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(8);
 const RUNTIME_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -394,6 +396,15 @@ impl HostProtocolDispatcher {
             ClientRequest::SessionAttach { session_id } => {
                 Ok(vec![ready(self.attach_session(&session_id)?)])
             }
+            ClientRequest::SessionHistoryRequest {
+                session_id,
+                before,
+                limit,
+            } => Ok(vec![ready(self.session_history_page(
+                &session_id,
+                &before,
+                limit,
+            )?)]),
             ClientRequest::SessionRename { session_id, name } => {
                 let session_id = self.require_attached(&session_id)?;
                 self.runtimes
@@ -837,11 +848,45 @@ impl HostProtocolDispatcher {
     ) -> Result<ServerEvent, DispatchError> {
         self.ensure_device_authorized()?;
         self.ensure_active_session_authorized(session_id)?;
-        let snapshot = self
-            .runtimes
-            .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
-        let mut snapshot = pi_bridge::session_snapshot(session_id, snapshot)?;
-        if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+        let history_capability = self
+            .client_capabilities
+            .contains(CAPABILITY_SESSION_HISTORY);
+        let runtime_snapshot = if history_capability {
+            self.runtimes
+                .snapshot_state_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?
+        } else {
+            self.runtimes
+                .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?
+        };
+        let mut snapshot = pi_bridge::session_snapshot(session_id, runtime_snapshot)?;
+        if history_capability {
+            let mut page = if let Some(page) = self.read_history_page(session_id, None, 50)? {
+                page
+            } else {
+                // A brand-new Pi session may not have flushed its JSONL
+                // header yet. Fall back once to Pi's in-memory view so the
+                // create/first-prompt path remains immediately usable.
+                let full = self
+                    .runtimes
+                    .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+                let mut messages = full.messages;
+                if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                    self.host
+                        .image_assets()
+                        .externalize_messages(session_id, &mut messages)?;
+                }
+                session_history::initial_page(&session_id.to_string(), &messages)?
+            };
+            if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                self.host
+                    .image_assets()
+                    .externalize_messages(session_id, &mut page.messages)?;
+            }
+            let history = session_history::state(&page);
+            snapshot.messages = page.messages;
+            snapshot.history = Some(history);
+        }
+        if !history_capability && self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
             self.host
                 .image_assets()
                 .externalize_messages(session_id, &mut snapshot.messages)?;
@@ -862,6 +907,68 @@ impl HostProtocolDispatcher {
             self.enrich_legacy_snapshot(&mut snapshot, session_id);
         }
         Ok(ServerEvent::SessionSnapshot { snapshot })
+    }
+
+    /// Reads a bounded history page from the native Pi JSONL session file.
+    /// Returns `None` only for a new runtime whose file has not been flushed;
+    /// callers may then use Pi's in-memory compatibility path once.
+    fn read_history_page(
+        &self,
+        session_id: SessionId,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Option<pix_wire::SessionHistoryPage>, DispatchError> {
+        let workspace = self
+            .runtimes
+            .workspace(session_id)
+            .ok_or(DispatchError::SessionNotFound(session_id))?;
+        let store = PiSessionStore::for_workspace(&workspace)?;
+        let result = if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+            let assets = self.host.image_assets();
+            store.history_page_with_transform(session_id, cursor, limit, |mut message| {
+                assets.externalize_messages(session_id, std::slice::from_mut(&mut message))?;
+                Ok(message)
+            })
+        } else {
+            store.history_page(session_id, cursor, limit)
+        };
+        match result {
+            Ok(page) => Ok(Some(page)),
+            Err(SessionError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn session_history_page(
+        &mut self,
+        session_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> Result<ServerEvent, DispatchError> {
+        self.require_capability(CAPABILITY_SESSION_HISTORY)?;
+        let session_id = self.require_attached(session_id)?;
+        let mut page = if let Some(page) =
+            self.read_history_page(session_id, Some(before), limit)?
+        {
+            page
+        } else {
+            let snapshot = self
+                .runtimes
+                .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+            let mut messages = snapshot.messages;
+            if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                self.host
+                    .image_assets()
+                    .externalize_messages(session_id, &mut messages)?;
+            }
+            session_history::page_from_cursor(&session_id.to_string(), &messages, before, limit)?
+        };
+        if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+            self.host
+                .image_assets()
+                .externalize_messages(session_id, &mut page.messages)?;
+        }
+        Ok(ServerEvent::SessionHistoryPage { page })
     }
 
     fn enrich_legacy_snapshot(
@@ -1286,6 +1393,8 @@ pub enum DispatchError {
     Runtime(#[from] RuntimeManagerError),
     #[error(transparent)]
     PiBridge(#[from] PiBridgeError),
+    #[error(transparent)]
+    History(#[from] HistoryError),
 }
 
 impl DispatchError {
@@ -1344,6 +1453,21 @@ impl DispatchError {
             ) => (
                 ErrorCode::Conflict,
                 "Session state changed; attach again for a fresh snapshot",
+                true,
+            ),
+            Self::History(HistoryError::InvalidCursor | HistoryError::InvalidLimit) => (
+                ErrorCode::InvalidRequest,
+                "Session history cursor or page size is invalid",
+                false,
+            ),
+            Self::History(HistoryError::MessageTooLarge(_)) => (
+                ErrorCode::PiUnavailable,
+                "A session history message is too large to display",
+                false,
+            ),
+            Self::History(_) => (
+                ErrorCode::PiUnavailable,
+                "Session history is temporarily unavailable",
                 true,
             ),
             Self::Workspace(_) | Self::Session(_) | Self::Runtime(_) | Self::PiBridge(_) => (

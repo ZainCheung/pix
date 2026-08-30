@@ -104,6 +104,13 @@ session storage.
   a later unsolicited `session.metadata` event. Legacy clients keep the
   fields in the snapshot, but each optional probe has a short best-effort
   deadline so it cannot hold the connection indefinitely.
+- Clients declaring `session_history.v1` receive only a recent, byte-bounded
+  history window in `session.snapshot`. Older messages are read incrementally
+  from Pi's native JSONL source through opaque-cursor
+  `session.history.request`/`session.history.page` exchanges. The cursor fixes
+  a revision boundary so live Pi events can continue independently while a
+  reader pages toward the beginning; the 1 MiB encrypted-frame limit remains a
+  frame limit, not a session-size limit.
 
 ## Pi RPC coverage
 

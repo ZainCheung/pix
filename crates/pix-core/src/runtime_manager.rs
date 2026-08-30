@@ -342,6 +342,41 @@ impl RuntimeManager {
         Ok(snapshot)
     }
 
+    /// Reads only Pi's runtime state while leaving history to the Host's
+    /// bounded JSONL pager. This avoids asking Pi to serialize an unbounded
+    /// `session.messages` array for clients that negotiated history pages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when the session is inactive, busy, or
+    /// Pi does not return a valid state before the deadline.
+    pub fn snapshot_state_with_timeout(
+        &self,
+        session_id: SessionId,
+        timeout: Duration,
+    ) -> Result<SessionSnapshot, RuntimeManagerError> {
+        let (runtime, operation) = self.runtime_and_operation(session_id)?;
+        let _operation = try_lock_operation(&operation, session_id)?;
+        let snapshot =
+            SessionSnapshot::read_state(runtime.rpc(), timeout.min(self.options.request_timeout))?;
+        let mut runtimes = self
+            .runtimes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(managed) = runtimes.get_mut(&session_id) else {
+            return Err(RuntimeManagerError::NotActive(session_id));
+        };
+        managed.phase = phase_for_snapshot(snapshot.is_streaming, snapshot.is_compacting);
+        managed.completed = matches!(managed.phase, RuntimePhase::Idle);
+        let completed = managed.completed;
+        managed.last_used = Instant::now();
+        drop(runtimes);
+        if completed {
+            self.release_turn(session_id);
+        }
+        Ok(snapshot)
+    }
+
     /// Detaches one client without stopping an in-progress Pi task.
     ///
     /// # Errors

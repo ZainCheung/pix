@@ -10,7 +10,9 @@ use directories::BaseDirs;
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::image_assets::ImageAssetError;
 use crate::pi_rpc::{RpcClient, RpcError};
+use crate::session_history::{self, MessagePageBuilder};
 use crate::session_lock::SessionId;
 
 const MAX_SESSION_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -99,20 +101,36 @@ impl SessionSnapshot {
     /// Returns [`SessionError`] when RPC fails or Pi returns an incompatible
     /// state shape.
     pub fn read(rpc: &RpcClient, timeout: std::time::Duration) -> Result<Self, SessionError> {
-        let snapshot = rpc.snapshot(timeout)?;
-        let state = snapshot.state;
+        let state = rpc.state(timeout)?;
+        let messages = rpc.messages(timeout)?;
+        Self::from_state_and_messages(&state, messages)
+    }
+
+    /// Reads only Pi's runtime state. History-capable clients read their
+    /// bounded message page from the native JSONL session file instead of
+    /// asking Pi to serialize the complete in-memory history.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] when Pi does not return a valid runtime state.
+    pub fn read_state(rpc: &RpcClient, timeout: std::time::Duration) -> Result<Self, SessionError> {
+        let state = rpc.state(timeout)?;
+        Self::from_state_and_messages(&state, Vec::new())
+    }
+
+    fn from_state_and_messages(state: &Value, messages: Vec<Value>) -> Result<Self, SessionError> {
         Ok(Self {
-            session_id: required_string(&state, "sessionId")?.to_owned(),
+            session_id: required_string(state, "sessionId")?.to_owned(),
             session_name: state
                 .get("sessionName")
                 .and_then(Value::as_str)
                 .map(ToOwned::to_owned),
             model: state.get("model").filter(|value| !value.is_null()).cloned(),
-            thinking_level: required_string(&state, "thinkingLevel")?.to_owned(),
-            is_streaming: required_bool(&state, "isStreaming")?,
-            is_compacting: required_bool(&state, "isCompacting")?,
-            pending_message_count: required_usize(&state, "pendingMessageCount")?,
-            messages: snapshot.messages,
+            thinking_level: required_string(state, "thinkingLevel")?.to_owned(),
+            is_streaming: required_bool(state, "isStreaming")?,
+            is_compacting: required_bool(state, "isCompacting")?,
+            pending_message_count: required_usize(state, "pendingMessageCount")?,
+            messages,
         })
     }
 }
@@ -261,6 +279,113 @@ impl PiSessionStore {
             .into_iter()
             .find(|session| session.summary.id == id)
             .ok_or(SessionError::NotFound(id))
+    }
+
+    /// Reads one bounded history page directly from the authoritative Pi
+    /// JSONL file. Only the candidate page is retained; the full message list
+    /// never crosses the Pi RPC or Pix wire boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] when the native session is unavailable,
+    /// malformed, or contains an invalid cursor or oversized message.
+    pub fn history_page(
+        &self,
+        id: SessionId,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<pix_wire::SessionHistoryPage, SessionError> {
+        self.history_page_with_transform(id, cursor, limit, Ok)
+    }
+
+    /// Reads one history page while transforming each message before it is
+    /// admitted to the byte budget. Hosts use this for image externalization:
+    /// a large inline image must become a small reference before the selector
+    /// decides whether the page fits the wire frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionError`] when the native session cannot be read, the
+    /// transform fails, or the cursor/page violates the history limits.
+    pub fn history_page_with_transform<F>(
+        &self,
+        id: SessionId,
+        cursor: Option<&str>,
+        limit: u32,
+        mut transform: F,
+    ) -> Result<pix_wire::SessionHistoryPage, SessionError>
+    where
+        F: FnMut(Value) -> Result<Value, SessionError>,
+    {
+        let discovered = self.find(id)?;
+        let session_key = id.to_string();
+        let before_index = cursor
+            .map(|value| session_history::before_index(&session_key, value))
+            .transpose()?;
+        let revision = cursor
+            .map(|value| session_history::cursor_revision(&session_key, value))
+            .transpose()?;
+        let revision = revision.unwrap_or(discovered.summary.message_count);
+        let limit_usize = usize::try_from(limit).unwrap_or(usize::MAX);
+        let candidate_floor = before_index.unwrap_or(revision).saturating_sub(limit_usize);
+        let mut builder = MessagePageBuilder::with_revision(before_index, limit, Some(revision))?;
+        let file = File::open(&discovered.path).map_err(|source| SessionError::ReadFile {
+            path: discovered.path.clone(),
+            source,
+        })?;
+        let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
+        let mut message_index = 0_usize;
+        loop {
+            line.clear();
+            let count = read_bounded_record(&mut reader, &mut line).map_err(|source| {
+                SessionError::ReadFile {
+                    path: discovered.path.clone(),
+                    source,
+                }
+            })?;
+            if count == 0 {
+                break;
+            }
+            if line.len() > MAX_SESSION_LINE_BYTES
+                || (line.len() == MAX_SESSION_LINE_BYTES && line.last() != Some(&b'\n'))
+            {
+                return Err(SessionError::ReadFile {
+                    path: discovered.path.clone(),
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Pi session entry exceeds the supported line limit",
+                    ),
+                });
+            }
+            trim_record_ending(&mut line);
+            let Ok(entry) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            if entry.get("type").and_then(Value::as_str) != Some("message") {
+                continue;
+            }
+            let index = message_index;
+            message_index = message_index.saturating_add(1);
+            if index >= revision {
+                break;
+            }
+            let Some(message) = entry.get("message") else {
+                continue;
+            };
+            // At most `limit` messages can appear in a page. Avoid decoding,
+            // externalizing, or persisting old image payloads that cannot
+            // reach the candidate suffix; this keeps a 100 MB history cheap
+            // to open while still measuring the messages that may be shown.
+            if index < candidate_floor {
+                continue;
+            }
+            if before_index.is_some_and(|before| index >= before) {
+                continue;
+            }
+            builder.push(index, transform(message.clone())?)?;
+        }
+        Ok(builder.finish(&id.to_string())?)
     }
 }
 
@@ -572,6 +697,10 @@ pub enum SessionError {
     NotFound(SessionId),
     #[error(transparent)]
     Rpc(#[from] RpcError),
+    #[error(transparent)]
+    History(#[from] crate::session_history::HistoryError),
+    #[error(transparent)]
+    ImageAsset(#[from] ImageAssetError),
     #[error("Pi snapshot field {0} is absent or incompatible")]
     InvalidSnapshot(&'static str),
 }
@@ -579,11 +708,13 @@ pub enum SessionError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
 
     use tempfile::tempdir;
     use uuid::Uuid;
 
     use super::PiSessionStore;
+    use crate::session_lock::SessionId;
 
     #[test]
     fn lists_only_sessions_for_the_authorized_workspace() {
@@ -720,6 +851,66 @@ mod tests {
         assert_eq!(listed[0].summary.first_user_message.as_deref(), Some("new"));
         assert_eq!(timing.file_count, 2);
         assert_eq!(timing.session_count, 1);
+    }
+
+    #[test]
+    fn history_page_streams_native_jsonl_and_keeps_cursor_revision() {
+        let directory = tempdir().expect("temporary directory");
+        let workspace = directory.path().join("workspace");
+        let sessions = directory.path().join("sessions");
+        fs::create_dir_all(&workspace).expect("create workspace");
+        fs::create_dir_all(&sessions).expect("create sessions");
+        let id = Uuid::new_v4();
+        let cwd = serde_json::to_string(workspace.to_str().expect("workspace UTF-8"))
+            .expect("encode cwd");
+        let mut contents = format!(
+            "{{\"type\":\"session\",\"version\":3,\"id\":\"{id}\",\"timestamp\":\"2026-08-12T00:00:00Z\",\"cwd\":{cwd}}}\n"
+        );
+        for index in 0..75 {
+            contents.push_str(
+                &serde_json::json!({
+                    "type": "message",
+                    "message": {"role": "user", "content": format!("message-{index}")}
+                })
+                .to_string(),
+            );
+            contents.push('\n');
+        }
+        let path = sessions.join("history.jsonl");
+        fs::write(&path, contents).expect("write session");
+        let store = PiSessionStore::new(&sessions, &workspace).expect("session store");
+
+        let first = store
+            .history_page(SessionId::from_uuid(id), None, 50)
+            .expect("latest history page");
+        assert_eq!(first.start_index, 25);
+        assert_eq!(first.messages.len(), 50);
+        assert_eq!(first.revision, 75);
+        let cursor = first.next_cursor.clone().expect("older cursor");
+
+        // Appending live history does not move the cursor's boundary. The
+        // older page still describes the same 75-message snapshot.
+        let mut appended = fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open session for append");
+        writeln!(
+            appended,
+            "{}",
+            serde_json::json!({
+                "type": "message",
+                "message": {"role": "user", "content": "message-75"}
+            })
+        )
+        .expect("append live message");
+
+        let older = store
+            .history_page(SessionId::from_uuid(id), Some(&cursor), 50)
+            .expect("older history page");
+        assert_eq!(older.start_index, 0);
+        assert_eq!(older.messages.len(), 25);
+        assert_eq!(older.revision, 75);
+        assert!(!older.has_more);
     }
 
     #[test]

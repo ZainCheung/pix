@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use crate::{
     ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST,
-    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES,
-    MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
+    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_HISTORY_PAGE_MESSAGES,
+    MAX_IMAGE_CHUNK_BYTES, MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,6 +116,15 @@ pub enum ClientRequest {
     },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },
+    /// Requests the next bounded page of older history. The cursor is opaque
+    /// to clients; `before` is the cursor returned by `session.snapshot` or a
+    /// previous `session.history.page` event.
+    #[serde(rename = "session.history.request")]
+    SessionHistoryRequest {
+        session_id: String,
+        before: String,
+        limit: u32,
+    },
     #[serde(rename = "session.rename")]
     SessionRename { session_id: String, name: String },
     #[serde(rename = "session.release")]
@@ -219,6 +228,12 @@ pub enum ServerEvent {
     },
     #[serde(rename = "session.snapshot")]
     SessionSnapshot { snapshot: SessionSnapshot },
+    /// One bounded page of messages preceding the current client timeline.
+    #[serde(rename = "session.history.page")]
+    SessionHistoryPage {
+        #[serde(flatten)]
+        page: SessionHistoryPage,
+    },
     #[serde(rename = "session.state")]
     SessionState {
         session_id: String,
@@ -378,6 +393,37 @@ pub struct SessionSnapshot {
     /// connections that declared `usage.v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
+    /// Bounded history metadata, present only for clients that declared
+    /// `session_history.v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryState>,
+}
+
+/// Cursor state for one bounded session history window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryState {
+    /// Index of the first message in `SessionSnapshot.messages` within the
+    /// host's current history view. It is used only for stable client item IDs.
+    pub start_index: usize,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Revision of the history boundary captured for this view. Clients treat
+    /// it as opaque and discard a page from a different revision instead of
+    /// merging unrelated history.
+    pub revision: u64,
+}
+
+/// One bounded page of older session messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionHistoryPage {
+    pub session_id: String,
+    pub messages: Vec<Value>,
+    pub start_index: usize,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -555,6 +601,21 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
         | ClientRequest::SessionRelease { session_id }
         | ClientRequest::SessionAbort { session_id }
         | ClientRequest::ModelList { session_id } => validate_identifier("session_id", session_id),
+        ClientRequest::SessionHistoryRequest {
+            session_id,
+            before,
+            limit,
+        } => {
+            validate_identifier("session_id", session_id)?;
+            validate_identifier("before", before)?;
+            if *limit == 0 || *limit > MAX_HISTORY_PAGE_MESSAGES {
+                return Err(WireError::HistoryPageSizeInvalid {
+                    size: *limit,
+                    limit: MAX_HISTORY_PAGE_MESSAGES,
+                });
+            }
+            Ok(())
+        }
         ClientRequest::SessionRename { session_id, name } => {
             validate_identifier("session_id", session_id)?;
             validate_text("name", name)
@@ -801,6 +862,54 @@ mod tests {
         let encoded = message.encode().expect("encode");
         assert!(String::from_utf8_lossy(&encoded).contains("session.prompt"));
         assert_eq!(ClientEnvelope::decode(&encoded).expect("decode"), message);
+    }
+
+    #[test]
+    fn history_request_and_page_use_dotted_names_and_flattened_fields() {
+        let request = ClientEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: 8,
+            request: ClientRequest::SessionHistoryRequest {
+                session_id: "session-1".into(),
+                before: "opaque-cursor".into(),
+                limit: 50,
+            },
+        };
+        assert_eq!(
+            ClientEnvelope::decode(&request.encode().expect("encode request")).expect("decode"),
+            request
+        );
+
+        let event = ServerEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: Some(8),
+            event: ServerEvent::SessionHistoryPage {
+                page: super::SessionHistoryPage {
+                    session_id: "session-1".into(),
+                    messages: vec![serde_json::json!({"role":"user","content":"old"})],
+                    start_index: 0,
+                    has_more: false,
+                    next_cursor: None,
+                    revision: 1,
+                },
+            },
+        };
+        let encoded = event.encode().expect("encode page");
+        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("JSON page");
+        assert_eq!(value["type"], "session.history.page");
+        assert_eq!(value["session_id"], "session-1");
+        assert!(value.get("page").is_none());
+        assert_eq!(
+            ServerEnvelope::decode(&encoded).expect("decode page"),
+            event
+        );
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":9,"type":"session.history.request","session_id":"session-1","before":"cursor","limit":51}"#
+            ),
+            Err(WireError::HistoryPageSizeInvalid { size: 51, .. })
+        ));
     }
 
     #[test]

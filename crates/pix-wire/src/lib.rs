@@ -21,10 +21,11 @@ pub use noise::{
 };
 pub use protocol::{
     ClientEnvelope, ClientRequest, CommandScope, CommandSource, CommandSummary, CompactionEvent,
-    ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HostModelDefaults, HostSnapshot, HostSummary,
-    ModelSummary, PromptBehavior, RelayAccess, ServerEnvelope, ServerEvent, SessionQueue,
-    SessionSnapshot, SessionState, SessionSummary, SessionUsage, ThinkingLevel, ToolEvent,
-    WorkspaceAvailability, WorkspaceSummary, is_valid_capability,
+    ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HistoryState, HostModelDefaults,
+    HostSnapshot, HostSummary, ModelSummary, PromptBehavior, RelayAccess, ServerEnvelope,
+    ServerEvent, SessionHistoryPage, SessionQueue, SessionSnapshot, SessionState, SessionSummary,
+    SessionUsage, ThinkingLevel, ToolEvent, WorkspaceAvailability, WorkspaceSummary,
+    is_valid_capability,
 };
 pub use relay::{
     RELAY_CHANNEL_SECRET_BYTES, RelayRole, decode_relay_channel_secret, generate_join_code,
@@ -50,6 +51,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "thinking_levels.v1",
     "session_metadata.v1",
     "image_refs.v1",
+    "session_history.v1",
 ];
 /// Upper bound on capability strings a client may declare per connection.
 pub const MAX_CLIENT_CAPABILITIES: usize = 16;
@@ -59,6 +61,11 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024;
 pub const MAX_ATTACHMENTS_PER_REQUEST: usize = 4;
 /// Maximum decoded bytes in one lazy historical image range.
 pub const MAX_IMAGE_CHUNK_BYTES: u32 = 512 * 1024;
+/// Maximum number of messages a history page may contain.
+pub const MAX_HISTORY_PAGE_MESSAGES: u32 = 50;
+/// Target encoded payload size for a history page. The frame limit remains
+/// one MiB; keeping pages at half that size leaves room for envelope growth.
+pub const MAX_HISTORY_PAGE_BYTES: usize = 512 * 1024;
 /// Attachment mime types Pi's `images` content accepts.
 pub const ATTACHMENT_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
@@ -84,6 +91,8 @@ pub enum WireError {
     TooManyAttachments { count: usize, limit: usize },
     #[error("lazy image chunk size {size} exceeds {limit} bytes")]
     ImageChunkSizeInvalid { size: u32, limit: u32 },
+    #[error("history page size {size} is outside the 1..={limit} message range")]
+    HistoryPageSizeInvalid { size: u32, limit: u32 },
     #[error("image reference must be sha256 followed by 64 hexadecimal characters")]
     InvalidImageReference,
     #[error("pairing token must be canonical URL-safe base64 for 32 bytes")]
