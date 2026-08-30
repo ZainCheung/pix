@@ -84,6 +84,17 @@ after the snapshot and delivered through `session.metadata` for clients that
 declare `session_metadata.v1`; older clients use a short, best-effort inline
 fallback for compatibility.
 
+### Bounded session history windows
+
+`session_history.v1` keeps the wire frame ceiling separate from logical
+session size. A negotiated attach returns the newest history window (at most
+50 messages and a 512 KiB encoded-content target); older windows are requested
+with opaque cursors and a fixed revision boundary. The host scans Pi's native
+JSONL incrementally instead of calling Pi's unbounded `get_messages` for the
+initial view. History pages are independent of live events, and iOS prepends
+them while preserving the current scroll anchor. Image entries are
+externalized before byte selection when `image_refs.v1` is active.
+
 Model summaries carry Pi's optional `input` modalities. Clients use the
 advertised `image` value to gate image composition; the host does not infer
 model capability from the existence of an attachment upload.

@@ -42,7 +42,7 @@ fn every_client_request_fixture_is_canonical() {
     let fixtures = named_fixtures("client-", ".json");
     assert_eq!(
         fixtures.len(),
-        23,
+        24,
         "one golden file per client request, plus capability, attachment, and attachment-bearing prompt variants"
     );
     for path in fixtures {
@@ -63,7 +63,7 @@ fn every_server_event_fixture_is_canonical() {
     let fixtures = named_fixtures("server-", ".json");
     assert_eq!(
         fixtures.len(),
-        23,
+        24,
         "one golden file per server event, plus relay, enriched snapshot, and queue variants"
     );
     for path in fixtures {

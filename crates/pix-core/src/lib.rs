@@ -23,6 +23,7 @@ pub mod runtime;
 pub mod runtime_manager;
 pub mod secure_connection;
 pub mod session;
+pub mod session_history;
 pub mod session_lock;
 pub mod tui_bridge;
 pub mod workspace;

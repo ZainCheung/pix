@@ -537,6 +537,11 @@ fn host_snapshot_advertises_capabilities_and_gates_session_enrichment() {
             assert!(
                 snapshot
                     .capabilities
+                    .contains(&"session_history.v1".to_owned())
+            );
+            assert!(
+                snapshot
+                    .capabilities
                     .contains(&"thinking_levels.v1".to_owned())
             );
         }
