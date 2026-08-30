@@ -13,7 +13,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 
 const BRIDGE_PROTOCOL_VERSION = 1;
-const BRIDGE_EXTENSION_VERSION = 1;
+const BRIDGE_EXTENSION_VERSION = 2;
 const CLAIM_TIMEOUT_MS = 300;
 const PRECLAIM_TIMEOUT_MS = 500;
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];

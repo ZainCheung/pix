@@ -18,7 +18,7 @@ use crate::commands::shared::home_directory;
 use crate::output::CommandOutput;
 use crate::status::{HostServiceStatus, request_control_rpc};
 
-const BRIDGE_EXTENSION_VERSION: u32 = 1;
+const BRIDGE_EXTENSION_VERSION: u32 = 2;
 const BRIDGE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const BRIDGE_DIRECTORY: &str = "pix-bridge";
 const BRIDGE_FILENAME: &str = "index.ts";
@@ -565,8 +565,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        BRIDGE_SOURCE, ExtensionState, digest_bytes, digest_hex, inspect_extension,
-        install_extension, uninstall_extension,
+        BRIDGE_EXTENSION_VERSION, BRIDGE_SOURCE, ExtensionState, digest_bytes, digest_hex,
+        inspect_extension, install_extension, uninstall_extension,
     };
     use tempfile::tempdir;
 
@@ -586,6 +586,35 @@ mod tests {
         let second = install_extension(home.path()).expect("repeat install");
         assert!(!second.changed);
         assert_eq!(second.state, ExtensionState::Installed);
+    }
+
+    #[test]
+    fn install_upgrades_a_previous_pix_managed_extension() {
+        let home = tempdir().expect("home");
+        let first = install_extension(home.path()).expect("install bridge");
+        let old_source = b"// Pix-managed extension from an older release\n";
+        fs::write(&first.path, old_source).expect("write old extension");
+        let old_manifest = first
+            .path
+            .parent()
+            .expect("extension dir")
+            .join(".pix-managed.json");
+        let old_hash = digest_hex(digest_bytes(old_source));
+        fs::write(
+            old_manifest,
+            format!(
+                "{{\"schema_version\":1,\"extension_version\":1,\"file\":\"index.ts\",\"sha256\":\"{old_hash}\"}}"
+            ),
+        )
+        .expect("write old manifest");
+
+        let upgraded = install_extension(home.path()).expect("upgrade bridge");
+        assert!(upgraded.changed);
+        assert_eq!(upgraded.version, BRIDGE_EXTENSION_VERSION);
+        assert_eq!(
+            fs::read(&upgraded.path).expect("read upgraded extension"),
+            BRIDGE_SOURCE.as_bytes()
+        );
     }
 
     #[test]
