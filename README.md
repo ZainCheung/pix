@@ -91,7 +91,17 @@ Use the installer above, or download a release archive from the
 pix --version
 ```
 
-### 3. Run setup
+### 3. Install the Pi bridge
+
+Install the optional bridge through Pi's package manager:
+
+```sh
+pi install npm:@zaincheung/pix
+```
+
+If Pi is already running, use `/reload` or restart Pi after installation.
+
+### 4. Run setup
 
 ```sh
 pix setup
@@ -108,7 +118,7 @@ pix setup --workspace "$HOME/Projects/my-project" \
   --no-pair --no-service --non-interactive
 ```
 
-### 4. Pair your phone
+### 5. Pair your phone
 
 The iOS client is in private beta; you need access to it to pair. On either
 path, compare the six-digit code shown on both devices and approve the
@@ -122,12 +132,12 @@ request on the computer.
 If you use the macOS menu-bar app, choose **Add Device…** from its menu-bar
 icon for the same pairing guide.
 
-### 5. Open a workspace
+### 6. Open a workspace
 
 Pix shows the workspace roots you authorized on the host. Select one to see
 its Pi sessions.
 
-### 6. Start or resume Pi
+### 7. Start or resume Pi
 
 Create a session or open an existing one, then send your first prompt. If the
 phone disconnects, the local Pi process keeps running.

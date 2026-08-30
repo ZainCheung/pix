@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -130,6 +130,9 @@ pub struct HostProtocolDispatcher {
     device_id: Option<String>,
     attached_sessions: HashSet<SessionId>,
     event_receivers: HashMap<SessionId, mpsc::Receiver<PiEvent>>,
+    /// Events that arrived after a TUI snapshot cursor while the snapshot was
+    /// being assembled. They must be delivered in order after the snapshot.
+    buffered_events: HashMap<SessionId, VecDeque<PiEvent>>,
     /// Optional protocol extensions the connected client declared. Every
     /// gated field and event is omitted until the declaration arrives.
     client_capabilities: HashSet<String>,
@@ -164,6 +167,7 @@ impl HostProtocolDispatcher {
             device_id: None,
             attached_sessions: HashSet::new(),
             event_receivers: HashMap::new(),
+            buffered_events: HashMap::new(),
             client_capabilities: HashSet::new(),
             attachments: HashMap::new(),
             metadata_events,
@@ -274,6 +278,11 @@ impl HostProtocolDispatcher {
         }
 
         let mut raw_events = Vec::new();
+        for (&session_id, buffered) in &mut self.buffered_events {
+            while let Some(event) = buffered.pop_front() {
+                raw_events.push((session_id, event));
+            }
+        }
         let mut disconnected = Vec::new();
         for (&session_id, receiver) in &self.event_receivers {
             loop {
@@ -289,6 +298,7 @@ impl HostProtocolDispatcher {
         }
         for session_id in disconnected {
             self.event_receivers.remove(&session_id);
+            self.buffered_events.remove(&session_id);
         }
 
         envelopes.extend(
@@ -312,6 +322,7 @@ impl HostProtocolDispatcher {
             let _ = self.runtimes.detach(session_id);
         }
         self.event_receivers.clear();
+        self.buffered_events.clear();
         self.attachments.clear();
     }
 
@@ -397,7 +408,7 @@ impl HostProtocolDispatcher {
             ClientRequest::SessionRename { session_id, name } => {
                 let session_id = self.require_attached(&session_id)?;
                 self.runtimes
-                    .request(session_id, &PiCommand::SetSessionName { name })?;
+                    .request_backend(session_id, &PiCommand::SetSessionName { name })?;
                 Ok(snapshot_after_ack(session_id, false))
             }
             ClientRequest::SessionRelease { session_id } => {
@@ -405,6 +416,7 @@ impl HostProtocolDispatcher {
                 self.runtimes.release(session_id)?;
                 self.attached_sessions.remove(&session_id);
                 self.event_receivers.remove(&session_id);
+                self.buffered_events.remove(&session_id);
                 Ok(vec![
                     ready(ServerEvent::RequestAck),
                     ready(ServerEvent::SessionState {
@@ -460,7 +472,7 @@ impl HostProtocolDispatcher {
                 let session_id = self.require_attached(&session_id)?;
                 let response = self
                     .runtimes
-                    .request(session_id, &PiCommand::GetAvailableModels)?;
+                    .request_backend(session_id, &PiCommand::GetAvailableModels)?;
                 Ok(vec![ready(ServerEvent::ModelList {
                     session_id: session_id.to_string(),
                     models: pi_bridge::available_models(&response)?,
@@ -810,6 +822,7 @@ impl HostProtocolDispatcher {
             Err(error) if !already_attached => {
                 self.attached_sessions.remove(&session_id);
                 self.event_receivers.remove(&session_id);
+                self.buffered_events.remove(&session_id);
                 if opened_runtime {
                     self.release_failed_runtime(session_id);
                 } else {
@@ -827,7 +840,7 @@ impl HostProtocolDispatcher {
         command: &PiCommand,
     ) -> Result<Vec<PendingEvent>, DispatchError> {
         let session_id = self.require_attached(session_id)?;
-        self.runtimes.request(session_id, command)?;
+        self.runtimes.request_backend(session_id, command)?;
         Ok(vec![ready(ServerEvent::RequestAck)])
     }
 
@@ -837,9 +850,12 @@ impl HostProtocolDispatcher {
     ) -> Result<ServerEvent, DispatchError> {
         self.ensure_device_authorized()?;
         self.ensure_active_session_authorized(session_id)?;
-        let snapshot = self
+        let (snapshot, through_sequence) = self
             .runtimes
-            .snapshot_with_timeout(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+            .snapshot_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+        if let Some(through_sequence) = through_sequence {
+            self.discard_tui_events_through(session_id, through_sequence);
+        }
         let mut snapshot = pi_bridge::session_snapshot(session_id, snapshot)?;
         if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
             self.host
@@ -870,7 +886,7 @@ impl HostProtocolDispatcher {
         session_id: SessionId,
     ) {
         if self.client_capabilities.contains(CAPABILITY_COMMANDS) {
-            match self.runtimes.request_with_timeout(
+            match self.runtimes.request_backend_with_timeout(
                 session_id,
                 &PiCommand::GetCommands,
                 RUNTIME_METADATA_TIMEOUT,
@@ -926,7 +942,7 @@ impl HostProtocolDispatcher {
                     return;
                 }
                 if include_commands
-                    && let Ok(response) = runtimes.request_with_timeout(
+                    && let Ok(response) = runtimes.request_backend_with_timeout(
                         session_id,
                         &PiCommand::GetCommands,
                         RUNTIME_METADATA_TIMEOUT,
@@ -978,6 +994,12 @@ impl HostProtocolDispatcher {
         content: String,
         attachments: &[String],
     ) -> Result<(String, Vec<PiImage>), DispatchError> {
+        if !attachments.is_empty() {
+            let parsed_session_id = self.require_attached(session_id)?;
+            if self.runtimes.is_tui_attached(parsed_session_id) {
+                return Err(RuntimeManagerError::TuiUnsupportedCommand(parsed_session_id).into());
+            }
+        }
         let (images, paths) = self.take_attachment_images(session_id, attachments)?;
         if paths.is_empty() {
             return Ok((content, images));
@@ -1062,9 +1084,32 @@ impl HostProtocolDispatcher {
         Ok(())
     }
 
+    fn discard_tui_events_through(&mut self, session_id: SessionId, through_sequence: u64) {
+        let mut keep = VecDeque::new();
+        if let Some(receiver) = self.event_receivers.get(&session_id) {
+            loop {
+                match receiver.try_recv() {
+                    Ok(PiEvent::Event {
+                        sequence: Some(sequence),
+                        ..
+                    }) if sequence <= through_sequence => {}
+                    Ok(event) => keep.push_back(event),
+                    Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
+                }
+            }
+        }
+        if !keep.is_empty() {
+            self.buffered_events
+                .entry(session_id)
+                .or_default()
+                .extend(keep);
+        }
+    }
+
     fn cleanup_failed_session_start(&mut self, session_id: SessionId) {
         self.attached_sessions.remove(&session_id);
         self.event_receivers.remove(&session_id);
+        self.buffered_events.remove(&session_id);
         self.release_failed_runtime(session_id);
     }
 
@@ -1337,6 +1382,26 @@ impl DispatchError {
                 "Concurrent turn capacity has been reached",
                 true,
             ),
+            Self::Runtime(RuntimeManagerError::TuiOwned(_)) => (
+                ErrorCode::Conflict,
+                "Session is owned by a local Pi TUI",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiUnsupportedCommand(_)) => (
+                ErrorCode::InvalidRequest,
+                "This operation is not supported for a local Pi TUI session",
+                false,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiCommandRejected(_)) => (
+                ErrorCode::Conflict,
+                "The local Pi TUI rejected this operation in its current state",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::TuiUnavailable(_)) => (
+                ErrorCode::PiUnavailable,
+                "The local Pi TUI bridge is temporarily unreachable",
+                true,
+            ),
             Self::Runtime(
                 RuntimeManagerError::NotActive(_)
                 | RuntimeManagerError::NoAttachedClient(_)
@@ -1357,5 +1422,168 @@ impl DispatchError {
             message: message.to_owned(),
             retryable,
         }
+    }
+}
+
+#[cfg(test)]
+mod tui_snapshot_tests {
+    use std::collections::HashSet;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    use tempfile::tempdir;
+
+    use super::HostProtocolDispatcher;
+    use crate::host_dispatcher::HostState;
+    use crate::host_environment::HostEnvironment;
+    use crate::runtime_manager::{RuntimeManager, RuntimeManagerOptions};
+    use crate::session_lock::{ProcessIdentity, SessionId};
+    use crate::tui_bridge::{
+        TuiBridgeEventFrame, TuiBridgeHarness, TuiBridgeRequestFrame, TuiBridgeResponseFrame,
+        TuiBridgeSnapshot, owner_uid,
+    };
+    use crate::{HostConfig, WorkspaceRegistry};
+    use pix_wire::{ServerEvent, SessionState};
+
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn tui_snapshot_discards_events_through_cursor_and_keeps_later_events() {
+        let workspace = tempdir().expect("workspace");
+        let locks = tempdir().expect("locks");
+        let mut config = HostConfig::new("TUI snapshot test");
+        WorkspaceRegistry::new(&mut config)
+            .add(workspace.path(), Some("Project".to_owned()))
+            .expect("authorize workspace");
+        let manager = Arc::new(
+            RuntimeManager::new(RuntimeManagerOptions {
+                executable: workspace.path().join("unused-pi"),
+                lock_directory: locks.path().to_path_buf(),
+                max_active_sessions: 2,
+                max_concurrent_turns: 2,
+                idle_timeout: Duration::from_secs(30),
+                request_timeout: Duration::from_secs(2),
+                extra_arguments: Vec::new(),
+                environment: HostEnvironment::from_process(),
+            })
+            .expect("runtime manager"),
+        );
+        let mut authorized = HashSet::new();
+        authorized.insert(workspace.path().to_path_buf());
+        manager.configure_tui_bridge(authorized, owner_uid(workspace.path()));
+        let session_id = SessionId::new();
+        let peer = crate::tui_bridge::TuiBridgePeer::new(
+            owner_uid(workspace.path()).expect("workspace owner"),
+            ProcessIdentity::current().expect("current process"),
+        );
+        let harness = TuiBridgeHarness::new(manager.tui_bridge());
+        let register = serde_json::to_vec(&crate::tui_bridge::TuiBridgeRegister::new(
+            session_id,
+            workspace.path(),
+            uuid::Uuid::new_v4(),
+        ))
+        .expect("register frame");
+        let registration = harness
+            .register_frame(&register, &peer)
+            .expect("register TUI");
+        let (outbound, requests) = mpsc::sync_channel(1);
+        let _broker = manager
+            .tui_bridge()
+            .bind_transport(&registration.token, outbound)
+            .expect("bind bridge transport");
+        let mut dispatcher =
+            HostProtocolDispatcher::new(Arc::new(HostState::new(config)), Arc::clone(&manager));
+        dispatcher.attached_sessions.insert(session_id);
+        dispatcher.event_receivers.insert(
+            session_id,
+            manager.subscribe(session_id).expect("subscribe TUI"),
+        );
+        let first = TuiBridgeEventFrame::new(
+            session_id,
+            registration.token.bridge_instance_id,
+            1,
+            "agent_start",
+            serde_json::json!({}),
+        );
+        manager
+            .tui_bridge()
+            .publish_event(&registration.token, &first)
+            .expect("publish first event");
+        let snapshot_registry = Arc::clone(&manager.tui_bridge());
+        let snapshot_token = registration.token.clone();
+        let response_thread = std::thread::spawn(move || {
+            let request = requests
+                .recv_timeout(Duration::from_secs(1))
+                .expect("snapshot request");
+            let request =
+                serde_json::from_slice::<TuiBridgeRequestFrame>(&request[..request.len() - 1])
+                    .expect("decode snapshot request");
+            snapshot_registry
+                .resolve_snapshot_response(
+                    &snapshot_token,
+                    TuiBridgeResponseFrame {
+                        version: 1,
+                        message_type: "response".to_owned(),
+                        request_id: request.request_id,
+                        session_id: session_id.to_string(),
+                        command: "snapshot".to_owned(),
+                        success: true,
+                        snapshot: Some(TuiBridgeSnapshot {
+                            session_id: session_id.to_string(),
+                            session_name: Some("TUI".to_owned()),
+                            model: None,
+                            thinking_level: "high".to_owned(),
+                            is_streaming: true,
+                            is_compacting: false,
+                            pending_message_count: 0,
+                            messages: vec![serde_json::json!({
+                                "role": "user",
+                                "content": "hi"
+                            })],
+                            inflight_assistant: None,
+                            active_tools: Vec::new(),
+                            through_sequence: 1,
+                        }),
+                        result: None,
+                        error: None,
+                    },
+                )
+                .expect("resolve snapshot");
+        });
+        let snapshot = dispatcher
+            .session_snapshot_event(session_id)
+            .expect("TUI snapshot");
+        response_thread.join().expect("snapshot response thread");
+        let ServerEvent::SessionSnapshot { snapshot } = snapshot else {
+            panic!("expected session snapshot");
+        };
+        assert_eq!(snapshot.state, SessionState::Running);
+        assert_eq!(snapshot.through_sequence, Some(1));
+        let second = TuiBridgeEventFrame::new(
+            session_id,
+            registration.token.bridge_instance_id,
+            2,
+            "agent_settled",
+            serde_json::json!({}),
+        );
+        manager
+            .tui_bridge()
+            .publish_event(&registration.token, &second)
+            .expect("publish second event");
+        let events = dispatcher.drain_events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].event,
+            ServerEvent::SessionState {
+                state: SessionState::Idle,
+                ..
+            }
+        ));
+        assert!(!events.iter().any(|event| matches!(
+            &event.event,
+            ServerEvent::SessionState {
+                state: SessionState::Running,
+                ..
+            }
+        )));
     }
 }

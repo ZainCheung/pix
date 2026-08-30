@@ -24,6 +24,38 @@ pinned Host release and do not copy Rust protocol code.
 Pi is the only agent runtime and its native JSONL session is the authoritative
 conversation store. Pix does not create a second message database.
 
+## Optional TUI integration boundary
+
+The TUI integration uses Pi's official Extension API and a separate host-local
+Unix-socket protocol. The Pi-side extension is an independent `@zaincheung/pix`
+package installed by Pi; Pix must not shadow, wrap, patch, or replace the
+user's `pi` executable. The host-local bridge is not a `pix-wire` version and
+never becomes a second conversation store.
+
+One session has one live writer. `PixRpc` and `PiTui` claims use the same
+durable session lock; a disconnected TUI retains its owner record and is
+represented as an unavailable RuntimeManager placeholder, so a reconnect or
+Host restart cannot silently fall back to a second RPC writer. Kernel-derived
+peer credentials and PID start identity are required before a TUI REGISTER is
+accepted.
+
+`/resume` uses a short host-local preclaim: the active extension asks Host to
+validate and reserve the discovered destination session before Pi tears down
+the current runtime. The reservation is represented by the same `PiTui`
+`SessionLease`, is consumed by a matching same-process REGISTER, and expires
+after five seconds. A target already owned by Pix or another TUI rejects the
+switch; a missing/unreachable bridge does not make Pi unusable as a standalone
+TUI. Session replacement and quit send an explicit `session_release` marker,
+whereas extension reload retains the lease for same-process reconnect.
+
+After a successful TUI claim, an unexpected bridge disconnect is retried in
+the background with bounded delays (1s, 2s, 5s, 10s, then a 30s cap). A TUI
+that starts standalone because Host is reachable but its first session has not
+been persisted yet gets one bounded retry after `agent_settled`, when Pi has
+written the first JSONL entry. A TUI that started standalone because Host was
+unavailable never performs this late claim automatically; `/reload` is the
+explicit opt-in retry.
+
 ## Relay privacy
 
 The relay forwards only authenticated encrypted frames. It does not decrypt,

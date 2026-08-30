@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
 use crate::pi_rpc::{RpcClient, RpcError};
-use crate::session_lock::{SessionId, SessionLease, SessionLockError};
+use crate::session_lock::{ProcessIdentity, SessionId, SessionLease, SessionLockError};
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -66,7 +66,16 @@ impl PiRuntime {
             return Err(RuntimeError::WorkspaceNotDirectory(workspace));
         }
 
-        let lease = SessionLease::acquire(&options.lock_directory, options.launch.id())?;
+        let writer_reference = match &options.launch {
+            SessionLaunch::Create { id, .. } => Some(id.to_string()),
+            SessionLaunch::Existing { reference, .. } => Some(reference.clone()),
+        };
+        let mut lease = SessionLease::acquire_for_workspace_with_reference(
+            &options.lock_directory,
+            options.launch.id(),
+            &workspace,
+            writer_reference,
+        )?;
         let mut command = Command::new(executable);
         options.environment.apply(&mut command);
         command
@@ -94,6 +103,24 @@ impl PiRuntime {
             .stderr(Stdio::null());
 
         let mut child = command.spawn().map_err(RuntimeError::Spawn)?;
+        let writer_identity = match ProcessIdentity::inspect(child.id()) {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                let pid = child.id();
+                cleanup_spawned_child(&mut child);
+                return Err(RuntimeError::SessionLock(
+                    SessionLockError::ProcessNotFound(pid),
+                ));
+            }
+            Err(error) => {
+                cleanup_spawned_child(&mut child);
+                return Err(RuntimeError::SessionLock(error));
+            }
+        };
+        if let Err(error) = lease.set_writer_process(writer_identity) {
+            cleanup_spawned_child(&mut child);
+            return Err(RuntimeError::SessionLock(error));
+        }
         let Some(input) = child.stdin.take() else {
             cleanup_spawned_child(&mut child);
             return Err(RuntimeError::MissingStdin);
@@ -346,6 +373,15 @@ done
             environment,
         })
         .expect("start env-based Pi");
+        assert!(runtime.lease().record().workspace_fingerprint.is_some());
+        assert!(runtime.lease().record().writer_pid.is_some());
+        assert!(
+            runtime
+                .lease()
+                .record()
+                .writer_process_start_identity
+                .is_some()
+        );
 
         let response = runtime
             .rpc()

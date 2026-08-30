@@ -409,6 +409,8 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                         "role": "user",
                         "content": "Hello from Pix"
                     })],
+                    inflight_assistant: None,
+                    through_sequence: None,
                     pending_prompts: Vec::new(),
                     active_tools: Vec::new(),
                     commands: Vec::new(),
@@ -428,6 +430,8 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                     model: Some(fixture_model_with_levels()),
                     thinking_level: ThinkingLevel::High,
                     messages: Vec::new(),
+                    inflight_assistant: None,
+                    through_sequence: None,
                     pending_prompts: vec![serde_json::json!({"status": "pending"})],
                     active_tools: Vec::new(),
                     commands: vec![

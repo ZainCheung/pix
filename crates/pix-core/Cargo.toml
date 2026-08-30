@@ -18,6 +18,7 @@ hostname.workspace = true
 image.workspace = true
 libc = "0.2"
 mdns-sd.workspace = true
+nix.workspace = true
 pix-wire = { path = "../pix-wire" }
 semver.workspace = true
 serde.workspace = true

@@ -89,6 +89,15 @@ pub struct SessionSnapshot {
     pub is_compacting: bool,
     pub pending_message_count: usize,
     pub messages: Vec<Value>,
+    /// Ephemeral tool rows captured by a TUI bridge snapshot. Native RPC
+    /// snapshots leave this empty because Pi exposes tools through events.
+    pub active_tools: Vec<Value>,
+    /// The currently streamed assistant message, when a TUI snapshot catches
+    /// the runtime between `message_update` and `message_end`.
+    pub inflight_assistant: Option<Value>,
+    /// TUI stream cursor included for snapshot-before-stream handoff. Native
+    /// RPC snapshots have no compatible cursor and therefore use `None`.
+    pub through_sequence: Option<u64>,
 }
 
 impl SessionSnapshot {
@@ -113,6 +122,9 @@ impl SessionSnapshot {
             is_compacting: required_bool(&state, "isCompacting")?,
             pending_message_count: required_usize(&state, "pendingMessageCount")?,
             messages: snapshot.messages,
+            active_tools: Vec::new(),
+            inflight_assistant: None,
+            through_sequence: None,
         })
     }
 }

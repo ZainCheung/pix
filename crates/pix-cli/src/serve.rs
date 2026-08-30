@@ -1,6 +1,7 @@
 //! The foreground `pix serve` host loop: command dispatch, the JSONL event
 //! bridge, remote pairing offers, and the local control RPC responder.
 
+use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -10,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use pix_core::{
     ConfigStore, HostEnvironment, HostService, HostServiceEvent, HostState, PairingCoordinator,
-    RuntimeManager, RuntimeManagerOptions,
+    RuntimeManager, RuntimeManagerOptions, SessionLockStore, workspace_fingerprint,
 };
 use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
@@ -126,7 +127,9 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     let _status_guard = HostServiceStatusGuard::create(store.path(), port)
         .context("writing host service status")?;
     drop(startup_config);
-    let environment = HostEnvironment::resolve_for("pi");
+    let pi_config_path = std::path::absolute(store.path()).context("resolving Pix config path")?;
+    let environment = HostEnvironment::resolve_for("pi")
+        .with_override("PIX_CONFIG", pi_config_path.as_os_str().to_owned());
     let executable = configured_pi_executable(&config, &environment);
     let pi_executable = executable.display().to_string();
     let runtime_manager = std::sync::Arc::new(
@@ -146,19 +149,87 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
         })
         .context("starting Pi runtime manager")?,
     );
+    // Recover durable ownership before HostService starts accepting session
+    // requests. Every later claim repeats the process-identity check while
+    // holding the stable session lock.
+    let authorized_workspace_fingerprints: HashSet<String> = config
+        .workspaces
+        .iter()
+        .filter_map(|workspace| workspace_fingerprint(&workspace.path).ok())
+        .collect();
+    let ownership_recovery = SessionLockStore::new(config_directory.join("locks"))
+        .recover(&authorized_workspace_fingerprints)
+        .context("recovering Pi session ownership")?;
+    let authorized_workspaces = config
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.path.clone())
+        .collect::<std::collections::HashSet<_>>();
+    runtime_manager
+        .configure_tui_bridge(authorized_workspaces, pix_core::owner_uid(config_directory));
+    for owner in ownership_recovery.owners() {
+        if owner.state != pix_core::SessionRecoveryState::TuiUnreachable {
+            continue;
+        }
+        let Some(workspace) = config.workspaces.iter().find(|workspace| {
+            workspace_fingerprint(&workspace.path).ok() == owner.record.workspace_fingerprint
+        }) else {
+            continue;
+        };
+        if let Err(error) = runtime_manager.restore_tui_owner(owner, &workspace.path) {
+            // The durable record remains in place and the next RPC claim will
+            // still fail closed at the session lock, even if the in-memory
+            // placeholder could not be restored.
+            log.append_text("ownership", &format!("TUI owner restore deferred: {error}"));
+        }
+    }
+    log.append_text(
+        "ownership",
+        &format!(
+            "recovery complete: owners={}, stale_cleared={}, malformed={}, unsupported={}, blocked={}",
+            ownership_recovery.owners().len(),
+            ownership_recovery.stale_cleared(),
+            ownership_recovery.malformed(),
+            ownership_recovery.unsupported(),
+            ownership_recovery.blocked(),
+        ),
+    );
     let coordinator = std::sync::Arc::new(PairingCoordinator::new(store.clone()));
     let host_fingerprint = pix_core::host_public_key_fingerprint(&identity.public_key);
     let relay_url = config.preferences.active_relay_url().map(str::to_owned);
-    let mut service = HostService::start(
-        endpoint,
-        identity.private_key,
-        coordinator,
-        std::sync::Arc::new(HostState::with_asset_root(
-            config,
-            config_directory.join("attachments"),
-        )),
-        std::sync::Arc::clone(&runtime_manager),
-    )
+    let mut service = {
+        #[cfg(unix)]
+        {
+            let tui_socket = pix_core::TuiBridgeUnixSocket::bind(
+                HostServiceStatus::tui_bridge_socket_path_for(store.path()),
+            )
+            .context("starting Pix TUI bridge socket")?;
+            HostService::start_with_tui_socket(
+                endpoint,
+                identity.private_key,
+                coordinator,
+                std::sync::Arc::new(HostState::with_asset_root(
+                    config,
+                    config_directory.join("attachments"),
+                )),
+                std::sync::Arc::clone(&runtime_manager),
+                tui_socket,
+            )
+        }
+        #[cfg(not(unix))]
+        {
+            HostService::start(
+                endpoint,
+                identity.private_key,
+                coordinator,
+                std::sync::Arc::new(HostState::with_asset_root(
+                    config,
+                    config_directory.join("attachments"),
+                )),
+                std::sync::Arc::clone(&runtime_manager),
+            )
+        }
+    }
     .context("starting Pix host service")?;
     let (relay_events_tx, relay_events) = mpsc::channel();
     let relay = match &relay_url {
@@ -814,7 +885,8 @@ pub(crate) fn session_list_json(service: &pix_core::HostServiceHandle) -> serde_
                 "id": session.session_id.to_string(),
                 "workspace": session.workspace,
                 "clients": session.client_count,
-                "state": if session.completed { "idle" } else { "running" },
+                "state": session.state,
+                "backend": session.backend.as_str(),
             })
         })
         .collect::<Vec<_>>();
@@ -1029,6 +1101,7 @@ pub(crate) struct SessionEvent {
     pub(crate) workspace: String,
     pub(crate) clients: usize,
     pub(crate) state: &'static str,
+    pub(crate) backend: &'static str,
 }
 
 /// Emits one service event to the log file (always) and stdout (best

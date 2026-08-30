@@ -24,6 +24,7 @@ pub mod runtime_manager;
 pub mod secure_connection;
 pub mod session;
 pub mod session_lock;
+pub mod tui_bridge;
 pub mod workspace;
 
 pub use config::{ConfigStore, HostConfig};
@@ -51,11 +52,27 @@ pub use relay_client::{
     validate_relay_url,
 };
 pub use runtime::{PiRuntime, PiRuntimeOptions, SessionLaunch};
-pub use runtime_manager::{ActiveRuntimeSummary, RuntimeManager, RuntimeManagerOptions};
+pub use runtime_manager::{
+    ActiveRuntimeSummary, RuntimeBackend, RuntimeManager, RuntimeManagerError,
+    RuntimeManagerOptions,
+};
 pub use secure_connection::{AuthenticatedConnection, PendingPairingConnection};
 pub use session::{
     DiscoveredSession, PiSessionStore, SessionListTiming, SessionMetadataIndex, SessionSnapshot,
     SessionSummary,
 };
-pub use session_lock::{SessionId, SessionLease};
+pub use session_lock::{
+    ProcessIdentity, RecoveredSessionOwner, SESSION_LOCK_RECORD_VERSION, SessionId, SessionLease,
+    SessionLockError, SessionLockRecord, SessionLockRecovery, SessionLockStore, SessionOwnerKind,
+    SessionRecoveryState, workspace_fingerprint,
+};
+pub use tui_bridge::TuiBridgeUnixSocket;
+pub use tui_bridge::{
+    TUI_BRIDGE_MAX_FRAME_BYTES, TUI_BRIDGE_PROTOCOL_VERSION, TuiBridgeConnectionState,
+    TuiBridgeError, TuiBridgeEventFrame, TuiBridgeHarness, TuiBridgeOwnerSnapshot, TuiBridgePeer,
+    TuiBridgeRegister, TuiBridgeRegisterResponse, TuiBridgeRegistration, TuiBridgeRegistry,
+    TuiBridgeRequestFrame, TuiBridgeResponseFrame, TuiBridgeSnapshot, TuiBridgeToken,
+    decode_event_frame, decode_register_frame, decode_snapshot_response, encode_register_response,
+    owner_uid,
+};
 pub use workspace::WorkspaceRegistry;

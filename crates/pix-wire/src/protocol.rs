@@ -364,6 +364,15 @@ pub struct SessionSnapshot {
     pub model: Option<ModelSummary>,
     pub thinking_level: ThinkingLevel,
     pub messages: Vec<Value>,
+    /// Optional partial assistant message captured while a TUI-owned runtime
+    /// is between `message_update` and `message_end`. Older clients ignore
+    /// this additive field and continue rendering the live delta stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_assistant: Option<Value>,
+    /// Optional TUI stream cursor covered by this snapshot. RPC snapshots do
+    /// not provide a cursor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through_sequence: Option<u64>,
     pub pending_prompts: Vec<Value>,
     pub active_tools: Vec<ToolEvent>,
     /// Slash commands Pi exposes for this session, without host filesystem

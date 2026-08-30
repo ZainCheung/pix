@@ -1,0 +1,148 @@
+name: Pix Pi package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/pix/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'packages/pix/**'
+
+env:
+  NPM_REGISTRY: https://registry.npmjs.org
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate Pix Pi package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/pix
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Validate Pi package manifest
+        run: |
+          set -eu
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const manifest = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const errors = [];
+          const semver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+          if (manifest.name !== "@zaincheung/pix") {
+            errors.push(`unexpected package name: ${manifest.name}`);
+          }
+          if (typeof manifest.version !== "string" || !semver.test(manifest.version)) {
+            errors.push(`invalid package version: ${manifest.version}`);
+          }
+          if (manifest.type !== "module") {
+            errors.push('package must use "type": "module"');
+          }
+          if (!manifest.pi?.extensions?.includes("./index.ts")) {
+            errors.push('Pi manifest must expose "./index.ts"');
+          }
+          for (const file of ["index.ts", "README.md"]) {
+            if (!fs.existsSync(file)) {
+              errors.push(`missing package file: ${file}`);
+            }
+          }
+
+          if (errors.length > 0) {
+            for (const error of errors) console.error(`::error::${error}`);
+            process.exit(1);
+          }
+
+          console.log(`Validated ${manifest.name}@${manifest.version}`);
+          NODE
+
+      - name: Verify npm package contents
+        run: |
+          set -eu
+          report="$RUNNER_TEMP/pix-npm-pack.json"
+          npm pack --ignore-scripts --dry-run --json > "$report"
+          node - "$report" <<'NODE'
+          const fs = require("node:fs");
+
+          const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))[0];
+          const files = new Set((report?.files ?? []).map((file) => file.path));
+          for (const required of ["package.json", "README.md", "index.ts"]) {
+            if (!files.has(required)) {
+              console.error(`::error::npm package is missing ${required}`);
+              process.exit(1);
+            }
+          }
+
+          console.log(`npm pack contains ${report.entryCount} files (${report.unpackedSize} bytes unpacked)`);
+          NODE
+
+  publish:
+    name: Publish @zaincheung/pix
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: publish-pix-package
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: packages/pix
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm credentials
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -eu
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error title=Missing npm token::Configure the NPM_TOKEN Actions secret before publishing @zaincheung/pix."
+            exit 1
+          fi
+
+      - name: Require a new npm version
+        env:
+          NPM_REGISTRY: ${{ env.NPM_REGISTRY }}
+        run: |
+          set -eu
+          package_name="$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).name')"
+          package_version="$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).version')"
+          error_file="$RUNNER_TEMP/pix-npm-view.err"
+
+          if npm view "$package_name@$package_version" version --registry="$NPM_REGISTRY" > /dev/null 2>"$error_file"; then
+            echo "::error title=Version already published::$package_name@$package_version already exists on npm. Bump packages/pix/package.json version before publishing."
+            exit 1
+          fi
+
+          if ! grep -Eq 'E404|404 Not Found|No match found' "$error_file"; then
+            echo "::error title=Unable to query npm::The npm registry check failed; refusing to publish without confirming the version is new."
+            cat "$error_file" >&2
+            exit 1
+          fi
+
+          echo "${package_name}@${package_version} is not published yet; continuing."
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

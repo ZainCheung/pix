@@ -11,8 +11,8 @@ truth; Host does not maintain a message database.
   Noise XX/IK handshakes, encryption, replay protection, and the UniFFI API
   consumed by the private iOS client.
 - `pix-core` owns workspace boundaries, pairing, Bonjour/direct TCP, relay
-  connections, Pi process lifecycle, RPC adaptation, and the one-writer
-  invariant.
+  connections, Pi process lifecycle, RPC adaptation, the one-writer invariant,
+  and the optional host-local TUI ownership harness.
 - `pix-cli` exposes `serve`, diagnostics, workspace management, pairing, and
   service operations on supported hosts.
 
@@ -69,6 +69,45 @@ frames. The relay is content-blind: it authenticates channel roles, forwards
 opaque binary frames, applies size/rate/connection limits, and stores no
 application payload.
 
+The optional Pi TUI bridge is a separate host-local NDJSON surface. The Pi-side
+extension is distributed independently as the `@zaincheung/pix` package and is
+installed by Pi's package manager; Pix Host does not copy or replace Pi
+extensions. Its Unix socket adapter obtains peer UID/PID from the operating
+system, rechecks the process start identity, and passes only those credentials
+into the ownership registry; REGISTER payloads never declare an owner PID. TUI
+owner records share the same session lock as Pix RPC, survive a Host disconnect,
+and appear to the runtime manager as an unavailable placeholder until the TUI
+reconnects. After
+REGISTER, bounded sequenced event frames are mapped through the existing Pi
+compatibility adapter and can be forwarded to attached Pix clients. The bridge
+transport itself is not part of `pix-wire`; its snapshot cursor and partial
+assistant fields are additive wire data. Once attached, the Host can issue a
+bounded correlated command subset (`prompt`, `abort`, `model.list`, `model.set`,
+`thinking.set`, and `session.rename`) over the same local socket; the extension
+invokes Pi's official API and returns an acceptance result. Steer, follow-up,
+compact, fork, and shutdown remain intentionally unsupported for TUI owners.
+The v1 prompt path is text-only; host attachment references are rejected for a
+TUI owner until an image-content mapping is separately verified.
+
+After a TUI has successfully attached, a socket loss starts bounded background
+reconnect attempts (1s, 2s, 5s, 10s, then a 30s cap). A session that was
+standalone because Host was reachable but its first JSONL session file did not
+exist gets one bounded claim retry after Pi settles the first agent run and
+persists that file. A session that was standalone because the Host was absent
+is not late-bound automatically; the user can start the Host and use `/reload`
+when they explicitly want to attach.
+
+Session replacement has an explicit lifecycle boundary. Before Pi handles a
+`/resume`, the extension sends a bounded `preclaim` containing only the target
+session file. Host validates that the file is a discovered session in the
+current authorized workspace and, when it is free, holds the normal `PiTui`
+lease for at most five seconds. The following REGISTER consumes that same-owner
+reservation; an occupied target cancels the switch, while an unreachable Host
+fails open so Pi remains usable standalone. `/new`, `/fork`, `/quit`, and
+signal-driven shutdown emit a `session_release` marker before the socket closes;
+extension reload deliberately preserves the lease so the same Pi process can
+reconnect without opening a writer gap.
+
 ## Apple boundary
 
 The public macOS client owns menu-bar/settings UI, native folder pickers,
@@ -82,6 +121,9 @@ session storage.
 
 - Only explicitly authorized canonical workspace roots are usable.
 - A Pi session has one writer process at a time.
+- A live `PiTui` owner blocks a Pix RPC spawn even when its bridge socket is
+  temporarily unreachable; TUI owners do not consume the Pix RPC process
+  capacity budget.
 - Relay loss changes reachability only; Pi continues locally.
 - Logs are payload-free and never contain prompts, files, model output, keys,
   tokens, or relay secrets.

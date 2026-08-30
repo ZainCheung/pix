@@ -77,6 +77,18 @@ chmod 0755 "$HOME/.local/bin/pix"
 
 Make sure `$HOME/.local/bin` is on `PATH` before running `pix`.
 
+## Pi bridge package
+
+Install the optional Pix TUI bridge through Pi's package manager:
+
+```sh
+pi install npm:@zaincheung/pix
+```
+
+The package is separate from the Pix Host binary. Restart Pi, or run `/reload`
+in an existing Pi session, after installing it. If the Pix Host is unavailable,
+Pi continues to work normally without a bridge status indicator.
+
 ## Build from source
 
 Source builds need Rust 1.91 or newer and a supported Pi installation:
