@@ -2011,8 +2011,7 @@ fn peer_credentials(
             let credentials = getsockopt(stream, sockopt::PeerCredentials)
                 .map_err(|error| TuiBridgeError::PeerCredentials(error.to_string()))?;
             (
-                u32::try_from(credentials.uid())
-                    .map_err(|_| TuiBridgeError::PeerCredentials("invalid UID".to_owned()))?,
+                credentials.uid(),
                 u32::try_from(credentials.pid())
                     .map_err(|_| TuiBridgeError::PeerCredentials("invalid PID".to_owned()))?,
             )
