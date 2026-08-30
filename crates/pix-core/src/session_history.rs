@@ -218,6 +218,7 @@ impl MessagePageBuilder {
             has_more,
             next_cursor,
             revision: u64::try_from(revision).unwrap_or(u64::MAX),
+            history_items: Vec::new(),
         })
     }
 }
@@ -230,6 +231,7 @@ pub fn state(page: &SessionHistoryPage) -> HistoryState {
         has_more: page.has_more,
         cursor: page.next_cursor.clone(),
         revision: page.revision,
+        presentation: None,
     }
 }
 
@@ -254,12 +256,95 @@ pub fn cursor_revision(session_id: &str, value: &str) -> Result<usize, HistoryEr
     Ok(decode_cursor(session_id, value)?.revision)
 }
 
+/// Cursor fields used by the indexed reverse-reader path. The cursor remains
+/// opaque to clients; these values are validated only by the Host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedCursor {
+    pub before_index: usize,
+    pub revision: usize,
+    pub history_epoch: String,
+    pub snapshot_end_offset: u64,
+    pub before_offset: u64,
+    pub boundary_fingerprint: u64,
+}
+
+/// Encodes a v2 cursor tied to one in-memory history epoch and committed
+/// record boundary. The older v1 encoding remains available for compatibility.
+#[must_use]
+///
+/// # Panics
+///
+/// Panics only if the internal cursor payload cannot be serialized, which
+/// cannot occur for the fixed serializable fields in this function.
+pub fn encode_indexed_cursor(
+    session_id: &str,
+    before_index: usize,
+    revision: usize,
+    history_epoch: &str,
+    snapshot_end_offset: u64,
+    before_offset: u64,
+    boundary_fingerprint: u64,
+) -> String {
+    let payload = CursorPayload {
+        version: 2,
+        session_id: session_id.to_owned(),
+        before_index,
+        revision,
+        history_epoch: Some(history_epoch.to_owned()),
+        snapshot_end_offset: Some(snapshot_end_offset),
+        before_offset: Some(before_offset),
+        boundary_fingerprint: Some(boundary_fingerprint),
+    };
+    let encoded = serde_json::to_vec(&payload).expect("history cursor is serializable");
+    URL_SAFE_NO_PAD.encode(encoded)
+}
+
+/// Decodes a v1 or indexed v2 cursor. Callers that need reverse reads must
+/// reject v1 cursors when no offset fallback is available.
+///
+/// # Errors
+///
+/// Returns [`HistoryError::InvalidCursor`] for malformed, cross-session, or
+/// incomplete v2 payloads. Returns [`HistoryError::LegacyCursor`] for a valid
+/// v1 cursor that has no indexed byte offsets.
+pub fn indexed_cursor(session_id: &str, value: &str) -> Result<IndexedCursor, HistoryError> {
+    let payload = decode_cursor(session_id, value)?;
+    let Some(history_epoch) = payload.history_epoch else {
+        return Err(HistoryError::LegacyCursor);
+    };
+    let Some(snapshot_end_offset) = payload.snapshot_end_offset else {
+        return Err(HistoryError::LegacyCursor);
+    };
+    let Some(before_offset) = payload.before_offset else {
+        return Err(HistoryError::LegacyCursor);
+    };
+    let Some(boundary_fingerprint) = payload.boundary_fingerprint else {
+        return Err(HistoryError::LegacyCursor);
+    };
+    Ok(IndexedCursor {
+        before_index: payload.before_index,
+        revision: payload.revision,
+        history_epoch,
+        snapshot_end_offset,
+        before_offset,
+        boundary_fingerprint,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct CursorPayload {
     version: u8,
     session_id: String,
     before_index: usize,
     revision: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    history_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot_end_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before_offset: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boundary_fingerprint: Option<u64>,
 }
 
 fn encode_cursor(session_id: &str, before_index: usize, revision: usize) -> String {
@@ -268,6 +353,10 @@ fn encode_cursor(session_id: &str, before_index: usize, revision: usize) -> Stri
         session_id: session_id.to_owned(),
         before_index,
         revision,
+        history_epoch: None,
+        snapshot_end_offset: None,
+        before_offset: None,
+        boundary_fingerprint: None,
     };
     let encoded = serde_json::to_vec(&payload).expect("history cursor is serializable");
     URL_SAFE_NO_PAD.encode(encoded)
@@ -279,7 +368,15 @@ fn decode_cursor(session_id: &str, value: &str) -> Result<CursorPayload, History
         .map_err(|_| HistoryError::InvalidCursor)?;
     let payload: CursorPayload =
         serde_json::from_slice(&bytes).map_err(|_| HistoryError::InvalidCursor)?;
-    if payload.version != 1 || payload.session_id != session_id {
+    if !matches!(payload.version, 1 | 2) || payload.session_id != session_id {
+        return Err(HistoryError::InvalidCursor);
+    }
+    if payload.version == 2
+        && (payload.history_epoch.is_none()
+            || payload.snapshot_end_offset.is_none()
+            || payload.before_offset.is_none()
+            || payload.boundary_fingerprint.is_none())
+    {
         return Err(HistoryError::InvalidCursor);
     }
     Ok(payload)
@@ -291,8 +388,12 @@ pub enum HistoryError {
     InvalidLimit,
     #[error("history cursor is invalid or belongs to another session")]
     InvalidCursor,
+    #[error("history cursor uses the legacy format without indexed offsets")]
+    LegacyCursor,
     #[error("history message is {0} bytes, exceeding the wire frame budget")]
     MessageTooLarge(usize),
+    #[error("encoded history page is {0} bytes, exceeding the history target")]
+    PageTooLarge(usize),
     #[error("failed to encode a history message: {0}")]
     Encode(serde_json::Error),
 }

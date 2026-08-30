@@ -95,6 +95,20 @@ initial view. History pages are independent of live events, and iOS prepends
 them while preserving the current scroll anchor. Image entries are
 externalized before byte selection when `image_refs.v1` is active.
 
+The host may keep an ephemeral, content-free `SessionHistoryIndex` for each
+discovered JSONL file. It contains only message ordinals, byte anchors, sparse
+checkpoints, a committed complete-record fence, and an epoch/fingerprint. It
+is rebuilt or discarded on file rewrite/truncation and is never persisted, so
+Pi JSONL remains the sole durable source of truth.
+
+The structured `history_items.v1` representation keeps every selected source
+index visible: oversized or otherwise unrenderable records become bounded
+semantic placeholders instead of hiding the final exchange. The additive
+`history_presentation.v1` envelope carries the final user/terminal-assistant
+anchors and Turn state so settled process records can be collapsed while an
+active Turn remains inspectable. Predictive client-side upward prefetch is a
+presentation concern; it does not change the Host's authoritative history.
+
 Model summaries carry Pi's optional `input` modalities. Clients use the
 advertised `image` value to gate image composition; the host does not infer
 model capability from the existence of an attachment upload.

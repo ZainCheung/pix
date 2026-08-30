@@ -69,6 +69,7 @@ pub fn session_snapshot(
         queue: None,
         usage: None,
         history: None,
+        history_items: Vec::new(),
     })
 }
 

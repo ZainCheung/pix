@@ -21,11 +21,12 @@ pub use noise::{
 };
 pub use protocol::{
     ClientEnvelope, ClientRequest, CommandScope, CommandSource, CommandSummary, CompactionEvent,
-    ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HistoryState, HostModelDefaults,
+    ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HistoryAnchor, HistoryPageItem,
+    HistoryPresentation, HistoryPreview, HistoryProcessSummary, HistoryState, HostModelDefaults,
     HostSnapshot, HostSummary, ModelSummary, PromptBehavior, RelayAccess, ServerEnvelope,
     ServerEvent, SessionHistoryPage, SessionQueue, SessionSnapshot, SessionState, SessionSummary,
-    SessionUsage, ThinkingLevel, ToolEvent, WorkspaceAvailability, WorkspaceSummary,
-    is_valid_capability,
+    SessionUsage, ThinkingLevel, ToolEvent, TurnPresentationState, WorkspaceAvailability,
+    WorkspaceSummary, is_valid_capability,
 };
 pub use relay::{
     RELAY_CHANNEL_SECRET_BYTES, RelayRole, decode_relay_channel_secret, generate_join_code,
@@ -52,6 +53,8 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "session_metadata.v1",
     "image_refs.v1",
     "session_history.v1",
+    "history_items.v1",
+    "history_presentation.v1",
 ];
 /// Upper bound on capability strings a client may declare per connection.
 pub const MAX_CLIENT_CAPABILITIES: usize = 16;
@@ -66,6 +69,8 @@ pub const MAX_HISTORY_PAGE_MESSAGES: u32 = 50;
 /// Target encoded payload size for a history page. The frame limit remains
 /// one MiB; keeping pages at half that size leaves room for envelope growth.
 pub const MAX_HISTORY_PAGE_BYTES: usize = 512 * 1024;
+/// Maximum UTF-8 bytes retained in a semantic history preview.
+pub const MAX_HISTORY_PREVIEW_BYTES: usize = 32 * 1024;
 /// Attachment mime types Pi's `images` content accepts.
 pub const ATTACHMENT_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
@@ -93,6 +98,10 @@ pub enum WireError {
     ImageChunkSizeInvalid { size: u32, limit: u32 },
     #[error("history page size {size} is outside the 1..={limit} message range")]
     HistoryPageSizeInvalid { size: u32, limit: u32 },
+    #[error("history page payload is {size} bytes, exceeding the {limit} byte target")]
+    HistoryPageTooLarge { size: usize, limit: usize },
+    #[error("history page representations are invalid: {0}")]
+    HistoryItemsInvalid(&'static str),
     #[error("image reference must be sha256 followed by 64 hexadecimal characters")]
     InvalidImageReference,
     #[error("pairing token must be canonical URL-safe base64 for 32 bytes")]
