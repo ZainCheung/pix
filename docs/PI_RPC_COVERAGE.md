@@ -16,7 +16,7 @@ Status legend:
 
 | Pi RPC command | Pix surface | Status |
 | --- | --- | --- |
-| `prompt` (with `images`, `streamingBehavior`) | `session.prompt` (+ `attachment.*` uploads) | supported + exposed / images gated by `attachments.v1`; host paths are appended to prompt text |
+| `prompt` (with `images`, `streamingBehavior`) | `session.prompt` (+ `attachment.*` uploads) | supported + exposed / images gated by `attachments.v1` (`attachments.v2` enables up to nine); host paths are appended to prompt text |
 | `steer` (with `images`) | `session.steer` | supported + exposed / images gated |
 | `follow_up` (with `images`) | `session.follow_up` | supported + exposed / images gated |
 | `abort` | `session.abort` | supported + exposed |

@@ -130,6 +130,7 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                     "commands.v1".to_owned(),
                     "queue.v1".to_owned(),
                     "attachments.v1".to_owned(),
+                    "attachments.v2".to_owned(),
                     "usage.v1".to_owned(),
                     "thinking_levels.v1".to_owned(),
                     "session_metadata.v1".to_owned(),

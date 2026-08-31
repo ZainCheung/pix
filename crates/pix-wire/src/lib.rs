@@ -48,6 +48,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "commands.v1",
     "queue.v1",
     "attachments.v1",
+    "attachments.v2",
     "usage.v1",
     "thinking_levels.v1",
     "session_metadata.v1",
@@ -61,7 +62,10 @@ pub const MAX_CLIENT_CAPABILITIES: usize = 16;
 /// Maximum decoded size of one uploaded image attachment.
 pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024;
 /// Maximum attachment references on one prompt, steer, or follow-up request.
-pub const MAX_ATTACHMENTS_PER_REQUEST: usize = 4;
+///
+/// The iOS client presents up to three columns by three rows, so the wire
+/// boundary accepts the same nine-image ceiling.
+pub const MAX_ATTACHMENTS_PER_REQUEST: usize = 9;
 /// Maximum decoded bytes in one lazy historical image range.
 pub const MAX_IMAGE_CHUNK_BYTES: u32 = 512 * 1024;
 /// Maximum number of messages a history page may contain.
