@@ -37,12 +37,18 @@ const ATTACHMENT_IDLE_TTL: Duration = Duration::from_secs(600);
 /// Attachment uploads buffered per connection. This must accommodate every
 /// image that the client uploads before the prompt consumes the references.
 const MAX_PENDING_ATTACHMENTS: usize = MAX_ATTACHMENTS_PER_REQUEST;
+/// Aggregate decoded bytes reserved by unfinished uploads on one connection.
+/// Keeping this below the theoretical 9 × 4 MiB ceiling prevents a client from
+/// pinning a large amount of host memory while it delays `attachment.finish`.
+const MAX_PENDING_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+const LEGACY_MAX_ATTACHMENTS_PER_REQUEST: usize = 4;
 /// Ceiling on total base64 image bytes in one Pi prompt command; keeps the
 /// Pi RPC JSONL record comfortably below its 16 MiB limit.
 const MAX_PROMPT_IMAGE_BASE64_BYTES: usize = 12 * 1024 * 1024;
 const CAPABILITY_COMMANDS: &str = "commands.v1";
 const CAPABILITY_QUEUE: &str = "queue.v1";
 const CAPABILITY_ATTACHMENTS: &str = "attachments.v1";
+const CAPABILITY_ATTACHMENTS_V2: &str = "attachments.v2";
 const CAPABILITY_USAGE: &str = "usage.v1";
 const CAPABILITY_THINKING_LEVELS: &str = "thinking_levels.v1";
 const CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
@@ -147,6 +153,7 @@ pub struct HostProtocolDispatcher {
     /// retained for history/lazy loading; the staging entries are dropped on
     /// disconnect, expiry, or the prompt that consumes them.
     attachments: HashMap<String, PendingAttachment>,
+    pending_attachment_bytes: usize,
     metadata_events: mpsc::Receiver<ServerEvent>,
     metadata_sender: mpsc::Sender<ServerEvent>,
     metadata_cancel: Arc<AtomicBool>,
@@ -177,6 +184,7 @@ impl HostProtocolDispatcher {
             buffered_events: HashMap::new(),
             client_capabilities: HashSet::new(),
             attachments: HashMap::new(),
+            pending_attachment_bytes: 0,
             metadata_events,
             metadata_sender,
             metadata_cancel: Arc::new(AtomicBool::new(true)),
@@ -331,6 +339,7 @@ impl HostProtocolDispatcher {
         self.event_receivers.clear();
         self.buffered_events.clear();
         self.attachments.clear();
+        self.pending_attachment_bytes = 0;
     }
 
     pub(crate) fn prepare_dispatch(&mut self, envelope: ClientEnvelope) -> Vec<PendingResponse> {
@@ -529,7 +538,7 @@ impl HostProtocolDispatcher {
                         "Attachment ID is already in use",
                     ));
                 }
-                if self.attachments.len() >= MAX_PENDING_ATTACHMENTS {
+                if self.attachments.len() >= self.max_attachments_per_request() {
                     return Err(DispatchError::InvalidAttachment(
                         "Too many pending attachments on this connection",
                     ));
@@ -537,6 +546,16 @@ impl HostProtocolDispatcher {
                 let expected_size = usize::try_from(size).map_err(|_| {
                     DispatchError::InvalidAttachment("Attachment size is invalid for this host")
                 })?;
+                if self
+                    .pending_attachment_bytes
+                    .checked_add(expected_size)
+                    .is_none_or(|bytes| bytes > MAX_PENDING_ATTACHMENT_BYTES)
+                {
+                    return Err(DispatchError::InvalidAttachment(
+                        "Pending attachment bytes exceed the per-connection limit",
+                    ));
+                }
+                self.pending_attachment_bytes += expected_size;
                 self.attachments.insert(
                     attachment_id,
                     PendingAttachment {
@@ -556,10 +575,14 @@ impl HostProtocolDispatcher {
                 data,
             } => {
                 self.require_capability(CAPABILITY_ATTACHMENTS)?;
-                let attachment = self.attachments.get_mut(&attachment_id).ok_or(
-                    DispatchError::InvalidAttachment("Attachment upload was not found"),
-                )?;
-                if attachment.ready {
+                let is_ready = self
+                    .attachments
+                    .get(&attachment_id)
+                    .ok_or(DispatchError::InvalidAttachment(
+                        "Attachment upload was not found",
+                    ))?
+                    .ready;
+                if is_ready {
                     return Err(DispatchError::InvalidAttachment(
                         "Attachment upload is already finished",
                     ));
@@ -567,39 +590,65 @@ impl HostProtocolDispatcher {
                 let bytes = STANDARD.decode(&data).map_err(|_| {
                     DispatchError::InvalidAttachment("Attachment chunk is not canonical base64")
                 })?;
-                if attachment.buffer.len() + bytes.len() > attachment.expected_size {
-                    self.attachments.remove(&attachment_id);
+                let exceeds_size = self
+                    .attachments
+                    .get(&attachment_id)
+                    .is_some_and(|attachment| {
+                        attachment.buffer.len() + bytes.len() > attachment.expected_size
+                    });
+                if exceeds_size {
+                    self.remove_attachment(&attachment_id);
                     return Err(DispatchError::InvalidAttachment(
                         "Attachment chunks exceed the declared size",
                     ));
                 }
+                let attachment = self.attachments.get_mut(&attachment_id).ok_or(
+                    DispatchError::InvalidAttachment("Attachment upload was not found"),
+                )?;
                 attachment.buffer.extend_from_slice(&bytes);
                 attachment.updated = Instant::now();
                 Ok(vec![ready(ServerEvent::RequestAck)])
             }
             ClientRequest::AttachmentFinish { attachment_id } => {
                 self.require_capability(CAPABILITY_ATTACHMENTS)?;
-                let attachment = self.attachments.get_mut(&attachment_id).ok_or(
-                    DispatchError::InvalidAttachment("Attachment upload was not found"),
-                )?;
-                if attachment.buffer.len() != attachment.expected_size {
-                    self.attachments.remove(&attachment_id);
+                let expected_size = self
+                    .attachments
+                    .get(&attachment_id)
+                    .ok_or(DispatchError::InvalidAttachment(
+                        "Attachment upload was not found",
+                    ))?
+                    .expected_size;
+                let size_matches = self
+                    .attachments
+                    .get(&attachment_id)
+                    .is_some_and(|attachment| attachment.buffer.len() == expected_size);
+                if !size_matches {
+                    self.remove_attachment(&attachment_id);
                     return Err(DispatchError::InvalidAttachment(
                         "Attachment byte count does not match the declared size",
                     ));
                 }
-                let asset = self.host.image_assets().persist_named(
-                    attachment.session_id,
-                    &attachment_id,
-                    attachment.mime_type.clone(),
-                    &attachment.buffer,
-                )?;
-                attachment.asset = Some(asset);
-                // Once the durable source exists, do not retain a second full
-                // copy in the connection-scoped staging map.
-                attachment.buffer.clear();
-                attachment.ready = true;
-                attachment.updated = Instant::now();
+                let asset = {
+                    let attachment = self.attachments.get(&attachment_id).ok_or(
+                        DispatchError::InvalidAttachment("Attachment upload was not found"),
+                    )?;
+                    self.host.image_assets().persist_named(
+                        attachment.session_id,
+                        &attachment_id,
+                        attachment.mime_type.clone(),
+                        &attachment.buffer,
+                    )?
+                };
+                if let Some(attachment) = self.attachments.get_mut(&attachment_id) {
+                    attachment.asset = Some(asset);
+                    // Once the durable source exists, do not retain a second
+                    // full copy in the connection-scoped staging map.
+                    attachment.buffer.clear();
+                    attachment.ready = true;
+                    attachment.updated = Instant::now();
+                }
+                self.pending_attachment_bytes =
+                    self.pending_attachment_bytes.saturating_sub(expected_size);
                 Ok(vec![ready(ServerEvent::RequestAck)])
             }
             ClientRequest::ImageGet {
@@ -1227,14 +1276,18 @@ impl HostProtocolDispatcher {
             return Ok((Vec::new(), Vec::new()));
         }
         self.require_capability(CAPABILITY_ATTACHMENTS)?;
+        if attachments.len() > self.max_attachments_per_request() {
+            return Err(DispatchError::InvalidAttachment(
+                "Too many attachments for this client capability",
+            ));
+        }
         let session_id = self.require_attached(session_id)?;
         let mut images = Vec::with_capacity(attachments.len());
         let mut paths = Vec::with_capacity(attachments.len());
         let mut total_base64 = 0_usize;
         for attachment_id in attachments {
             let attachment =
-                self.attachments
-                    .remove(attachment_id)
+                self.remove_attachment(attachment_id)
                     .ok_or(DispatchError::InvalidAttachment(
                         "Attachment upload was not found",
                     ))?;
@@ -1275,9 +1328,34 @@ impl HostProtocolDispatcher {
         }
     }
 
+    fn max_attachments_per_request(&self) -> usize {
+        if self.client_capabilities.contains(CAPABILITY_ATTACHMENTS_V2) {
+            MAX_PENDING_ATTACHMENTS
+        } else {
+            LEGACY_MAX_ATTACHMENTS_PER_REQUEST
+        }
+    }
+
+    fn remove_attachment(&mut self, attachment_id: &str) -> Option<PendingAttachment> {
+        let attachment = self.attachments.remove(attachment_id)?;
+        if !attachment.ready {
+            self.pending_attachment_bytes = self
+                .pending_attachment_bytes
+                .saturating_sub(attachment.expected_size);
+        }
+        Some(attachment)
+    }
+
     fn sweep_expired_attachments(&mut self) {
-        self.attachments
-            .retain(|_, attachment| attachment.updated.elapsed() < ATTACHMENT_IDLE_TTL);
+        let expired = self
+            .attachments
+            .iter()
+            .filter(|(_, attachment)| attachment.updated.elapsed() >= ATTACHMENT_IDLE_TTL)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for attachment_id in expired {
+            self.remove_attachment(&attachment_id);
+        }
     }
 
     fn subscribe_session(&mut self, session_id: SessionId) -> Result<(), DispatchError> {

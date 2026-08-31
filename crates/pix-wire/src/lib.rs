@@ -48,6 +48,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "commands.v1",
     "queue.v1",
     "attachments.v1",
+    "attachments.v2",
     "usage.v1",
     "thinking_levels.v1",
     "session_metadata.v1",
