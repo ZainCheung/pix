@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pix_wire::{
-    ClientEnvelope, ClientRequest, ErrorCode, HOST_CAPABILITIES, HostSnapshot, HostSummary,
-    MAX_IMAGE_CHUNK_BYTES, PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
-    SessionSummary as WireSessionSummary, WorkspaceAvailability, WorkspaceSummary,
+    ClientEnvelope, ClientRequest, ErrorCode, HOST_CAPABILITIES, HistoryPageItem,
+    HistoryPresentation, HistoryProcessSummary, HostSnapshot, HostSummary, MAX_IMAGE_CHUNK_BYTES,
+    PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
+    SessionSummary as WireSessionSummary, TurnPresentationState, WorkspaceAvailability,
+    WorkspaceSummary,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -24,6 +26,7 @@ use crate::pi_rpc::{
 };
 use crate::runtime_manager::{RuntimeManager, RuntimeManagerError};
 use crate::session::{DiscoveredSession, PiSessionStore, SessionError, SessionMetadataIndex};
+use crate::session_history::{self, HistoryError};
 use crate::session_lock::SessionId;
 use crate::workspace::{WorkspaceError, WorkspaceRegistry};
 
@@ -43,6 +46,9 @@ const CAPABILITY_USAGE: &str = "usage.v1";
 const CAPABILITY_THINKING_LEVELS: &str = "thinking_levels.v1";
 const CAPABILITY_SESSION_METADATA: &str = "session_metadata.v1";
 const CAPABILITY_IMAGE_REFS: &str = "image_refs.v1";
+const CAPABILITY_SESSION_HISTORY: &str = "session_history.v1";
+const CAPABILITY_HISTORY_ITEMS: &str = "history_items.v1";
+const CAPABILITY_HISTORY_PRESENTATION: &str = "history_presentation.v1";
 const SESSION_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(8);
 const RUNTIME_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -405,6 +411,15 @@ impl HostProtocolDispatcher {
             ClientRequest::SessionAttach { session_id } => {
                 Ok(vec![ready(self.attach_session(&session_id)?)])
             }
+            ClientRequest::SessionHistoryRequest {
+                session_id,
+                before,
+                limit,
+            } => Ok(vec![ready(self.session_history_page(
+                &session_id,
+                &before,
+                limit,
+            )?)]),
             ClientRequest::SessionRename { session_id, name } => {
                 let session_id = self.require_attached(&session_id)?;
                 self.runtimes
@@ -850,14 +865,66 @@ impl HostProtocolDispatcher {
     ) -> Result<ServerEvent, DispatchError> {
         self.ensure_device_authorized()?;
         self.ensure_active_session_authorized(session_id)?;
-        let (snapshot, through_sequence) = self
-            .runtimes
-            .snapshot_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+        let history_capability = self
+            .client_capabilities
+            .contains(CAPABILITY_SESSION_HISTORY);
+        let history_items_capability = self.client_capabilities.contains(CAPABILITY_HISTORY_ITEMS);
+        let history_presentation_capability = self
+            .client_capabilities
+            .contains(CAPABILITY_HISTORY_PRESENTATION);
+        let (runtime_snapshot, through_sequence) = if history_capability {
+            self.runtimes
+                .snapshot_state_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?
+        } else {
+            self.runtimes
+                .snapshot_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?
+        };
         if let Some(through_sequence) = through_sequence {
             self.discard_tui_events_through(session_id, through_sequence);
         }
-        let mut snapshot = pi_bridge::session_snapshot(session_id, snapshot)?;
-        if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+        let mut snapshot = pi_bridge::session_snapshot(session_id, runtime_snapshot)?;
+        if history_capability {
+            let mut page = if let Some(page) = self.read_history_page(session_id, None, 50)? {
+                page
+            } else {
+                // A brand-new Pi session may not have flushed its JSONL
+                // header yet. Fall back once to Pi's in-memory view so the
+                // create/first-prompt path remains immediately usable.
+                let (full, through_sequence) = self
+                    .runtimes
+                    .snapshot_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+                if let Some(through_sequence) = through_sequence {
+                    self.discard_tui_events_through(session_id, through_sequence);
+                }
+                let mut messages = full.messages;
+                if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                    self.host
+                        .image_assets()
+                        .externalize_messages(session_id, &mut messages)?;
+                }
+                session_history::initial_page(&session_id.to_string(), &messages)?
+            };
+            if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                self.host
+                    .image_assets()
+                    .externalize_messages(session_id, &mut page.messages)?;
+            }
+            if history_items_capability {
+                promote_page_to_history_items(&mut page);
+            }
+            let mut history = session_history::state(&page);
+            if history_presentation_capability {
+                let mut presentation = self
+                    .read_history_presentation(session_id, snapshot.state)
+                    .unwrap_or_else(|_| empty_history_presentation(snapshot.state));
+                suppress_presented_previews(&mut presentation, &page);
+                history.presentation = Some(presentation);
+            }
+            snapshot.messages = page.messages;
+            snapshot.history_items = page.history_items;
+            snapshot.history = Some(history);
+        }
+        if !history_capability && self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
             self.host
                 .image_assets()
                 .externalize_messages(session_id, &mut snapshot.messages)?;
@@ -878,6 +945,143 @@ impl HostProtocolDispatcher {
             self.enrich_legacy_snapshot(&mut snapshot, session_id);
         }
         Ok(ServerEvent::SessionSnapshot { snapshot })
+    }
+
+    /// Reads a bounded history page from the native Pi JSONL session file.
+    /// Returns `None` only for a new runtime whose file has not been flushed;
+    /// callers may then use Pi's in-memory compatibility path once.
+    fn read_history_page(
+        &self,
+        session_id: SessionId,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Option<pix_wire::SessionHistoryPage>, DispatchError> {
+        let started = Instant::now();
+        let workspace = self
+            .runtimes
+            .workspace(session_id)
+            .ok_or(DispatchError::SessionNotFound(session_id))?;
+        let store = PiSessionStore::for_workspace(&workspace)?;
+        let mut catalog = self
+            .host
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let include_items = self.client_capabilities.contains(CAPABILITY_HISTORY_ITEMS);
+        let result = if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+            let assets = self.host.image_assets();
+            store.history_page_with_transform_cached_options(
+                &mut catalog.sessions,
+                session_id,
+                cursor,
+                limit,
+                include_items,
+                |mut message| {
+                    assets.externalize_messages(session_id, std::slice::from_mut(&mut message))?;
+                    Ok(message)
+                },
+            )
+        } else {
+            store.history_page_with_transform_cached_options(
+                &mut catalog.sessions,
+                session_id,
+                cursor,
+                limit,
+                include_items,
+                Ok,
+            )
+        };
+        match result {
+            Ok(page) => {
+                let page_bytes = serde_json::to_vec(&page).map_or(0, |bytes| bytes.len());
+                crate::diagnostics::record(
+                    "session.history.page",
+                    &[
+                        ("read_ms", crate::diagnostics::elapsed_ms(started)),
+                        ("page_bytes", u64::try_from(page_bytes).unwrap_or(u64::MAX)),
+                        (
+                            "item_count",
+                            u64::try_from(if page.history_items.is_empty() {
+                                page.messages.len()
+                            } else {
+                                page.history_items.len()
+                            })
+                            .unwrap_or(u64::MAX),
+                        ),
+                        ("has_more", u64::from(page.has_more)),
+                        ("cursor_present", u64::from(cursor.is_some())),
+                    ],
+                );
+                Ok(Some(page))
+            }
+            Err(SessionError::NotFound(_)) => Ok(None),
+            Err(error) => {
+                crate::diagnostics::record(
+                    "session.history.page",
+                    &[
+                        ("read_ms", crate::diagnostics::elapsed_ms(started)),
+                        ("failed", 1),
+                    ],
+                );
+                Err(error.into())
+            }
+        }
+    }
+
+    fn read_history_presentation(
+        &self,
+        session_id: SessionId,
+        state: SessionState,
+    ) -> Result<HistoryPresentation, DispatchError> {
+        let workspace = self
+            .runtimes
+            .workspace(session_id)
+            .ok_or(DispatchError::SessionNotFound(session_id))?;
+        let store = PiSessionStore::for_workspace(&workspace)?;
+        let mut catalog = self
+            .host
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(store.history_presentation_cached(&mut catalog.sessions, session_id, state)?)
+    }
+
+    fn session_history_page(
+        &mut self,
+        session_id: &str,
+        before: &str,
+        limit: u32,
+    ) -> Result<ServerEvent, DispatchError> {
+        self.require_capability(CAPABILITY_SESSION_HISTORY)?;
+        let session_id = self.require_attached(session_id)?;
+        let mut page = if let Some(page) =
+            self.read_history_page(session_id, Some(before), limit)?
+        {
+            page
+        } else {
+            let (snapshot, through_sequence) = self
+                .runtimes
+                .snapshot_with_timeout_and_cursor(session_id, SESSION_SNAPSHOT_TIMEOUT)?;
+            if let Some(through_sequence) = through_sequence {
+                self.discard_tui_events_through(session_id, through_sequence);
+            }
+            let mut messages = snapshot.messages;
+            if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+                self.host
+                    .image_assets()
+                    .externalize_messages(session_id, &mut messages)?;
+            }
+            session_history::page_from_cursor(&session_id.to_string(), &messages, before, limit)?
+        };
+        if self.client_capabilities.contains(CAPABILITY_IMAGE_REFS) {
+            self.host
+                .image_assets()
+                .externalize_messages(session_id, &mut page.messages)?;
+        }
+        if self.client_capabilities.contains(CAPABILITY_HISTORY_ITEMS) {
+            promote_page_to_history_items(&mut page);
+        }
+        Ok(ServerEvent::SessionHistoryPage { page })
     }
 
     fn enrich_legacy_snapshot(
@@ -1187,6 +1391,11 @@ impl HostProtocolDispatcher {
         session_id: SessionId,
     ) -> Result<LocatedSession, DispatchError> {
         let config = self.host.snapshot();
+        let mut catalog = self
+            .host
+            .catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for workspace in &config.workspaces {
             let mut candidate = config.clone();
             let Ok(root) = WorkspaceRegistry::new(&mut candidate).authorized_root(workspace.id)
@@ -1194,7 +1403,7 @@ impl HostProtocolDispatcher {
                 continue;
             };
             let store = PiSessionStore::for_workspace(&root)?;
-            match store.find(session_id) {
+            match store.find_cached(&mut catalog.sessions, session_id) {
                 Ok(session) => {
                     return Ok(LocatedSession {
                         workspace: root,
@@ -1207,6 +1416,75 @@ impl HostProtocolDispatcher {
             }
         }
         Err(DispatchError::SessionNotFound(session_id))
+    }
+}
+
+fn promote_page_to_history_items(page: &mut pix_wire::SessionHistoryPage) {
+    if !page.history_items.is_empty() {
+        page.messages.clear();
+        return;
+    }
+    page.history_items = page
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(offset, message)| HistoryPageItem::Message {
+            index: page.start_index.saturating_add(offset),
+            message: message.clone(),
+        })
+        .collect();
+    page.messages.clear();
+}
+
+fn suppress_presented_previews(
+    presentation: &mut HistoryPresentation,
+    page: &pix_wire::SessionHistoryPage,
+) {
+    let contains = |index: usize| {
+        if page.history_items.is_empty() {
+            index >= page.start_index
+                && index < page.start_index.saturating_add(page.messages.len())
+        } else {
+            page.history_items.iter().any(|item| match item {
+                HistoryPageItem::Message {
+                    index: item_index, ..
+                }
+                | HistoryPageItem::Placeholder {
+                    index: item_index, ..
+                } => *item_index == index,
+            })
+        }
+    };
+    if let Some(anchor) = presentation.user_anchor.as_mut()
+        && contains(anchor.source_index)
+    {
+        anchor.preview = None;
+    }
+    if let Some(anchor) = presentation.terminal_anchor.as_mut()
+        && contains(anchor.source_index)
+    {
+        anchor.preview = None;
+    }
+}
+
+fn empty_history_presentation(state: SessionState) -> HistoryPresentation {
+    let turn_state = match state {
+        SessionState::Compacting => TurnPresentationState::Compacted,
+        SessionState::Running | SessionState::Starting => TurnPresentationState::Active,
+        SessionState::Unavailable => TurnPresentationState::Failed,
+        SessionState::Sleeping | SessionState::Idle => TurnPresentationState::Completed,
+    };
+    HistoryPresentation {
+        turn_state,
+        user_anchor: None,
+        terminal_anchor: None,
+        process: HistoryProcessSummary {
+            thought_count: 0,
+            tool_count: 0,
+            error_count: 0,
+            omitted: false,
+        },
+        error_summary: None,
     }
 }
 
@@ -1331,9 +1609,12 @@ pub enum DispatchError {
     Runtime(#[from] RuntimeManagerError),
     #[error(transparent)]
     PiBridge(#[from] PiBridgeError),
+    #[error(transparent)]
+    History(#[from] HistoryError),
 }
 
 impl DispatchError {
+    #[allow(clippy::too_many_lines)]
     fn public_event(&self) -> ServerEvent {
         let (code, message, retryable) = match self {
             Self::InvalidSessionId => (ErrorCode::InvalidRequest, "Invalid session ID", false),
@@ -1409,6 +1690,21 @@ impl DispatchError {
             ) => (
                 ErrorCode::Conflict,
                 "Session state changed; attach again for a fresh snapshot",
+                true,
+            ),
+            Self::History(HistoryError::InvalidCursor | HistoryError::InvalidLimit) => (
+                ErrorCode::InvalidRequest,
+                "Session history cursor or page size is invalid",
+                false,
+            ),
+            Self::History(HistoryError::MessageTooLarge(_)) => (
+                ErrorCode::PiUnavailable,
+                "A session history message is too large to display",
+                false,
+            ),
+            Self::History(_) => (
+                ErrorCode::PiUnavailable,
+                "Session history is temporarily unavailable",
                 true,
             ),
             Self::Workspace(_) | Self::Session(_) | Self::Runtime(_) | Self::PiBridge(_) => (

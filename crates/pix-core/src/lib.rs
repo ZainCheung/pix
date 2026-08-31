@@ -23,6 +23,8 @@ pub mod runtime;
 pub mod runtime_manager;
 pub mod secure_connection;
 pub mod session;
+pub mod session_history;
+pub mod session_history_reader;
 pub mod session_lock;
 pub mod tui_bridge;
 pub mod workspace;
@@ -58,7 +60,8 @@ pub use runtime_manager::{
 };
 pub use secure_connection::{AuthenticatedConnection, PendingPairingConnection};
 pub use session::{
-    DiscoveredSession, PiSessionStore, SessionListTiming, SessionMetadataIndex, SessionSnapshot,
+    DiscoveredSession, HistoryCheckpoint, HistoryMessageAnchor, HistoryProcessCounts,
+    PiSessionStore, SessionHistoryIndex, SessionListTiming, SessionMetadataIndex, SessionSnapshot,
     SessionSummary,
 };
 pub use session_lock::{

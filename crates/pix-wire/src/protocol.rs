@@ -4,7 +4,8 @@ use uuid::Uuid;
 
 use crate::{
     ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST,
-    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_IMAGE_CHUNK_BYTES,
+    MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_HISTORY_PAGE_BYTES,
+    MAX_HISTORY_PAGE_MESSAGES, MAX_HISTORY_PREVIEW_BYTES, MAX_IMAGE_CHUNK_BYTES,
     MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
 };
 
@@ -116,6 +117,15 @@ pub enum ClientRequest {
     },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },
+    /// Requests the next bounded page of older history. The cursor is opaque
+    /// to clients; `before` is the cursor returned by `session.snapshot` or a
+    /// previous `session.history.page` event.
+    #[serde(rename = "session.history.request")]
+    SessionHistoryRequest {
+        session_id: String,
+        before: String,
+        limit: u32,
+    },
     #[serde(rename = "session.rename")]
     SessionRename { session_id: String, name: String },
     #[serde(rename = "session.release")]
@@ -219,6 +229,12 @@ pub enum ServerEvent {
     },
     #[serde(rename = "session.snapshot")]
     SessionSnapshot { snapshot: SessionSnapshot },
+    /// One bounded page of messages preceding the current client timeline.
+    #[serde(rename = "session.history.page")]
+    SessionHistoryPage {
+        #[serde(flatten)]
+        page: SessionHistoryPage,
+    },
     #[serde(rename = "session.state")]
     SessionState {
         session_id: String,
@@ -387,6 +403,126 @@ pub struct SessionSnapshot {
     /// connections that declared `usage.v1`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<SessionUsage>,
+    /// Bounded history metadata, present only for clients that declared
+    /// `session_history.v1`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<HistoryState>,
+    /// Structured history representations, present only for clients that
+    /// declared `history_items.v1`. Legacy clients use `messages` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_items: Vec<HistoryPageItem>,
+}
+
+/// Cursor state for one bounded session history window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryState {
+    /// Index of the first message in `SessionSnapshot.messages` within the
+    /// host's current history view. It is used only for stable client item IDs.
+    pub start_index: usize,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// Revision of the history boundary captured for this view. Clients treat
+    /// it as opaque and discard a page from a different revision instead of
+    /// merging unrelated history.
+    pub revision: u64,
+    /// Semantic tail metadata, present whenever `history_presentation.v1` is
+    /// negotiated. The envelope is intentionally small and may contain
+    /// anchors without embedded previews when the raw page already includes
+    /// the referenced messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<HistoryPresentation>,
+}
+
+/// One bounded page of older session messages.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionHistoryPage {
+    pub session_id: String,
+    pub messages: Vec<Value>,
+    pub start_index: usize,
+    pub has_more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub revision: u64,
+    /// Structured history representations, present only for clients that
+    /// declared `history_items.v1`. Legacy clients use `messages` instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history_items: Vec<HistoryPageItem>,
+}
+
+/// A contiguous history item. Every logical source index in a page has one
+/// representation, but a representation may be a bounded placeholder when a
+/// canonical Pi message cannot fit in the wire budget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HistoryPageItem {
+    /// The complete canonical Pi message for this source index.
+    Message { index: usize, message: Value },
+    /// A bounded representation for an oversized or otherwise unrenderable
+    /// canonical message. `preview` is semantic text, never a raw JSON slice.
+    Placeholder {
+        index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role: Option<String>,
+        preview: String,
+        original_bytes: usize,
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_ref: Option<String>,
+    },
+}
+
+/// An anchor into the logical history message space. An embedded preview is
+/// only necessary when the corresponding page item is not present in the
+/// initial window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryAnchor {
+    pub source_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<HistoryPreview>,
+}
+
+/// A bounded semantic preview of a history message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPreview {
+    pub role: String,
+    pub text: String,
+    pub original_bytes: usize,
+    pub truncated: bool,
+}
+
+/// Counts for process records belonging to the target Turn. These counters do
+/// not carry message bodies and are safe to include in the small envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryProcessSummary {
+    pub thought_count: u32,
+    pub tool_count: u32,
+    pub error_count: u32,
+    pub omitted: bool,
+}
+
+/// Presentation state for the logical Turn represented by the semantic tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnPresentationState {
+    Active,
+    Completed,
+    Failed,
+    Aborted,
+    Compacted,
+}
+
+/// Semantic tail envelope returned with a history-capable session snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryPresentation {
+    pub turn_state: TurnPresentationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_anchor: Option<HistoryAnchor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_anchor: Option<HistoryAnchor>,
+    pub process: HistoryProcessSummary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -564,6 +700,21 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
         | ClientRequest::SessionRelease { session_id }
         | ClientRequest::SessionAbort { session_id }
         | ClientRequest::ModelList { session_id } => validate_identifier("session_id", session_id),
+        ClientRequest::SessionHistoryRequest {
+            session_id,
+            before,
+            limit,
+        } => {
+            validate_identifier("session_id", session_id)?;
+            validate_identifier("before", before)?;
+            if *limit == 0 || *limit > MAX_HISTORY_PAGE_MESSAGES {
+                return Err(WireError::HistoryPageSizeInvalid {
+                    size: *limit,
+                    limit: MAX_HISTORY_PAGE_MESSAGES,
+                });
+            }
+            Ok(())
+        }
         ClientRequest::SessionRename { session_id, name } => {
             validate_identifier("session_id", session_id)?;
             validate_text("name", name)
@@ -713,7 +864,57 @@ fn validate_image_ref(value: &str) -> Result<(), WireError> {
 }
 
 fn validate_server_event(event: &ServerEvent) -> Result<(), WireError> {
-    validate_all_strings(&serde_json::to_value(event).map_err(WireError::Encode)?)
+    validate_all_strings(&serde_json::to_value(event).map_err(WireError::Encode)?)?;
+    if let ServerEvent::SessionHistoryPage { page } = event {
+        validate_history_page(page)?;
+    }
+    Ok(())
+}
+
+fn validate_history_page(page: &SessionHistoryPage) -> Result<(), WireError> {
+    let count = if page.history_items.is_empty() {
+        page.messages.len()
+    } else {
+        if !page.messages.is_empty() {
+            return Err(WireError::HistoryItemsInvalid(
+                "messages and history_items cannot both be populated",
+            ));
+        }
+        let expected = page.start_index;
+        for (offset, item) in page.history_items.iter().enumerate() {
+            let index = match item {
+                HistoryPageItem::Message { index, .. }
+                | HistoryPageItem::Placeholder { index, .. } => *index,
+            };
+            if index != expected.saturating_add(offset) {
+                return Err(WireError::HistoryItemsInvalid(
+                    "history item indexes must be contiguous",
+                ));
+            }
+            if let HistoryPageItem::Placeholder { preview, .. } = item
+                && preview.len() > MAX_HISTORY_PREVIEW_BYTES
+            {
+                return Err(WireError::HistoryItemsInvalid(
+                    "history preview exceeds the bounded preview limit",
+                ));
+            }
+        }
+        page.history_items.len()
+    };
+    if count > usize::try_from(MAX_HISTORY_PAGE_MESSAGES).unwrap_or(usize::MAX) {
+        return Err(WireError::HistoryPageSizeInvalid {
+            size: u32::try_from(count).unwrap_or(u32::MAX),
+            limit: MAX_HISTORY_PAGE_MESSAGES,
+        });
+    }
+    let encoded = serde_json::to_vec(page).map_err(WireError::Encode)?;
+    if encoded.len() > MAX_HISTORY_PAGE_BYTES {
+        return Err(WireError::HistoryPageTooLarge {
+            size: encoded.len(),
+            limit: MAX_HISTORY_PAGE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 fn encode_value<T: Serialize>(value: &T) -> Result<Vec<u8>, WireError> {
@@ -810,6 +1011,162 @@ mod tests {
         let encoded = message.encode().expect("encode");
         assert!(String::from_utf8_lossy(&encoded).contains("session.prompt"));
         assert_eq!(ClientEnvelope::decode(&encoded).expect("decode"), message);
+    }
+
+    #[test]
+    fn history_request_and_page_use_dotted_names_and_flattened_fields() {
+        let request = ClientEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: 8,
+            request: ClientRequest::SessionHistoryRequest {
+                session_id: "session-1".into(),
+                before: "opaque-cursor".into(),
+                limit: 50,
+            },
+        };
+        assert_eq!(
+            ClientEnvelope::decode(&request.encode().expect("encode request")).expect("decode"),
+            request
+        );
+
+        let event = ServerEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: Some(8),
+            event: ServerEvent::SessionHistoryPage {
+                page: super::SessionHistoryPage {
+                    session_id: "session-1".into(),
+                    messages: vec![serde_json::json!({"role":"user","content":"old"})],
+                    start_index: 0,
+                    has_more: false,
+                    next_cursor: None,
+                    revision: 1,
+                    history_items: Vec::new(),
+                },
+            },
+        };
+        let encoded = event.encode().expect("encode page");
+        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("JSON page");
+        assert_eq!(value["type"], "session.history.page");
+        assert_eq!(value["session_id"], "session-1");
+        assert!(value.get("page").is_none());
+        assert_eq!(
+            ServerEnvelope::decode(&encoded).expect("decode page"),
+            event
+        );
+
+        assert!(matches!(
+            ClientEnvelope::decode(
+                br#"{"protocol":1,"request_id":9,"type":"session.history.request","session_id":"session-1","before":"cursor","limit":51}"#
+            ),
+            Err(WireError::HistoryPageSizeInvalid { size: 51, .. })
+        ));
+    }
+
+    #[test]
+    fn structured_history_items_round_trip_and_validate_contiguous_indexes() {
+        let event = ServerEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: Some(11),
+            event: ServerEvent::SessionHistoryPage {
+                page: super::SessionHistoryPage {
+                    session_id: "session-1".into(),
+                    messages: Vec::new(),
+                    start_index: 7,
+                    has_more: true,
+                    next_cursor: Some("opaque".into()),
+                    revision: 12,
+                    history_items: vec![
+                        super::HistoryPageItem::Placeholder {
+                            index: 7,
+                            role: Some("user".into()),
+                            preview: "question".into(),
+                            original_bytes: 70 * 1024 * 1024,
+                            truncated: true,
+                            content_ref: None,
+                        },
+                        super::HistoryPageItem::Message {
+                            index: 8,
+                            message: serde_json::json!({"role":"assistant","content":"done"}),
+                        },
+                    ],
+                },
+            },
+        };
+        let encoded = event.encode().expect("encode structured page");
+        let decoded = ServerEnvelope::decode(&encoded).expect("decode structured page");
+        assert_eq!(decoded, event);
+
+        let mut invalid = event.clone();
+        if let ServerEvent::SessionHistoryPage { page } = &mut invalid.event {
+            page.history_items[1] = super::HistoryPageItem::Message {
+                index: 9,
+                message: serde_json::json!({"role":"assistant","content":"gap"}),
+            };
+        }
+        assert!(matches!(
+            invalid.encode(),
+            Err(WireError::HistoryItemsInvalid(
+                "history item indexes must be contiguous"
+            ))
+        ));
+    }
+
+    #[test]
+    fn history_presentation_is_additive_and_old_snapshots_still_decode() {
+        let value = serde_json::json!({
+            "protocol": 1,
+            "type": "session.snapshot",
+            "snapshot": {
+                "id": "session-1",
+                "name": null,
+                "state": "idle",
+                "model": null,
+                "thinking_level": "medium",
+                "messages": [],
+                "pending_prompts": [],
+                "active_tools": [],
+                "history": {
+                    "start_index": 0,
+                    "has_more": false,
+                    "cursor": null,
+                    "revision": 1,
+                    "presentation": {
+                        "turn_state": "completed",
+                        "user_anchor": {
+                            "source_index": 0,
+                            "preview": {
+                                "role": "user",
+                                "text": "hello",
+                                "original_bytes": 42,
+                                "truncated": false
+                            }
+                        },
+                        "terminal_anchor": null,
+                        "process": {
+                            "thought_count": 0,
+                            "tool_count": 0,
+                            "error_count": 0,
+                            "omitted": false
+                        },
+                        "error_summary": null
+                    }
+                }
+            }
+        });
+        let encoded = serde_json::to_vec(&value).expect("encode snapshot");
+        let envelope = ServerEnvelope::decode(&encoded).expect("decode snapshot");
+        let ServerEvent::SessionSnapshot { snapshot } = envelope.event else {
+            panic!("expected snapshot");
+        };
+        assert_eq!(
+            snapshot
+                .history
+                .and_then(|history| history.presentation)
+                .and_then(|presentation| presentation.user_anchor)
+                .map(|anchor| anchor.source_index),
+            Some(0)
+        );
+        assert!(snapshot.history_items.is_empty());
     }
 
     #[test]

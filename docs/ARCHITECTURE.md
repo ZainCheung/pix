@@ -146,6 +146,36 @@ session storage.
   a later unsolicited `session.metadata` event. Legacy clients keep the
   fields in the snapshot, but each optional probe has a short best-effort
   deadline so it cannot hold the connection indefinitely.
+- Clients declaring `session_history.v1` receive only a recent, byte-bounded
+  history window in `session.snapshot`. Older messages are read incrementally
+  from Pi's native JSONL source through opaque-cursor
+  `session.history.request`/`session.history.page` exchanges. The cursor fixes
+  a revision boundary so live Pi events can continue independently while a
+  reader pages toward the beginning; the 1 MiB encrypted-frame limit remains a
+  frame limit, not a session-size limit. Host keeps only an ephemeral,
+  content-free `SessionHistoryIndex` (message ordinals, byte anchors, sparse
+  checkpoints, a committed JSONL fence, and an epoch/fingerprint); Pi JSONL is
+  still the only durable source of message content.
+- Clients declaring `history_items.v1` receive the same window as contiguous
+  `history_items` keyed by stable source indexes. A message that is too large
+  or not renderable as one bounded wire item becomes a semantic placeholder
+  with a capped preview and original byte count, so a large middle record
+  cannot hide the final user/assistant exchange. Legacy clients continue to
+  receive `messages` and the v1 cursor shape.
+- Clients declaring `history_presentation.v1` receive a small presentation
+  envelope inside `history`. It identifies the final user message, the final
+  terminal assistant result, the active/completed/failed/aborted/compacted
+  Turn state, and counts for omitted thought/tool/error process records.
+  Previews are included only when the corresponding anchor is outside the
+  current page. For an idle or sleeping session, clients may collapse settled
+  process rows by default; an active session keeps the current Turn's process
+  visible while it is running.
+- The initial page is selected against the last committed complete JSONL
+  record. A partial tail is excluded. Older-page requests use a reverse
+  byte-range reader and an opaque v2 cursor containing the source-index bound,
+  byte bound, epoch, and boundary fingerprint. A rewrite or truncation makes
+  the cursor fail closed and requires a fresh attach; an append preserves the
+  cursor's fixed boundary.
 
 ## Pi RPC coverage
 

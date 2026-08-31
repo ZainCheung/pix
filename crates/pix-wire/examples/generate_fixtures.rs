@@ -7,10 +7,11 @@ use pix_wire::{
     ClientEnvelope, ClientRequest, CommandScope, CommandSource, CommandSummary, CompactionEvent,
     ErrorCode, ExtensionUiAnswer, ExtensionUiRequest, HOST_CAPABILITIES, HostModelDefaults,
     HostSnapshot, HostSummary, MAX_ENCRYPTED_FRAME_BYTES, ModelSummary, PROTOCOL_MAJOR,
-    RelayAccess, RelayRole, ServerEnvelope, ServerEvent, SessionQueue, SessionSnapshot,
-    SessionState, SessionSummary, SessionUsage, ThinkingLevel, ToolEvent, WorkspaceAvailability,
-    WorkspaceSummary, confirmation_code, encode_encrypted_frame, host_public_key_fingerprint,
-    pairing_offer, relay_channel_id, relay_channel_secret_from_join_code, relay_join_proof,
+    RelayAccess, RelayRole, ServerEnvelope, ServerEvent, SessionHistoryPage, SessionQueue,
+    SessionSnapshot, SessionState, SessionSummary, SessionUsage, ThinkingLevel, ToolEvent,
+    WorkspaceAvailability, WorkspaceSummary, confirmation_code, encode_encrypted_frame,
+    host_public_key_fingerprint, pairing_offer, relay_channel_id,
+    relay_channel_secret_from_join_code, relay_join_proof,
 };
 use uuid::Uuid;
 
@@ -133,6 +134,9 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                     "thinking_levels.v1".to_owned(),
                     "session_metadata.v1".to_owned(),
                     "image_refs.v1".to_owned(),
+                    "session_history.v1".to_owned(),
+                    "history_items.v1".to_owned(),
+                    "history_presentation.v1".to_owned(),
                 ],
             },
         ),
@@ -156,6 +160,14 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
             "client-session-attach.json",
             ClientRequest::SessionAttach {
                 session_id: SESSION_ID.to_owned(),
+            },
+        ),
+        named(
+            "client-session-history-request.json",
+            ClientRequest::SessionHistoryRequest {
+                session_id: SESSION_ID.to_owned(),
+                before: "opaque-cursor".to_owned(),
+                limit: 50,
             },
         ),
         named(
@@ -416,6 +428,8 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                     commands: Vec::new(),
                     queue: None,
                     usage: None,
+                    history: None,
+                    history_items: Vec::new(),
                 },
             },
         ),
@@ -459,6 +473,26 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
                         context_window: Some(200_000),
                         context_percent: Some(2.05),
                     }),
+                    history: None,
+                    history_items: Vec::new(),
+                },
+            },
+        ),
+        server(
+            "server-session-history-page.json",
+            Some(REQUEST_ID),
+            ServerEvent::SessionHistoryPage {
+                page: SessionHistoryPage {
+                    session_id: SESSION_ID.to_owned(),
+                    messages: vec![serde_json::json!({
+                        "role": "user",
+                        "content": "An older fixture message"
+                    })],
+                    start_index: 0,
+                    has_more: false,
+                    next_cursor: None,
+                    revision: 2,
+                    history_items: Vec::new(),
                 },
             },
         ),

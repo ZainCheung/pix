@@ -286,20 +286,42 @@ impl RpcClient {
     /// Returns [`RpcError`] when either RPC command fails or Pi returns an
     /// incompatible response shape.
     pub fn snapshot(&self, timeout: Duration) -> Result<RpcSnapshot, RpcError> {
-        let state = self
-            .request(&PiCommand::GetState, timeout)?
+        let state = self.state(timeout)?;
+        let messages = self.messages(timeout)?;
+        Ok(RpcSnapshot { state, messages })
+    }
+
+    /// Reads only Pi's authoritative runtime state. History-capable Host
+    /// clients use the native JSONL file for bounded pages so a huge
+    /// `get_messages` response never has to cross the Pi RPC record limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] when Pi rejects the request, times out, or returns
+    /// a response without state data.
+    pub fn state(&self, timeout: Duration) -> Result<Value, RpcError> {
+        self.request(&PiCommand::GetState, timeout)?
             .data
-            .ok_or(RpcError::MissingResponseData("get_state"))?;
+            .ok_or(RpcError::MissingResponseData("get_state"))
+    }
+
+    /// Reads Pi's complete in-memory message view for legacy clients that do
+    /// not negotiate `session_history.v1`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RpcError`] when Pi rejects the request, times out, or returns
+    /// a response without a `messages` array.
+    pub fn messages(&self, timeout: Duration) -> Result<Vec<Value>, RpcError> {
         let messages_response = self
             .request(&PiCommand::GetMessages, timeout)?
             .data
             .ok_or(RpcError::MissingResponseData("get_messages"))?;
-        let messages = messages_response
+        messages_response
             .get("messages")
             .and_then(Value::as_array)
-            .ok_or(RpcError::InvalidResponseData("get_messages.messages"))?
-            .clone();
-        Ok(RpcSnapshot { state, messages })
+            .ok_or(RpcError::InvalidResponseData("get_messages.messages"))
+            .cloned()
     }
 
     /// Closes Pi stdin and waits for the output dispatcher to finish.

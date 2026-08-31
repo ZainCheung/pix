@@ -537,6 +537,21 @@ fn host_snapshot_advertises_capabilities_and_gates_session_enrichment() {
             assert!(
                 snapshot
                     .capabilities
+                    .contains(&"session_history.v1".to_owned())
+            );
+            assert!(
+                snapshot
+                    .capabilities
+                    .contains(&"history_items.v1".to_owned())
+            );
+            assert!(
+                snapshot
+                    .capabilities
+                    .contains(&"history_presentation.v1".to_owned())
+            );
+            assert!(
+                snapshot
+                    .capabilities
                     .contains(&"thinking_levels.v1".to_owned())
             );
         }
@@ -569,6 +584,45 @@ fn host_snapshot_advertises_capabilities_and_gates_session_enrichment() {
         }
         event => panic!("expected snapshot, got {event:?}"),
     }
+    drop(script);
+}
+
+#[test]
+fn negotiated_history_items_keep_snapshot_indexes_and_presentation_additive() {
+    let (script, _workspace, _locks, mut dispatcher, _manager, workspace_id) = setup();
+    let _ = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec![
+                "session_history.v1".to_owned(),
+                "history_items.v1".to_owned(),
+                "history_presentation.v1".to_owned(),
+            ],
+        },
+    ));
+    let created = dispatcher.dispatch(request(
+        2,
+        ClientRequest::SessionCreate {
+            workspace_id,
+            name: Some("structured history".to_owned()),
+        },
+    ));
+    let ServerEvent::SessionSnapshot { snapshot } = &created[1].event else {
+        panic!("expected session snapshot");
+    };
+    assert!(snapshot.messages.is_empty());
+    assert_eq!(snapshot.history_items.len(), 1);
+    assert!(matches!(
+        snapshot.history_items.first(),
+        Some(pix_wire::HistoryPageItem::Message { index: 0, .. })
+    ));
+    assert!(
+        snapshot
+            .history
+            .as_ref()
+            .and_then(|history| history.presentation.as_ref())
+            .is_some()
+    );
     drop(script);
 }
 
