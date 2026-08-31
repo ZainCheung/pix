@@ -9,10 +9,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use pix_wire::{
     ClientEnvelope, ClientRequest, ErrorCode, HOST_CAPABILITIES, HistoryPageItem,
-    HistoryPresentation, HistoryProcessSummary, HostSnapshot, HostSummary, MAX_IMAGE_CHUNK_BYTES,
-    PROTOCOL_MAJOR, RelayAccess, ServerEnvelope, ServerEvent, SessionState,
-    SessionSummary as WireSessionSummary, TurnPresentationState, WorkspaceAvailability,
-    WorkspaceSummary,
+    HistoryPresentation, HistoryProcessSummary, HostSnapshot, HostSummary,
+    MAX_ATTACHMENTS_PER_REQUEST, MAX_IMAGE_CHUNK_BYTES, PROTOCOL_MAJOR, RelayAccess,
+    ServerEnvelope, ServerEvent, SessionState, SessionSummary as WireSessionSummary,
+    TurnPresentationState, WorkspaceAvailability, WorkspaceSummary,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -34,8 +34,9 @@ const WORKSPACE_AVAILABILITY_TTL: Duration = Duration::from_secs(10);
 const MAX_SESSION_LIST: u32 = 200;
 /// Idle lifetime of a not-yet-consumed attachment upload.
 const ATTACHMENT_IDLE_TTL: Duration = Duration::from_secs(600);
-/// Attachment uploads buffered per connection.
-const MAX_PENDING_ATTACHMENTS: usize = 4;
+/// Attachment uploads buffered per connection. This must accommodate every
+/// image that the client uploads before the prompt consumes the references.
+const MAX_PENDING_ATTACHMENTS: usize = MAX_ATTACHMENTS_PER_REQUEST;
 /// Ceiling on total base64 image bytes in one Pi prompt command; keeps the
 /// Pi RPC JSONL record comfortably below its 16 MiB limit.
 const MAX_PROMPT_IMAGE_BASE64_BYTES: usize = 12 * 1024 * 1024;

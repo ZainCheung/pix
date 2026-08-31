@@ -72,7 +72,8 @@ notices.
 Pi JSONL remains the authoritative conversation history, including the
 original `ImageContent` base64. Pix derives host-local image assets with
 content-addressed SHA-256 IDs and atomically writes `source`, `agent`, `vision`,
-and `metadata.json` under the configuration directory. A client that opts into
+and `metadata.json` (including original pixel dimensions) under the
+configuration directory. A client that opts into
 `image_refs.v1` receives lightweight `imageRef` content and retrieves the
 vision bytes with bounded `image.get`/`image.chunk` requests. This avoids
 shipping every historical image during session attach while preserving

@@ -34,6 +34,10 @@ pub struct ImageAsset {
     pub id: String,
     pub mime_type: String,
     pub size: u64,
+    pub source_width: Option<u32>,
+    pub source_height: Option<u32>,
+    pub vision_width: Option<u32>,
+    pub vision_height: Option<u32>,
     pub source_path: PathBuf,
     pub agent_path: PathBuf,
     pub vision_path: PathBuf,
@@ -166,6 +170,8 @@ impl ImageAssetStore {
                 "sourceSha256": format!("sha256:{source_hex}"),
                 "sourceWidth": source_dimensions.map(|(width, _)| width),
                 "sourceHeight": source_dimensions.map(|(_, height)| height),
+                "pixelWidth": source_dimensions.map(|(width, _)| width),
+                "pixelHeight": source_dimensions.map(|(_, height)| height),
                 "sourcePath": source_path,
                 "agentPath": agent_path,
                 "visionPath": vision_path,
@@ -183,6 +189,10 @@ impl ImageAssetStore {
             id,
             mime_type,
             size: vision_bytes.len() as u64,
+            source_width: source_dimensions.map(|(width, _)| width),
+            source_height: source_dimensions.map(|(_, height)| height),
+            vision_width: vision_dimensions.map(|(width, _)| width),
+            vision_height: vision_dimensions.map(|(_, height)| height),
             source_path,
             agent_path,
             vision_path,
@@ -356,6 +366,12 @@ impl ImageAssetStore {
                     object.insert("id".to_owned(), Value::String(asset.id));
                     object.insert("mimeType".to_owned(), Value::String(asset.mime_type));
                     object.insert("size".to_owned(), Value::from(asset.size));
+                    if let Some(width) = asset.source_width.or(asset.vision_width) {
+                        object.insert("pixelWidth".to_owned(), Value::from(width));
+                    }
+                    if let Some(height) = asset.source_height.or(asset.vision_height) {
+                        object.insert("pixelHeight".to_owned(), Value::from(height));
+                    }
                 } else {
                     for value in object.values_mut() {
                         self.externalize_value(session_id, value)?;
@@ -594,6 +610,47 @@ mod tests {
         assert_eq!(reference["size"], bytes.len());
         assert!(directory.path().join("v1").exists());
         assert_eq!(MAX_VISION_DIMENSION, 2000);
+    }
+
+    #[test]
+    fn image_references_include_original_pixel_dimensions() {
+        let directory = tempdir().expect("directory");
+        let store = ImageAssetStore::new(directory.path());
+        let session = SessionId::new();
+        let image = image::RgbImage::new(4, 2);
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .expect("encode image");
+
+        let asset = store
+            .persist(session, "image/png", encoded.get_ref())
+            .expect("persist");
+        assert_eq!(asset.source_width, Some(4));
+        assert_eq!(asset.source_height, Some(2));
+
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [{
+                "type": "image",
+                "mimeType": "image/png",
+                "data": STANDARD.encode(encoded.get_ref())
+            }]
+        })];
+        store
+            .externalize_messages(session, &mut messages)
+            .expect("externalize");
+        let reference = &messages[0]["content"][0];
+        assert_eq!(reference["pixelWidth"], 4);
+        assert_eq!(reference["pixelHeight"], 2);
+
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(asset.source_path.parent().unwrap().join("metadata.json"))
+                .expect("metadata"),
+        )
+        .expect("decode metadata");
+        assert_eq!(metadata["pixelWidth"], 4);
+        assert_eq!(metadata["pixelHeight"], 2);
     }
 
     #[test]

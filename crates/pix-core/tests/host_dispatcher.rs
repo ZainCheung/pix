@@ -1006,6 +1006,49 @@ fn attachment_uploads_assemble_into_pi_prompt_images() {
 }
 
 #[test]
+fn attachment_staging_allows_nine_pending_uploads() {
+    let (script, _workspace, _locks, mut dispatcher, _manager, workspace_id) = setup();
+    let _ = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec!["attachments.v1".to_owned()],
+        },
+    ));
+    let session_id = attached_session_id(&mut dispatcher, workspace_id);
+
+    for index in 0..9 {
+        let response = dispatcher.dispatch(request(
+            2 + index,
+            ClientRequest::AttachmentBegin {
+                session_id: session_id.clone(),
+                attachment_id: format!("att-{}", index + 1),
+                mime_type: "image/png".to_owned(),
+                size: 1,
+            },
+        ));
+        assert!(matches!(response[0].event, ServerEvent::RequestAck));
+    }
+
+    let rejected = dispatcher.dispatch(request(
+        11,
+        ClientRequest::AttachmentBegin {
+            session_id,
+            attachment_id: "att-10".to_owned(),
+            mime_type: "image/png".to_owned(),
+            size: 1,
+        },
+    ));
+    assert!(matches!(
+        rejected[0].event,
+        ServerEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+    drop(script);
+}
+
+#[test]
 fn attachment_transfers_fail_closed_without_capability_or_finish() {
     let (script, _workspace, _locks, mut dispatcher, _manager, workspace_id) = setup();
     let session_id = attached_session_id(&mut dispatcher, workspace_id);

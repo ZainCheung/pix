@@ -139,8 +139,9 @@ session storage.
   Pi still receives the vision bytes in `images[]`, while the agent-compatible
   paths are appended to the prompt for filesystem-aware workflows. History
   clients that declare `image_refs.v1` receive `imageRef` entries and fetch
-  bounded chunks lazily; raw Pi `ImageContent` remains the durable source of
-  truth.
+  bounded chunks lazily. Image metadata records the original pixel dimensions
+  so a client can reserve single-image geometry before the lazy fetch; raw Pi
+  `ImageContent` remains the durable source of truth.
 - Session snapshots return Pi state and messages first. Clients declaring
   `session_metadata.v1` receive commands, usage, and thinking-level choices in
   a later unsolicited `session.metadata` event. Legacy clients keep the

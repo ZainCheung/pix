@@ -1219,11 +1219,24 @@ mod tests {
         )
         .expect("legacy prompt without attachments");
 
+        let nine_attachments = (1..=9)
+            .map(|index| format!(r#""att-{index}""#))
+            .collect::<Vec<_>>()
+            .join(",");
+        let nine = format!(
+            r#"{{"protocol":1,"request_id":3,"type":"session.prompt","session_id":"s","content":"x","attachments":[{nine_attachments}]}}"#
+        );
+        let nine = ClientEnvelope::decode(nine.as_bytes()).expect("nine attachments are allowed");
+        match nine.request {
+            ClientRequest::SessionPrompt { attachments, .. } => assert_eq!(attachments.len(), 9),
+            other => panic!("unexpected request: {other:?}"),
+        }
+
         assert!(matches!(
             ClientEnvelope::decode(
-                br#"{"protocol":1,"request_id":3,"type":"session.prompt","session_id":"s","content":"x","attachments":["1","2","3","4","5"]}"#
+                br#"{"protocol":1,"request_id":4,"type":"session.prompt","session_id":"s","content":"x","attachments":["1","2","3","4","5","6","7","8","9","10"]}"#
             ),
-            Err(WireError::TooManyAttachments { count: 5, .. })
+            Err(WireError::TooManyAttachments { count: 10, limit: 9 })
         ));
     }
 
