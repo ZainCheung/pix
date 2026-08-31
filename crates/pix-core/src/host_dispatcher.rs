@@ -643,7 +643,9 @@ impl HostProtocolDispatcher {
                     attachment.asset = Some(asset);
                     // Once the durable source exists, do not retain a second
                     // full copy in the connection-scoped staging map.
-                    attachment.buffer.clear();
+                    // `clear()` retains the allocation and would let finished
+                    // uploads accumulate outside the pending-byte budget.
+                    attachment.buffer = Vec::new();
                     attachment.ready = true;
                     attachment.updated = Instant::now();
                 }
