@@ -49,6 +49,7 @@ jobs:
           llms_file="$RUNNER_TEMP/pix-llms.txt"
           sitemap_file="$RUNNER_TEMP/pix-sitemap.xml"
           robots_file="$RUNNER_TEMP/pix-robots.txt"
+          home_file="$RUNNER_TEMP/pix-home.html"
 
           npm run dev -- --host 127.0.0.1 > "$log_file" 2>&1 &
           server_pid=$!
@@ -76,9 +77,17 @@ jobs:
             http://127.0.0.1:3000/sitemap.xml > "$sitemap_file"
           curl --fail --silent --show-error \
             http://127.0.0.1:3000/robots.txt > "$robots_file"
+          curl --fail --silent --show-error \
+            http://127.0.0.1:3000/ > "$home_file"
 
           grep -Fq '# Pix' "$llms_file"
           grep -Fq 'https://pix.deepoke.com/docs/installation' "$llms_file"
           grep -Fq 'https://pix.deepoke.com/use-cases/pi-from-iphone' "$llms_file"
           grep -Fq 'https://pix.deepoke.com/docs/installation' "$sitemap_file"
           grep -Fq 'Sitemap: https://pix.deepoke.com/sitemap.xml' "$robots_file"
+          grep -Fq 'Pix connects your iPhone to the Pi coding agent' "$home_file"
+          if grep -Fq 'Invalid hook call' "$log_file" ||
+            grep -Fq 'Error in renderToReadableStream' "$log_file"; then
+            cat "$log_file"
+            exit 1
+          fi

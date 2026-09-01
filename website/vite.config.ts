@@ -8,6 +8,11 @@ import { fumadocsMdx } from 'fumadocs-mdx/vite'
 
 export default defineConfig({
   resolve: { tsconfigPaths: true },
+  ssr: {
+    optimizeDeps: {
+      include: ['fumadocs-mdx/runtime/macro'],
+    },
+  },
   plugins: [
     ...fumadocsMdx(),
     tailwindcss(),
