@@ -1,0 +1,13 @@
+{
+  "title": "Use Pix",
+  "pages": [
+    "SESSIONS",
+    "WORKSPACES",
+    "REMOTE_ACCESS",
+    "PI_TUI_BRIDGE",
+    "DEVICES",
+    "TROUBLESHOOTING"
+  ],
+  "defaultOpen": true,
+  "collapsible": true
+}

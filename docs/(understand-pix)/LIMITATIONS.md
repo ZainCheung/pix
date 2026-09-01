@@ -9,8 +9,9 @@ These are current product limits, not a roadmap.
 
 - The documented installer targets Apple Silicon macOS and Linux x86_64 or
   ARM64. Windows service integration is not included.
-- Pix currently verifies Pi `>=0.84.1, <0.85.0` and requires Pi to expose the
-  RPC options used by the host.
+- Pix checks Pi compatibility with the range listed in
+  [Installation](/docs/installation) and requires Pi to expose the RPC options
+  used by the host.
 - The computer running Pi must be powered on and reachable for remote access.
 - Direct access requires the iPhone and host to share a local network. Remote
   access through different networks depends on a configured relay.
@@ -38,9 +39,8 @@ Pi remains usable as a standalone TUI when the host is unavailable.
 ## Attachments and RPC surface
 
 Native Pix image attachments accept PNG, JPEG, WebP, and GIF data in bounded
-uploads. Each attachment is 1-4 MiB; clients using the newer attachment
-capability can reference up to nine images in one request, while legacy clients
-are limited to four.
+uploads. Current clients can attach up to nine images to one request. Each
+image can be up to 4 MiB; older clients are limited to four images.
 
 Pix does not expose every Pi RPC operation. Terminal `bash` controls, session
 fork/tree operations, HTML export, and Pi retry or compaction policy controls
@@ -50,8 +50,7 @@ for the current mapping.
 ## Data and availability
 
 Pix does not provide a cloud copy of Pi history or an alternative agent runtime.
-The host, Pi, repository, credentials, and native sessions remain local. A
-paired phone cannot use those resources while the host is offline.
+A paired phone cannot use the host's resources while the host is offline.
 
 For the product model behind these limits, see [Pix and Pi](/docs/pix-and-pi)
 and [Local-first by design](/docs/local-first).

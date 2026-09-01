@@ -182,4 +182,4 @@ pix --output json --no-input device revoke <device-id>
 - Prefer read commands (`status`, `list`, `show`, `pending`) before
   mutating; mutations return the resulting state in `data`.
 - If `schema_version` is not `1`, stop and re-read the current CLI docs
-  (`docs/CLI.md` in the pix repository) instead of guessing fields.
+  (`docs/(reference)/CLI.md` in the pix repository) instead of guessing fields.

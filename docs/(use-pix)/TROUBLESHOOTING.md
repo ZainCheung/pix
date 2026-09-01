@@ -167,8 +167,8 @@ pix status
 pix service status
 ```
 
-Pix currently verifies Pi `>=0.84.1, <0.85.0`. If several Pi installations
-exist, select the executable Pix should use:
+Run `pix doctor` to check Pi compatibility. If several Pi installations exist,
+select the executable Pix should use:
 
 ```sh
 pix pi set /absolute/path/to/pi

@@ -13,8 +13,8 @@ Pix connects your iPhone to the Pi coding agent running on your Mac or Linux mac
 
 <p align="center">
   <a href="https://pix.deepoke.com">Website</a> ·
-  <a href="docs/INSTALLATION.md">Installation</a> ·
-  <a href="docs/TROUBLESHOOTING.md">Troubleshooting</a> ·
+  <a href="docs/(start)/INSTALLATION.md">Installation</a> ·
+  <a href="docs/(use-pix)/TROUBLESHOOTING.md">Troubleshooting</a> ·
   <a href="https://github.com/ZainCheung/pix/releases">Releases</a>
 </p>
 
@@ -29,7 +29,7 @@ curl -fsSL https://pix.deepoke.com/install.sh | sh
 pix setup
 ```
 
-For Homebrew, Linux packages, manual downloads, source builds, and uninstall instructions, see [Installation](docs/INSTALLATION.md).
+For Homebrew, Linux packages, manual downloads, source builds, and uninstall instructions, see [Installation](<docs/(start)/INSTALLATION.md>).
 
 Remote control client:
 
@@ -72,7 +72,7 @@ Pix supports both local and remote connections.
 
 For relay setup, pairing, networking details, or deploying your own relay to Cloudflare, see:
 
-[Remote access →](docs/REMOTE_ACCESS.md)
+[Remote access →](<docs/(use-pix)/REMOTE_ACCESS.md>)
 
 ## Privacy
 
@@ -84,13 +84,13 @@ For the full security model, see [SECURITY.md](SECURITY.md).
 
 ## Documentation
 
-* [Installation](docs/INSTALLATION.md) — install, update, and uninstall Pix
-* [Remote access](docs/REMOTE_ACCESS.md) — LAN, relay, pairing, and self-hosting
-* [CLI reference](docs/CLI.md) — Pix commands and service control
-* [Optional Pi TUI bridge](docs/PI_TUI_BRIDGE.md) — `pi install npm:@zaincheung/pix`
-* [Troubleshooting](docs/TROUBLESHOOTING.md) — common setup and connection issues
-* [Architecture](docs/ARCHITECTURE.md) — host, protocol, and security design
-* [Development](docs/DEVELOPMENT.md) — build and contribute to Pix
+* [Installation](<docs/(start)/INSTALLATION.md>) — install, update, and uninstall Pix
+* [Remote access](<docs/(use-pix)/REMOTE_ACCESS.md>) — LAN, relay, pairing, and self-hosting
+* [CLI reference](<docs/(reference)/CLI.md>) — Pix commands and service control
+* [Optional Pi TUI bridge](<docs/(use-pix)/PI_TUI_BRIDGE.md>) — `pi install npm:@zaincheung/pix`
+* [Troubleshooting](<docs/(use-pix)/TROUBLESHOOTING.md>) — common setup and connection issues
+* [Architecture](<docs/(develop-pix)/ARCHITECTURE.md>) — host, protocol, and security design
+* [Development](<docs/(develop-pix)/DEVELOPMENT.md>) — build and contribute to Pix
 
 ## Contributing
 

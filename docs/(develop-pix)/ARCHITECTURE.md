@@ -184,6 +184,6 @@ session storage.
 
 ## Pi RPC coverage
 
-`docs/PI_RPC_COVERAGE.md` tracks which Pi RPC commands and events are
+`docs/(develop-pix)/PI_RPC_COVERAGE.md` tracks which Pi RPC commands and events are
 exposed, capability-gated, or intentionally omitted. Pi-specific field names
 stop at `pix-core/src/pi_bridge.rs`.

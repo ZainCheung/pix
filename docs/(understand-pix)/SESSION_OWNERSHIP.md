@@ -45,9 +45,3 @@ interactive owners cannot write the same session at the same time.
 
 For the complete lock and bridge protocol, see [Architecture](/docs/architecture)
 and [TUI bridge internals](/docs/tui-bridge-internals).
-
-## Next
-
-- [Sessions](/docs/sessions)
-- [Use Pix with Pi TUI](/docs/pi-tui-bridge)
-- [Pix and Pi](/docs/pix-and-pi)

@@ -58,8 +58,5 @@ For implementation invariants, see [Architecture](/docs/architecture). To
 report a suspected vulnerability, follow the private-contact instructions in
 the repository's [security policy](https://github.com/ZainCheung/pix/blob/main/SECURITY.md).
 
-## Next
-
-- [Pairing and trust](/docs/pairing-and-trust)
-- [Local-first by design](/docs/local-first)
-- [Limitations](/docs/limitations)
+For the trust lifecycle, see [Pairing and trust](/docs/pairing-and-trust). The
+availability trade-offs are listed in [Limitations](/docs/limitations).

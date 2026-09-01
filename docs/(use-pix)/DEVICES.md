@@ -42,8 +42,5 @@ If a phone is lost, revoke its record as soon as possible. You can pair a
 replacement phone, or re-pair the recovered phone after confirming the new
 request.
 
-## Next
-
-- [Pairing and trust](/docs/pairing-and-trust)
-- [Security and privacy](/docs/security)
-- [Troubleshooting](/docs/troubleshooting)
+For the trust lifecycle behind these records, see [Pairing and
+trust](/docs/pairing-and-trust).

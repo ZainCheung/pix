@@ -3,8 +3,7 @@ title: Remote access
 description: Use Pix on the same network or reach your host through a relay when you are away.
 ---
 
-Pix has two connection paths. The path changes how the phone reaches the
-computer; Pi still runs on the computer in both cases.
+Pix has two connection paths. Pi keeps running on the host in both cases.
 
 ## Same network: direct connection
 
@@ -29,8 +28,7 @@ iPhone / Pix App  ──  Relay  ──  Pix Host  ──  Pi
 ```
 
 The relay forwards encrypted Pix frames between the phone and host. It does
-not run Pi, receive your workspace, or store application messages. Pi, the
-repository, credentials, and native sessions remain on the host.
+not run Pi or store application messages.
 
 Pix setup offers the hosted relay at `wss://pix-relay.deepoke.com`. To use a
 different endpoint on the host:
@@ -56,8 +54,5 @@ work when both devices are on the same network.
 Running your own relay is a separate infrastructure task. See [Self-host a
 relay](/docs/self-host-relay) for the deployment instructions.
 
-## Next
-
-- [Pair your iPhone](/docs/pairing)
-- [Direct connection vs relay](/docs/direct-vs-relay)
-- [Troubleshooting](/docs/troubleshooting)
+Pair a device with [Pair your iPhone](/docs/pairing). For the reason behind the
+two connection paths, see [Direct connection vs relay](/docs/direct-vs-relay).

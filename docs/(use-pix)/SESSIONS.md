@@ -9,10 +9,9 @@ Pi's native session storage on the host.
 
 ## Open an existing session
 
-Select a workspace in Pix, then choose one of the sessions discovered there.
-Pix asks the host to start Pi for that existing session and attaches the
-phone. You can return to the same session later from the workspace's session
-list.
+Select a workspace in Pix, then choose one of the sessions found there.
+Pix opens that session on the host and attaches the phone. You can return to
+the same session later from the workspace's session list.
 
 ## Create and switch
 
@@ -36,8 +35,6 @@ released by the host; the native session file remains available to open again.
 Pix does not create a separate cloud copy of a Pi session. Pi's native session
 data on your computer is authoritative.
 
-## Next
-
-- [Workspaces](/docs/workspaces)
-- [Sessions & ownership](/docs/session-ownership)
-- [Troubleshooting](/docs/troubleshooting)
+Choose another folder from [Workspaces](/docs/workspaces), or read [Sessions &
+ownership](/docs/session-ownership) to understand how Pix and Pi TUI share a
+session.

@@ -14,7 +14,7 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
 Product releases use the workspace version and a matching `vX.Y.Z` tag. See
-[docs/RELEASE.md](docs/RELEASE.md) for the release and Relay deployment
+[docs/(develop-pix)/RELEASE.md](<docs/(develop-pix)/RELEASE.md>) for the release and Relay deployment
 workflow.
 
 Protocol changes require updated versioned schema documentation and fixtures.

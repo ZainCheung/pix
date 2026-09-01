@@ -13,7 +13,7 @@ import {
 
 const IOS_APP_URL = 'https://deepoke.com/pix'
 const INSTALL_COMMAND = 'curl -fsSL https://pix.deepoke.com/install.sh | sh'
-const HOMEBREW_DOCS_URL = `${GITHUB_URL}/blob/main/docs/INSTALLATION.md#homebrew`
+const HOMEBREW_DOCS_URL = `${GITHUB_URL}/blob/main/docs/%28start%29/INSTALLATION.md#homebrew`
 
 export function Download({ release }: { release: PixRelease | null }) {
   const [copied, setCopied] = useState(false)

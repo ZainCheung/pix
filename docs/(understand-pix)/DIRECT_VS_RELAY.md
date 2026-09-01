@@ -27,9 +27,9 @@ application payloads.
 
 ## What remains on the host
 
-Pi, your repository, credentials, workspace authorization, and native session
-history stay on the host in both modes. Switching from direct to relay changes
-reachability and availability dependencies, not session ownership.
+Pi and the native session remain on the host in both modes. Switching from
+direct to relay changes reachability and availability dependencies, not session
+ownership.
 
 Use [Remote access](/docs/remote-access) for configuration steps and [How Pix
 works](/docs/how-pix-works) for the overall model.

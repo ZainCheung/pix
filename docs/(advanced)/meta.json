@@ -1,0 +1,9 @@
+{
+  "title": "Advanced",
+  "pages": [
+    "INSTALLATION_DETAILS",
+    "SELF_HOST_RELAY"
+  ],
+  "defaultOpen": false,
+  "collapsible": true
+}

@@ -44,8 +44,5 @@ The folder must still exist and resolve to the same local directory. If it was
 moved or replaced, remove the old entry and add the current folder again. See
 [Troubleshooting](/docs/troubleshooting) for the checks.
 
-## Next
-
-- [Sessions](/docs/sessions)
-- [Security and privacy](/docs/security)
-- [CLI reference](/docs/cli)
+After choosing a workspace, open [Sessions](/docs/sessions). For scripted
+workspace changes, see the [CLI reference](/docs/cli).

@@ -53,7 +53,7 @@ const STATIC_SOURCES = {
 function readDocsFiles() {
   const sourcePath = path.join(sourceDirectory, 'lib', 'source.ts')
   const source = readFileSync(sourcePath, 'utf8')
-  const files = [...source.matchAll(/'([^']+\.md)'/g)].map((match) => match[1])
+  const files = [...source.matchAll(/'([^']+\.mdx?)'/g)].map((match) => match[1])
 
   if (files.length === 0) {
     throw new Error(`No docs files found in ${sourcePath}`)
@@ -63,9 +63,10 @@ function readDocsFiles() {
 }
 
 function docsUrl(file) {
-  const withoutExtension = file.replace(/\.md$/i, '')
+  const withoutExtension = file.replace(/\.mdx?$/i, '')
   const normalized = withoutExtension
     .split('/')
+    .filter((segment) => !(segment.startsWith('(') && segment.endsWith(')')))
     .map((segment) => segment.toLowerCase().replaceAll('_', '-'))
     .join('/')
 

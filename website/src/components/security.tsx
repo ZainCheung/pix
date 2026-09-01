@@ -5,7 +5,7 @@ import { GITHUB_URL } from '#/lib/release'
 
 const securityLinks = [
   { label: 'Security policy', href: `${GITHUB_URL}/blob/main/SECURITY.md`, icon: <ShieldCheck size={15} /> },
-  { label: 'Architecture', href: `${GITHUB_URL}/blob/main/docs/ARCHITECTURE.md`, icon: <BookOpen size={15} /> },
+  { label: 'Architecture', href: `${GITHUB_URL}/blob/main/docs/%28develop-pix%29/ARCHITECTURE.md`, icon: <BookOpen size={15} /> },
   { label: 'Wire protocol v1', href: `${GITHUB_URL}/blob/main/protocol/schema/v1.md`, icon: <GitBranch size={15} /> },
 ]
 

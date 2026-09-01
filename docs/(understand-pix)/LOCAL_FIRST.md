@@ -35,8 +35,5 @@ different networks possible, but relay availability affects remote reachability.
 The benefit is a single local environment: files, credentials, Pi tools, and
 session history remain where you already use them.
 
-## Next
-
-- [How Pix works](/docs/how-pix-works)
-- [Direct connection vs relay](/docs/direct-vs-relay)
-- [Security and privacy](/docs/security)
+See [How Pix works](/docs/how-pix-works) for the component boundaries behind
+this local-first model.

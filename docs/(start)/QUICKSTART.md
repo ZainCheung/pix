@@ -8,10 +8,11 @@ iPhone. Pi, your files, and your session data stay on the computer.
 
 ## Prerequisites
 
-- Pi is installed and works in a terminal. Pix currently verifies Pi
-  `>=0.84.1, <0.85.0`.
+- Pi is installed and works in a terminal. `pix doctor` checks whether the
+  installed version is supported.
 - The host is an Apple Silicon Mac or a Linux x86_64/ARM64 computer.
-- Pix is installed on the iPhone you want to pair.
+- [Download Pix for iPhone](https://deepoke.com/pix) and install it on the
+  phone you want to pair.
 
 ## Step 1: Install the host
 
