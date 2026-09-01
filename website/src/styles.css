@@ -3949,3 +3949,17 @@ h3 {
     gap: 14px;
   }
 }
+
+/* Keep Fumadocs cards readable when their accent hover state is active. */
+.prose a[data-card]:is(:hover, :focus-visible) {
+  color: var(--color-fd-accent-foreground);
+}
+
+.prose a[data-card]:focus-visible {
+  background-color: var(--color-fd-accent);
+}
+
+.prose a[data-card]:is(:hover, :focus-visible) > p,
+.prose a[data-card]:is(:hover, :focus-visible) > div {
+  color: var(--color-fd-accent-foreground);
+}
