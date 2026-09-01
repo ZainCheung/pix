@@ -1,4 +1,7 @@
-# CLI reference
+---
+title: CLI reference
+description: Configure Pix hosts, workspaces, devices, sessions, services, and diagnostics from the command line.
+---
 
 Run `pix --help` or `pix <command> --help` for the flags shipped by your
 version. The global `--config <path>` option (or `PIX_CONFIG`) selects an

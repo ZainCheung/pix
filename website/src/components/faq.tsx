@@ -1,23 +1,31 @@
 const questions = [
   {
-    question: 'Where does my code run?',
-    answer: 'On the machine where you run the Pix Host. Pix does not move your workspace into a hosted environment or create a second session store.',
+    question: 'Does Pix replace Pi?',
+    answer: 'No. Pi remains the coding agent running on your computer. Pix gives you a remote interface to start, resume, and control those Pi sessions from your phone.',
   },
   {
-    question: 'What happens when I am on the same network?',
-    answer: 'The client discovers the host over Bonjour and prefers a direct TCP connection. The encrypted Pix wire protocol is the same on that path.',
+    question: 'Can I continue my existing Pi sessions?',
+    answer: 'Yes. Pix works with the native Pi sessions already stored on your computer, so you can pick up where you left off instead of starting over.',
   },
   {
-    question: 'Can the relay read my prompts or files?',
-    answer: 'No. The relay forwards authenticated opaque encrypted frames and does not decrypt, parse, queue, or persist application payloads.',
+    question: 'Does my computer need to stay on?',
+    answer: 'Yes. Pi runs on your Mac or Linux machine, so that machine needs to be running and reachable while you use Pix remotely.',
   },
   {
-    question: 'What does install.sh install?',
-    answer: 'On Linux it downloads the matching release archive and installs the pix CLI into ~/.local/bin. On Apple Silicon it also installs Pix.app into ~/Applications.',
+    question: 'Can I use Pix away from home?',
+    answer: 'Yes. Pix connects directly when your devices are on the same network and can use an encrypted relay when you are away.',
   },
   {
-    question: 'Do I need an account?',
-    answer: 'No. Pix uses explicit workspace authorization and device pairing instead of a hosted account layer.',
+    question: 'Does my code leave my computer?',
+    answer: 'Your repositories, credentials, Pi processes, and session data stay on your computer. Pix remotely controls the host instead of moving your workspace into a hosted environment.',
+  },
+  {
+    question: 'What do I need to use Pix?',
+    answer: 'A Mac or Linux machine with Pi installed and working, the Pix Host on that machine, and the Pix app on your iPhone.',
+  },
+  {
+    question: 'Do I need a Pix account?',
+    answer: 'No. Pix uses explicit device pairing instead of a hosted account. You authorize each client and can revoke it later.',
   },
 ]
 
@@ -29,13 +37,13 @@ export function FAQ() {
         <h2 id="faq-heading">A few common questions</h2>
         <div className="faq-list-v2">
           {questions.map((item) => (
-          <details className="faq-item-v2" key={item.question}>
-            <summary>
-              <span>{item.question}</span>
-              <span className="faq-plus-v2" aria-hidden="true">+</span>
-            </summary>
-            <p>{item.answer}</p>
-          </details>
+            <details className="faq-item-v2" key={item.question}>
+              <summary>
+                <span>{item.question}</span>
+                <span className="faq-plus-v2" aria-hidden="true">+</span>
+              </summary>
+              <p>{item.answer}</p>
+            </details>
           ))}
         </div>
       </div>

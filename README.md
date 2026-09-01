@@ -89,6 +89,7 @@ For the full security model, see [SECURITY.md](SECURITY.md).
 * [Installation](docs/INSTALLATION.md) — install, update, and uninstall Pix
 * [Remote access](docs/REMOTE_ACCESS.md) — LAN, relay, pairing, and self-hosting
 * [CLI reference](docs/CLI.md) — Pix commands and service control
+* [Optional Pi TUI bridge](docs/PI_TUI_BRIDGE.md) — `pi install npm:@zaincheung/pix`
 * [Troubleshooting](docs/TROUBLESHOOTING.md) — common setup and connection issues
 * [Architecture](docs/ARCHITECTURE.md) — host, protocol, and security design
 * [Development](docs/DEVELOPMENT.md) — build and contribute to Pix

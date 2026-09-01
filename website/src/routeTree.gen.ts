@@ -11,6 +11,16 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SplatRouteImport } from './routes/$'
+import { Route as LlmsDottxtRouteImport } from './routes/llms[.]txt'
+import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
+import { Route as UseCasesRouteImport } from './routes/use-cases'
+import { Route as ApiSearchRouteImport } from './routes/api/search'
+import { Route as DocsSplatRouteImport } from './routes/docs/$'
+import { Route as UseCasesIndexRouteImport } from './routes/use-cases/index'
+import { Route as UseCasesContinuePiSessionsRouteImport } from './routes/use-cases/continue-pi-sessions'
+import { Route as UseCasesLocalFirstAiCodingRouteImport } from './routes/use-cases/local-first-ai-coding'
+import { Route as UseCasesPiFromIphoneRouteImport } from './routes/use-cases/pi-from-iphone'
+import { Route as UseCasesRemotePiRouteImport } from './routes/use-cases/remote-pi'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +32,153 @@ const SplatRoute = SplatRouteImport.update({
   path: '/$',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LlmsDottxtRoute = LlmsDottxtRouteImport.update({
+  id: '/llms.txt',
+  path: '/llms.txt',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
+  id: '/sitemap.xml',
+  path: '/sitemap.xml',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UseCasesRoute = UseCasesRouteImport.update({
+  id: '/use-cases',
+  path: '/use-cases',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiSearchRoute = ApiSearchRouteImport.update({
+  id: '/api/search',
+  path: '/api/search',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DocsSplatRoute = DocsSplatRouteImport.update({
+  id: '/docs/$',
+  path: '/docs/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UseCasesIndexRoute = UseCasesIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => UseCasesRoute,
+} as any)
+const UseCasesContinuePiSessionsRoute =
+  UseCasesContinuePiSessionsRouteImport.update({
+    id: '/continue-pi-sessions',
+    path: '/continue-pi-sessions',
+    getParentRoute: () => UseCasesRoute,
+  } as any)
+const UseCasesLocalFirstAiCodingRoute =
+  UseCasesLocalFirstAiCodingRouteImport.update({
+    id: '/local-first-ai-coding',
+    path: '/local-first-ai-coding',
+    getParentRoute: () => UseCasesRoute,
+  } as any)
+const UseCasesPiFromIphoneRoute = UseCasesPiFromIphoneRouteImport.update({
+  id: '/pi-from-iphone',
+  path: '/pi-from-iphone',
+  getParentRoute: () => UseCasesRoute,
+} as any)
+const UseCasesRemotePiRoute = UseCasesRemotePiRouteImport.update({
+  id: '/remote-pi',
+  path: '/remote-pi',
+  getParentRoute: () => UseCasesRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/$': typeof SplatRoute
+  '/llms.txt': typeof LlmsDottxtRoute
+  '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/use-cases': typeof UseCasesRouteWithChildren
+  '/api/search': typeof ApiSearchRoute
+  '/docs/$': typeof DocsSplatRoute
+  '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
+  '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
+  '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
+  '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/use-cases/': typeof UseCasesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/$': typeof SplatRoute
+  '/llms.txt': typeof LlmsDottxtRoute
+  '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/api/search': typeof ApiSearchRoute
+  '/docs/$': typeof DocsSplatRoute
+  '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
+  '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
+  '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
+  '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/use-cases': typeof UseCasesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/$': typeof SplatRoute
+  '/llms.txt': typeof LlmsDottxtRoute
+  '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/use-cases': typeof UseCasesRouteWithChildren
+  '/api/search': typeof ApiSearchRoute
+  '/docs/$': typeof DocsSplatRoute
+  '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
+  '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
+  '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
+  '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/use-cases/': typeof UseCasesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/$'
+  fullPaths:
+    | '/'
+    | '/$'
+    | '/llms.txt'
+    | '/sitemap.xml'
+    | '/use-cases'
+    | '/api/search'
+    | '/docs/$'
+    | '/use-cases/continue-pi-sessions'
+    | '/use-cases/local-first-ai-coding'
+    | '/use-cases/pi-from-iphone'
+    | '/use-cases/remote-pi'
+    | '/use-cases/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/$'
-  id: '__root__' | '/' | '/$'
+  to:
+    | '/'
+    | '/$'
+    | '/llms.txt'
+    | '/sitemap.xml'
+    | '/api/search'
+    | '/docs/$'
+    | '/use-cases/continue-pi-sessions'
+    | '/use-cases/local-first-ai-coding'
+    | '/use-cases/pi-from-iphone'
+    | '/use-cases/remote-pi'
+    | '/use-cases'
+  id:
+    | '__root__'
+    | '/'
+    | '/$'
+    | '/llms.txt'
+    | '/sitemap.xml'
+    | '/use-cases'
+    | '/api/search'
+    | '/docs/$'
+    | '/use-cases/continue-pi-sessions'
+    | '/use-cases/local-first-ai-coding'
+    | '/use-cases/pi-from-iphone'
+    | '/use-cases/remote-pi'
+    | '/use-cases/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   SplatRoute: typeof SplatRoute
+  LlmsDottxtRoute: typeof LlmsDottxtRoute
+  SitemapDotxmlRoute: typeof SitemapDotxmlRoute
+  UseCasesRoute: typeof UseCasesRouteWithChildren
+  ApiSearchRoute: typeof ApiSearchRoute
+  DocsSplatRoute: typeof DocsSplatRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +197,107 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SplatRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/llms.txt': {
+      id: '/llms.txt'
+      path: '/llms.txt'
+      fullPath: '/llms.txt'
+      preLoaderRoute: typeof LlmsDottxtRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sitemap.xml': {
+      id: '/sitemap.xml'
+      path: '/sitemap.xml'
+      fullPath: '/sitemap.xml'
+      preLoaderRoute: typeof SitemapDotxmlRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/use-cases': {
+      id: '/use-cases'
+      path: '/use-cases'
+      fullPath: '/use-cases'
+      preLoaderRoute: typeof UseCasesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/search': {
+      id: '/api/search'
+      path: '/api/search'
+      fullPath: '/api/search'
+      preLoaderRoute: typeof ApiSearchRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/docs/$': {
+      id: '/docs/$'
+      path: '/docs/$'
+      fullPath: '/docs/$'
+      preLoaderRoute: typeof DocsSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/use-cases/': {
+      id: '/use-cases/'
+      path: '/'
+      fullPath: '/use-cases/'
+      preLoaderRoute: typeof UseCasesIndexRouteImport
+      parentRoute: typeof UseCasesRoute
+    }
+    '/use-cases/continue-pi-sessions': {
+      id: '/use-cases/continue-pi-sessions'
+      path: '/continue-pi-sessions'
+      fullPath: '/use-cases/continue-pi-sessions'
+      preLoaderRoute: typeof UseCasesContinuePiSessionsRouteImport
+      parentRoute: typeof UseCasesRoute
+    }
+    '/use-cases/local-first-ai-coding': {
+      id: '/use-cases/local-first-ai-coding'
+      path: '/local-first-ai-coding'
+      fullPath: '/use-cases/local-first-ai-coding'
+      preLoaderRoute: typeof UseCasesLocalFirstAiCodingRouteImport
+      parentRoute: typeof UseCasesRoute
+    }
+    '/use-cases/pi-from-iphone': {
+      id: '/use-cases/pi-from-iphone'
+      path: '/pi-from-iphone'
+      fullPath: '/use-cases/pi-from-iphone'
+      preLoaderRoute: typeof UseCasesPiFromIphoneRouteImport
+      parentRoute: typeof UseCasesRoute
+    }
+    '/use-cases/remote-pi': {
+      id: '/use-cases/remote-pi'
+      path: '/remote-pi'
+      fullPath: '/use-cases/remote-pi'
+      preLoaderRoute: typeof UseCasesRemotePiRouteImport
+      parentRoute: typeof UseCasesRoute
+    }
   }
 }
+
+interface UseCasesRouteChildren {
+  UseCasesContinuePiSessionsRoute: typeof UseCasesContinuePiSessionsRoute
+  UseCasesLocalFirstAiCodingRoute: typeof UseCasesLocalFirstAiCodingRoute
+  UseCasesPiFromIphoneRoute: typeof UseCasesPiFromIphoneRoute
+  UseCasesRemotePiRoute: typeof UseCasesRemotePiRoute
+  UseCasesIndexRoute: typeof UseCasesIndexRoute
+}
+
+const UseCasesRouteChildren: UseCasesRouteChildren = {
+  UseCasesContinuePiSessionsRoute: UseCasesContinuePiSessionsRoute,
+  UseCasesLocalFirstAiCodingRoute: UseCasesLocalFirstAiCodingRoute,
+  UseCasesPiFromIphoneRoute: UseCasesPiFromIphoneRoute,
+  UseCasesRemotePiRoute: UseCasesRemotePiRoute,
+  UseCasesIndexRoute: UseCasesIndexRoute,
+}
+
+const UseCasesRouteWithChildren = UseCasesRoute._addFileChildren(
+  UseCasesRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   SplatRoute: SplatRoute,
+  LlmsDottxtRoute: LlmsDottxtRoute,
+  SitemapDotxmlRoute: SitemapDotxmlRoute,
+  UseCasesRoute: UseCasesRouteWithChildren,
+  ApiSearchRoute: ApiSearchRoute,
+  DocsSplatRoute: DocsSplatRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

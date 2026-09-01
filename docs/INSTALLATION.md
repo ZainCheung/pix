@@ -1,7 +1,10 @@
-# Installation
+---
+title: Installation
+description: Install the Pix host and optional macOS client on a supported machine.
+---
 
-The [README](../README.md) covers the shortest install and first-use flow.
-This page lists the other supported installation paths.
+The [homepage](/) covers the shortest install and first-use flow. This page
+lists the other supported installation paths.
 
 ## First-party installer
 
@@ -77,17 +80,22 @@ chmod 0755 "$HOME/.local/bin/pix"
 
 Make sure `$HOME/.local/bin` is on `PATH` before running `pix`.
 
-## Pi bridge package
+## Pi TUI bridge package
 
-Install the optional Pix TUI bridge through Pi's package manager:
+Install the optional Pix TUI bridge through Pi's package manager after `pix
+setup` has installed the host service:
 
 ```sh
 pi install npm:@zaincheung/pix
 ```
 
-The package is separate from the Pix Host binary. Restart Pi, or run `/reload`
-in an existing Pi session, after installing it. If the Pix Host is unavailable,
-Pi continues to work normally without a bridge status indicator.
+The extension mirrors the interactive Pi TUI session in Pix App through a
+host-local Unix socket. It forwards session snapshots and live agent/tool
+events, and accepts text prompts and session controls from Pix App. Restart Pi,
+or run `/reload` in an existing Pi session, after installing it. If the Pix Host
+is unavailable, Pi continues to work normally without a bridge status
+indicator. See the [Pi TUI bridge guide](/docs/pi-tui-bridge) for ownership and
+reconnect behavior.
 
 ## Build from source
 
@@ -107,7 +115,8 @@ Run the CLI without copying it into `PATH` with:
 cargo run -p pix-cli -- doctor
 ```
 
-Build the public macOS menu-bar client from [its development guide](../apps/macos/README.md).
+Build the public macOS menu-bar client from
+[its development guide](https://github.com/ZainCheung/pix/blob/main/apps/macos/README.md).
 
 ## Background service
 
