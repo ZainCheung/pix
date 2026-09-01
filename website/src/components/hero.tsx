@@ -13,8 +13,9 @@ export function Hero({ release }: { release: PixRelease | null }) {
           <span>from anywhere.</span>
         </h1>
         <p className="hero-lede-v2">
-          Pix runs next to Pi on your machine, then gives paired devices a
-          direct or encrypted way to pick up the same sessions.
+          Pix connects your iPhone to the Pi coding agent running on your Mac or
+          Linux machine, so you can start, resume, and control local sessions
+          remotely.
         </p>
         <div className="hero-actions-v2">
           <ButtonLink href="#download" variant="primary">

@@ -2370,7 +2370,6 @@ h3 {
   font-size: 11px;
 }
 
-.features-v2,
 .download-v2,
 .faq-v2 {
   border-top: 1px solid var(--border);
@@ -2385,8 +2384,20 @@ h3 {
   text-transform: uppercase;
 }
 
-.features-label-v2 {
+.features-intro-v2 {
   padding: 54px 40px 27px;
+}
+
+.features-label-v2 {
+  padding: 0;
+}
+
+.features-intro-v2 h2 {
+  margin: 11px 0 0;
+  color: var(--foreground);
+  font-size: 29px;
+  font-weight: 620;
+  letter-spacing: -0.045em;
 }
 
 .features-grid-v2 {
@@ -2759,14 +2770,14 @@ h3 {
     text-align: left;
   }
 
-  .features-label-v2,
+  .features-intro-v2,
   .download-v2,
   .faq-v2 {
     padding-right: 20px;
     padding-left: 20px;
   }
 
-  .features-label-v2 {
+  .features-intro-v2 {
     padding-top: 48px;
     padding-bottom: 22px;
   }
