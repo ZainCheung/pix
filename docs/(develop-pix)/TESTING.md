@@ -16,9 +16,16 @@ cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-These checks cover the Rust workspace. Tests that need a real Pi are ignored
-unless a compatible executable is available; `pix status` reports the Pi
-version and startup options that the host detects.
+These checks cover the Rust workspace. The real-Pi integration tests in
+`crates/pix-core/tests/real_pi.rs` are marked `#[ignore]`, so ordinary
+`cargo test` does not run them even when a compatible Pi is installed. Run them
+explicitly when that executable is available:
+
+```bash
+cargo test -p pix-core --test real_pi -- --ignored
+```
+
+`pix status` reports the Pi version and startup options that the host detects.
 
 ## Test by changed area
 

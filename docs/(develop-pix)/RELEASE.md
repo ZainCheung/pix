@@ -125,8 +125,10 @@ production Worker updates cannot run at the same time.
 ## Website deployment
 
 The public site is the `pix-website` Worker, deployed by Cloudflare Workers
-Builds from `main`. The GitHub Actions `Website checks` workflow only typechecks
-and builds when `website/**` changes. Workers Builds does not inherit that
+Builds from `main`. The GitHub Actions `Website checks` workflow runs its
+validation when `website/**`, `docs/**`, or
+`.github/workflows/website-checks.yml` changes; it does not deploy the Worker.
+Workers Builds has its own watch paths and does not inherit that GitHub Actions
 filter: set Build watch paths on the Worker to include `website/*` and exclude
 nothing, or a docs-only push to `main` will still deploy the site. The Worker
 root directory (`website/`) is the build working directory, not the watch

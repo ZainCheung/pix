@@ -14,7 +14,8 @@ Looking for help using Pix? Start with the [user documentation](/docs).
 - A Pi installation that meets the [compatibility requirements](/docs/compatibility).
 - Linux or macOS for Host development. Check the released targets in
   [Platform support](/docs/platform-support).
-- Node.js and npm when changing the relay or the Pi package.
+- Node.js and npm when changing the relay, the Pi package, or website/docs
+  tooling.
 - Xcode when changing the macOS app.
 
 From an installed Pix CLI, `pix status` checks the selected Pi executable and
@@ -61,12 +62,15 @@ test it on a Mac with the `Pix` scheme:
 
 ```bash
 cd apps/macos
-xcodegen generate
 xcodebuild -project Pix.xcodeproj -scheme Pix \
   -destination 'platform=macOS' build
 xcodebuild test -project Pix.xcodeproj -scheme Pix \
   -destination 'platform=macOS'
 ```
+
+`Pix.xcodeproj` is committed, so normal build and test commands use it
+directly. If you modify `project.yml`, install XcodeGen and run
+`xcodegen generate` before building or testing to refresh the project.
 
 CI disables code signing for this test. The app embeds the matching Rust CLI
 for a source checkout; see the [macOS README](https://github.com/ZainCheung/pix/blob/main/apps/macos/README.md)
