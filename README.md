@@ -8,10 +8,8 @@ Pix connects your iPhone to the Pi coding agent running on your Mac or Linux mac
   <img src="docs/diagrams/pix.png" alt="Pix connects your phone to Pi running on your computer." width="920">
 </p>
 
-<p align="center">
-  <img src="docs/diagrams/pix-quickview.gif" alt="Pix connects your phone to Pi running on your computer." width="920">
-</p>
 
+[![Pix connects your phone to Pi running on your computer.](docs/diagrams/pix-quickview.gif)](https://www.youtube.com/watch?v=OLZ0yUpsOD0)
 
 <p align="center">
   <a href="https://pix.deepoke.com">Website</a> ·
