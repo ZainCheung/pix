@@ -48,6 +48,7 @@ function updateLinks() {
       title: oneLine(page.data.title),
       description: oneLine(page.data.description ?? 'Pix product update.'),
       date: page.data.date,
+      releaseStatus: page.data.releaseStatus,
       order: page.data.order,
     }))
     .sort((a, b) =>
@@ -62,6 +63,31 @@ function updateLinks() {
  * Keep this concise: the linked pages remain the source of truth for details.
  */
 export function llmsTxt() {
+  const updates = updateLinks()
+  const releasedUpdates = updates.filter((update) => update.releaseStatus === 'published')
+  const previewUpdates = updates.filter((update) => update.releaseStatus === 'preview')
+  const updateSections: string[] = []
+
+  if (releasedUpdates.length > 0) {
+    updateSections.push(
+      '## Updates',
+      ...releasedUpdates.map(({ url, title, description, date }) =>
+        `- [${title}](${url}) — ${date}: ${description}`,
+      ),
+      '',
+    )
+  }
+
+  if (previewUpdates.length > 0) {
+    updateSections.push(
+      '## Coming next',
+      ...previewUpdates.map(({ url, title, description }) =>
+        `- [${title}](${url}) — Available on main: ${description}`,
+      ),
+      '',
+    )
+  }
+
   const lines = [
     '# Pix',
     '',
@@ -88,9 +114,7 @@ export function llmsTxt() {
     '## Use cases',
     ...useCaseLinks().map(({ url, title, description }) => `- [${title}](${url}) — ${description}`),
     '',
-    '## Updates',
-    ...updateLinks().map(({ url, title, description, date }) => `- [${title}](${url}) — ${date}: ${description}`),
-    '',
+    ...updateSections,
     '## Documentation',
     ...docsLinks().map(({ url, title, description }) => `- [${title}](${url}) — ${description}`),
     '',

@@ -1,94 +1,53 @@
 ---
 title: Pi TUI Bridge
-description: Keep using an interactive Pi session in your terminal while controlling the same live session from Pix.
+description: Connect the Pi session already open in your terminal to Pix.
 date: '2026-09-01'
 updated: '2026-09-01'
 version: Next Pix release
 platform: macOS and Linux host · iPhone client
-status: Preview on main
+status: Available on main
+releaseStatus: preview
 order: 1
 ---
 
-Pix can now connect an interactive Pi TUI session to Pix through the optional
-`@zaincheung/pix` extension. Pi remains the agent, and its native session
-remains the source of truth.
-
-## What changed
-
-The Pi TUI bridge connects the terminal session you already use to Pix Host
-over a host-local Unix socket. Once the host grants the session a lease, Pix
-can show the live TUI session on your iPhone and send a bounded set of controls
-back to Pi.
-
-This means you do not have to choose between your normal terminal workflow and
-the Pix mobile client:
+Pix can now connect the Pi session already open in your terminal to Pix Host
+through the optional `@zaincheung/pix` extension. Pi remains the agent, and its
+native JSONL session remains the source of truth.
 
 ```text
 Pi TUI
   │
   │ @zaincheung/pix
   ▼
-Host-local Unix socket
+Local Unix socket
   │
   ▼
-Pix Host
-  ├── iPhone / Pix
-  └── native Pi session
+Pix Host ─── Pix on iPhone
 ```
 
-## Why it matters
+## Keep starting Pi the way you already do
 
-Before the bridge, a terminal user and a Pix user could end up thinking about
-two different entry points: a Pi process opened directly in the terminal, or a
-Pi runtime started through Pix RPC. The bridge makes the existing interactive
-session visible to Pix without replacing the Pi TUI or copying the conversation
-into another database.
-
-The practical result is simple: start in the terminal, leave your desk, and
-continue watching or steering the same live session from Pix. Return to the
-terminal when you want the full TUI again.
-
-## One session, one writer
-
-Pix coordinates ownership so the terminal and remote client do not create
-competing writers for the same Pi session. The Pi TUI bridge and Pix RPC use
-the same host session lock. If another process already owns the session, the
-host rejects the competing claim instead of allowing two processes to write the
-same native JSONL file concurrently.
-
-If the bridge socket briefly disappears, the TUI keeps its owner record and
-uses bounded reconnect attempts. If the host is unavailable, Pi remains usable
-as a standalone TUI; you can attach later with `/reload` after starting the
-host.
-
-## Install it
-
-Install Pix and run `pix setup` first so the host service is available. Then
-install the optional Pi extension:
+Install the extension, then restart Pi or run `/reload` in an existing session:
 
 ```sh
 pi install npm:@zaincheung/pix
 ```
 
-Restart Pi, or run `/reload` in an existing interactive session. Open Pix and
-pair the iPhone with the same host to see the session.
+When Pi starts, the extension connects the TUI to Pix Host over a local Unix
+socket. The same live session then appears in Pix.
 
-## Current limits
+## One session, one writer
 
-The first bridge version supports text prompts and a bounded set of session
-controls. Image attachments through a TUI-owned session are not supported yet;
-send images through a Pix-owned prompt path when the configured model provider
-supports vision.
+The terminal and Pix do not write to the same Pi session at the same time. Pix
+Host coordinates ownership and rejects a competing claim, so the native JSONL
+file stays consistent. If the host is unavailable, Pi continues as a standalone
+TUI; run `/reload` after the host starts if you want to attach it.
 
-## Availability
+## For now
 
-This update describes the implementation currently available on `main` and is
-targeted for the next Pix release. It applies to a macOS or Linux Pix Host,
-Pi's interactive TUI, the `@zaincheung/pix` extension, and the Pix iPhone
-client.
+- Text prompts, model selection, and thinking-level controls work from a
+  TUI-owned session.
+- Image prompts from TUI-owned sessions are not supported yet.
 
-## Learn more
-
-- [Install and configure the Pi TUI bridge](/docs/pi-tui-bridge)
-- [Resume the same Pi session on your phone](/use-cases/continue-pi-sessions)
-- [Inspect the Pix package source on GitHub](https://github.com/ZainCheung/pix/tree/main/packages/pix)
+[Read the Pi TUI bridge guide](/docs/pi-tui-bridge) or [resume the same session
+on your phone](/use-cases/continue-pi-sessions).

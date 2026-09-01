@@ -11,6 +11,7 @@ const updateSchema = pageSchema.extend({
   version: z.string(),
   platform: z.string(),
   status: z.string(),
+  releaseStatus: z.enum(['published', 'preview']),
   order: z.number().int().positive(),
 })
 

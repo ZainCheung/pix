@@ -23,9 +23,9 @@ by hand. Use `npm run generate-sitemap-lastmod` when inspecting or refreshing
 the map directly.
 
 Product updates live in `content/updates/`, with one MDX file per update. Each
-file supplies its own publication date, status, release target, and display
-order; the updates hub, detail pages, `llms.txt`, and sitemap are generated from
-that source.
+file supplies its own publication date, release stage (`published` or
+`preview`), platform, and display order; the updates hub, detail pages,
+`llms.txt`, and sitemap are generated from that source.
 
 The static `public/install.sh` is served at `/install.sh` by the website
 deployment. It resolves the latest GitHub Release at install time and falls

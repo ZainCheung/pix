@@ -1,87 +1,39 @@
 ---
 title: Long-Running Pi Sessions Open Incrementally
-description: Pix now loads a recent Pi history window first and pages older messages from the native session as needed.
+description: Pix loads recent Pi history first and reads older messages as you need them.
 date: '2026-08-31'
 updated: '2026-09-01'
 version: Next Pix release
 platform: macOS and Linux host · iPhone client
-status: Preview on main
+status: Available on main
+releaseStatus: preview
 order: 2
 ---
 
 Long-running Pi sessions no longer need to fit into a single Pix message before
 they can open.
 
-## What changed
+## Before
 
-Pix now loads the newest history window first, then reads older messages from
-Pi's native JSONL session incrementally when the client requests them. Live
-agent events continue independently while an older history page is loading.
+Opening a session meant sending its full history in the initial snapshot. A
+large enough session could exceed Pix's 1 MiB encrypted-frame limit and fail to
+open.
+
+## Now
+
+Pix opens recent history first and loads older messages as you scroll back.
 
 ```text
-Before
-
-Pi session ──────────────────────────────► entire snapshot
-                                             │
-                                             ├── 1 MiB frame limit
-                                             ✕   session may not open
-
-Now
-
 Recent history ─────► opens immediately
        │
        └── older history ◄──── load when needed
                               while live events continue
 ```
 
-## Why it matters
+Pi's JSONL file remains the session source of truth. Pix does not keep a second
+history database, and live agent events continue while older pages load. Clients
+without incremental history keep the existing snapshot path.
 
-Pi sessions can grow over days of work, especially when they include tool
-calls, long responses, and images. A large session should not become unusable
-just because its complete history is larger than one encrypted wire frame.
+**A 1 MiB frame limit is a frame limit, not a session limit.**
 
-With incremental history, you can open the current context quickly and page
-back only when you need an older exchange. Long projects can continue without
-requiring Pix to copy the entire session into a hosted conversation store.
-
-## What did not change
-
-Pi's native JSONL session is still the only durable source of truth. Pix does
-not introduce a second message database or rewrite the session into a separate
-cloud history. The host reads bounded windows from the same file and uses an
-opaque cursor to request older windows at a fixed revision boundary.
-
-Large individual records that cannot fit into one bounded history item become
-semantic placeholders with a capped preview and original byte count. This
-keeps the final exchange visible instead of letting one oversized record hide
-the rest of the session.
-
-## Live work stays live
-
-Historical paging and live Pi events use independent paths. Loading older
-messages does not pause a running turn, hide tool activity, or wait for an
-unbounded snapshot. The current turn remains inspectable while history pages
-are prepended around it.
-
-The useful boundary is now explicit:
-
-> A 1 MiB frame limit is a frame limit, not a session limit.
-
-## Try it
-
-On a host with a long native Pi session, open the workspace in Pix and choose
-that session. The newest history appears first. Scroll back or request older
-history when you need it; Pix fetches additional bounded pages from the host.
-
-## Availability
-
-This update describes the implementation currently available on `main` and is
-targeted for the next Pix release. It applies to the Pix Host and iPhone client
-when the negotiated session-history capability is enabled; older clients keep
-the compatible snapshot path.
-
-## Learn more
-
-- [Continue the same native Pi session](/use-cases/continue-pi-sessions)
-- [Read the session history and architecture details](/docs/architecture)
-- [Review the Pi RPC coverage and wire boundary](/docs/pi-rpc-coverage)
+[Read the session history and architecture details](/docs/architecture).

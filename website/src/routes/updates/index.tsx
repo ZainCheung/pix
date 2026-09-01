@@ -5,13 +5,14 @@ import { Header } from '#/components/header'
 import { createSeoHead, updatesStructuredData } from '#/lib/seo'
 import { updateSource } from '#/lib/updates'
 
-const TITLE = 'Pix Updates: Pi Coding Agent Features and Product News'
-const DESCRIPTION =
-  'See what changed in Pix: Pi TUI integration, long-running session history, image attachments, and other product improvements.'
+const TITLE = 'Pix Updates'
+const DESCRIPTION = 'New features and improvements in Pix.'
 
 function getUpdatePages() {
   return [...updateSource.getPages()].sort((left, right) => left.data.order - right.data.order)
 }
+
+type UpdatePage = ReturnType<typeof getUpdatePages>[number]
 
 export const Route = createFileRoute('/updates/')({
   head: () =>
@@ -32,48 +33,81 @@ export const Route = createFileRoute('/updates/')({
   component: UpdatesIndex,
 })
 
+function UpdateCard({ page }: { page: UpdatePage }) {
+  const isPreview = page.data.releaseStatus === 'preview'
+
+  return (
+    <a className="update-card" href={page.url}>
+      {!isPreview ? (
+        <div className="update-card-meta">
+          <time dateTime={page.data.date}>{page.data.date}</time>
+          <span aria-hidden="true">·</span>
+          <span>{page.data.version}</span>
+        </div>
+      ) : null}
+      <h3>{page.data.title}</h3>
+      <p>{page.data.description}</p>
+      {!isPreview ? (
+        <div className="update-card-details">
+          <span>{page.data.platform}</span>
+        </div>
+      ) : null}
+      <span className="update-card-link">Read update <span aria-hidden="true">→</span></span>
+    </a>
+  )
+}
+
+function UpdateSection({
+  eyebrow,
+  title,
+  note,
+  pages,
+}: {
+  eyebrow: string
+  title: string
+  note?: string
+  pages: UpdatePage[]
+}) {
+  return (
+    <section className="updates-section" aria-label={title}>
+      <div className="updates-section-heading">
+        <p className="updates-eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+        {note ? <p>{note}</p> : null}
+      </div>
+      <div className="updates-list">
+        {pages.map((page) => <UpdateCard key={page.url} page={page} />)}
+      </div>
+    </section>
+  )
+}
+
 function UpdatesIndex() {
   const pages = getUpdatePages()
+  const releasedPages = pages.filter((page) => page.data.releaseStatus === 'published')
+  const previewPages = pages.filter((page) => page.data.releaseStatus === 'preview')
 
   return (
     <div className="site-root-v2 updates-root" id="top">
       <Header />
       <main id="main-content" className="updates-page">
         <section className="updates-hero">
-          <p className="updates-eyebrow">Product updates</p>
-          <h1>What changed in Pix, and why.</h1>
-          <p>
-            First-party notes about new Pi capabilities, the problems they solve,
-            and the design choices that keep Pix local-first. Updates explain
-            product changes; the <a href="/docs">documentation</a> explains
-            configuration details.
-          </p>
+          <h1>Updates</h1>
+          <p>{DESCRIPTION}</p>
         </section>
 
-        <section className="updates-list" aria-label="Pix product updates">
-          {pages.map((page) => (
-            <a className="update-card" href={page.url} key={page.url}>
-              <div className="update-card-meta">
-                <time dateTime={page.data.date}>{page.data.date}</time>
-                <span aria-hidden="true">·</span>
-                <span>{page.data.version}</span>
-              </div>
-              <h2>{page.data.title}</h2>
-              <p>{page.data.description}</p>
-              <div className="update-card-details">
-                <span>{page.data.status}</span>
-                <span>{page.data.platform}</span>
-              </div>
-              <span className="update-card-link">Read update <span aria-hidden="true">→</span></span>
-            </a>
-          ))}
-        </section>
+        {releasedPages.length > 0 ? (
+          <UpdateSection eyebrow="Released" title="Latest updates" pages={releasedPages} />
+        ) : null}
 
-        <p className="updates-note">
-          Looking for installation or command details? Start with the{' '}
-          <a href="/docs/installation">installation guide</a> or browse the{' '}
-          <a href="/docs/pi-tui-bridge">Pi TUI bridge documentation</a>.
-        </p>
+        {previewPages.length > 0 ? (
+          <UpdateSection
+            eyebrow="Coming next"
+            title="Coming next"
+            note="Available on main while we prepare the next Pix release."
+            pages={previewPages}
+          />
+        ) : null}
       </main>
       <Footer />
     </div>
