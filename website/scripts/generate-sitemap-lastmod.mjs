@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -7,6 +7,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
 const websiteDirectory = path.resolve(scriptDirectory, '..')
 const repositoryDirectory = path.resolve(websiteDirectory, '..')
 const sourceDirectory = path.join(websiteDirectory, 'src')
+const updatesDirectory = path.join(websiteDirectory, 'content', 'updates')
 const outputPath = path.join(sourceDirectory, 'generated', 'sitemap-lastmod.ts')
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
@@ -43,6 +44,10 @@ const STATIC_SOURCES = {
     'website/src/components/use-case-page.tsx',
     'website/src/routes/use-cases/local-first-ai-coding.tsx',
   ],
+  '/updates': [
+    'website/src/lib/updates.ts',
+    'website/src/routes/updates/index.tsx',
+  ],
 }
 
 function readDocsFiles() {
@@ -65,6 +70,12 @@ function docsUrl(file) {
     .join('/')
 
   return normalized === 'index' ? '/docs' : `/docs/${normalized}`
+}
+
+function readUpdateFiles() {
+  return readdirSync(updatesDirectory)
+    .filter((file) => file.endsWith('.mdx'))
+    .sort()
 }
 
 function gitDate(relativePath) {
@@ -98,12 +109,36 @@ function sourceDate(relativePaths) {
 }
 
 function buildEntries() {
+  const updateFiles = readUpdateFiles()
   const entries = new Map(
-    Object.entries(STATIC_SOURCES).map(([url, sources]) => [url, sourceDate(sources)]),
+    Object.entries(STATIC_SOURCES).map(([url, sources]) => {
+      if (url === '/updates') {
+        return [
+          url,
+          sourceDate([
+            ...sources,
+            ...updateFiles.map((file) => `website/content/updates/${file}`),
+          ]),
+        ]
+      }
+
+      return [url, sourceDate(sources)]
+    }),
   )
 
   for (const file of readDocsFiles()) {
     entries.set(docsUrl(file), sourceDate([`docs/${file}`]))
+  }
+
+  for (const file of updateFiles) {
+    const slug = file.replace(/\.mdx$/i, '')
+    entries.set(
+      `/updates/${slug}`,
+      sourceDate([
+        `website/content/updates/${file}`,
+        'website/src/routes/updates/$slug.tsx',
+      ]),
+    )
   }
 
   return Object.fromEntries([...entries].sort(([left], [right]) => left.localeCompare(right)))

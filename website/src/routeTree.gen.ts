@@ -13,9 +13,12 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SplatRouteImport } from './routes/$'
 import { Route as LlmsDottxtRouteImport } from './routes/llms[.]txt'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
+import { Route as UpdatesRouteImport } from './routes/updates'
 import { Route as UseCasesRouteImport } from './routes/use-cases'
 import { Route as ApiSearchRouteImport } from './routes/api/search'
 import { Route as DocsSplatRouteImport } from './routes/docs/$'
+import { Route as UpdatesIndexRouteImport } from './routes/updates/index'
+import { Route as UpdatesSlugRouteImport } from './routes/updates/$slug'
 import { Route as UseCasesIndexRouteImport } from './routes/use-cases/index'
 import { Route as UseCasesContinuePiSessionsRouteImport } from './routes/use-cases/continue-pi-sessions'
 import { Route as UseCasesLocalFirstAiCodingRouteImport } from './routes/use-cases/local-first-ai-coding'
@@ -42,6 +45,11 @@ const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
   path: '/sitemap.xml',
   getParentRoute: () => rootRouteImport,
 } as any)
+const UpdatesRoute = UpdatesRouteImport.update({
+  id: '/updates',
+  path: '/updates',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const UseCasesRoute = UseCasesRouteImport.update({
   id: '/use-cases',
   path: '/use-cases',
@@ -56,6 +64,16 @@ const DocsSplatRoute = DocsSplatRouteImport.update({
   id: '/docs/$',
   path: '/docs/$',
   getParentRoute: () => rootRouteImport,
+} as any)
+const UpdatesIndexRoute = UpdatesIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => UpdatesRoute,
+} as any)
+const UpdatesSlugRoute = UpdatesSlugRouteImport.update({
+  id: '/$slug',
+  path: '/$slug',
+  getParentRoute: () => UpdatesRoute,
 } as any)
 const UseCasesIndexRoute = UseCasesIndexRouteImport.update({
   id: '/',
@@ -90,13 +108,16 @@ export interface FileRoutesByFullPath {
   '/$': typeof SplatRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/updates': typeof UpdatesRouteWithChildren
   '/use-cases': typeof UseCasesRouteWithChildren
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
+  '/updates/$slug': typeof UpdatesSlugRoute
   '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
   '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
   '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
   '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/updates/': typeof UpdatesIndexRoute
   '/use-cases/': typeof UseCasesIndexRoute
 }
 export interface FileRoutesByTo {
@@ -106,10 +127,12 @@ export interface FileRoutesByTo {
   '/sitemap.xml': typeof SitemapDotxmlRoute
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
+  '/updates/$slug': typeof UpdatesSlugRoute
   '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
   '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
   '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
   '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/updates': typeof UpdatesIndexRoute
   '/use-cases': typeof UseCasesIndexRoute
 }
 export interface FileRoutesById {
@@ -118,13 +141,16 @@ export interface FileRoutesById {
   '/$': typeof SplatRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/updates': typeof UpdatesRouteWithChildren
   '/use-cases': typeof UseCasesRouteWithChildren
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
+  '/updates/$slug': typeof UpdatesSlugRoute
   '/use-cases/continue-pi-sessions': typeof UseCasesContinuePiSessionsRoute
   '/use-cases/local-first-ai-coding': typeof UseCasesLocalFirstAiCodingRoute
   '/use-cases/pi-from-iphone': typeof UseCasesPiFromIphoneRoute
   '/use-cases/remote-pi': typeof UseCasesRemotePiRoute
+  '/updates/': typeof UpdatesIndexRoute
   '/use-cases/': typeof UseCasesIndexRoute
 }
 export interface FileRouteTypes {
@@ -134,13 +160,16 @@ export interface FileRouteTypes {
     | '/$'
     | '/llms.txt'
     | '/sitemap.xml'
+    | '/updates'
     | '/use-cases'
     | '/api/search'
     | '/docs/$'
+    | '/updates/$slug'
     | '/use-cases/continue-pi-sessions'
     | '/use-cases/local-first-ai-coding'
     | '/use-cases/pi-from-iphone'
     | '/use-cases/remote-pi'
+    | '/updates/'
     | '/use-cases/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -150,10 +179,12 @@ export interface FileRouteTypes {
     | '/sitemap.xml'
     | '/api/search'
     | '/docs/$'
+    | '/updates/$slug'
     | '/use-cases/continue-pi-sessions'
     | '/use-cases/local-first-ai-coding'
     | '/use-cases/pi-from-iphone'
     | '/use-cases/remote-pi'
+    | '/updates'
     | '/use-cases'
   id:
     | '__root__'
@@ -161,13 +192,16 @@ export interface FileRouteTypes {
     | '/$'
     | '/llms.txt'
     | '/sitemap.xml'
+    | '/updates'
     | '/use-cases'
     | '/api/search'
     | '/docs/$'
+    | '/updates/$slug'
     | '/use-cases/continue-pi-sessions'
     | '/use-cases/local-first-ai-coding'
     | '/use-cases/pi-from-iphone'
     | '/use-cases/remote-pi'
+    | '/updates/'
     | '/use-cases/'
   fileRoutesById: FileRoutesById
 }
@@ -176,6 +210,7 @@ export interface RootRouteChildren {
   SplatRoute: typeof SplatRoute
   LlmsDottxtRoute: typeof LlmsDottxtRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
+  UpdatesRoute: typeof UpdatesRouteWithChildren
   UseCasesRoute: typeof UseCasesRouteWithChildren
   ApiSearchRoute: typeof ApiSearchRoute
   DocsSplatRoute: typeof DocsSplatRoute
@@ -211,6 +246,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SitemapDotxmlRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/updates': {
+      id: '/updates'
+      path: '/updates'
+      fullPath: '/updates'
+      preLoaderRoute: typeof UpdatesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/use-cases': {
       id: '/use-cases'
       path: '/use-cases'
@@ -231,6 +273,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/docs/$'
       preLoaderRoute: typeof DocsSplatRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/updates/': {
+      id: '/updates/'
+      path: '/'
+      fullPath: '/updates/'
+      preLoaderRoute: typeof UpdatesIndexRouteImport
+      parentRoute: typeof UpdatesRoute
+    }
+    '/updates/$slug': {
+      id: '/updates/$slug'
+      path: '/$slug'
+      fullPath: '/updates/$slug'
+      preLoaderRoute: typeof UpdatesSlugRouteImport
+      parentRoute: typeof UpdatesRoute
     }
     '/use-cases/': {
       id: '/use-cases/'
@@ -270,6 +326,19 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface UpdatesRouteChildren {
+  UpdatesSlugRoute: typeof UpdatesSlugRoute
+  UpdatesIndexRoute: typeof UpdatesIndexRoute
+}
+
+const UpdatesRouteChildren: UpdatesRouteChildren = {
+  UpdatesSlugRoute: UpdatesSlugRoute,
+  UpdatesIndexRoute: UpdatesIndexRoute,
+}
+
+const UpdatesRouteWithChildren =
+  UpdatesRoute._addFileChildren(UpdatesRouteChildren)
+
 interface UseCasesRouteChildren {
   UseCasesContinuePiSessionsRoute: typeof UseCasesContinuePiSessionsRoute
   UseCasesLocalFirstAiCodingRoute: typeof UseCasesLocalFirstAiCodingRoute
@@ -295,6 +364,7 @@ const rootRouteChildren: RootRouteChildren = {
   SplatRoute: SplatRoute,
   LlmsDottxtRoute: LlmsDottxtRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
+  UpdatesRoute: UpdatesRouteWithChildren,
   UseCasesRoute: UseCasesRouteWithChildren,
   ApiSearchRoute: ApiSearchRoute,
   DocsSplatRoute: DocsSplatRoute,

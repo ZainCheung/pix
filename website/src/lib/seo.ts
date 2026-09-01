@@ -192,3 +192,112 @@ export function useCaseStructuredData({
     '@graph': graph,
   }
 }
+
+export type SeoUpdateItem = {
+  title: string
+  path: string
+}
+
+export function updatesStructuredData({
+  title,
+  description,
+  path,
+  items = [],
+}: Pick<SeoInput, 'title' | 'description' | 'path'> & {
+  items?: SeoUpdateItem[]
+}): JsonLdObject {
+  const url = siteUrl(path)
+
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'CollectionPage',
+        '@id': `${url}#collection`,
+        name: title,
+        description,
+        url,
+        isPartOf: { '@id': `${siteUrl('/')}#website` },
+        inLanguage: 'en',
+      },
+      {
+        '@type': 'BreadcrumbList',
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: SITE_NAME, item: siteUrl('/') },
+          { '@type': 'ListItem', position: 2, name: 'Updates', item: url },
+        ],
+      },
+      {
+        '@type': 'ItemList',
+        itemListElement: items.map((item, index) => ({
+          '@type': 'ListItem',
+          position: index + 1,
+          name: item.title,
+          url: siteUrl(item.path),
+        })),
+      },
+    ],
+  }
+}
+
+export function updateStructuredData({
+  title,
+  description,
+  path,
+  date,
+  updated,
+  version,
+}: Pick<SeoInput, 'title' | 'description' | 'path'> & {
+  date: string
+  updated?: string
+  version?: string
+}): JsonLdObject {
+  const url = siteUrl(path)
+  const article: JsonLdObject = {
+    '@type': 'Article',
+    '@id': `${url}#article`,
+    headline: title,
+    description,
+    url,
+    datePublished: date,
+    ...(updated ? { dateModified: updated } : {}),
+    ...(version ? { version } : {}),
+    author: {
+      '@type': 'Organization',
+      name: SITE_NAME,
+      url: siteUrl('/'),
+    },
+    publisher: {
+      '@type': 'Organization',
+      name: SITE_NAME,
+      url: siteUrl('/'),
+    },
+    mainEntityOfPage: { '@id': `${url}#webpage` },
+    isPartOf: { '@id': `${siteUrl('/')}#website` },
+    inLanguage: 'en',
+  }
+
+  return {
+    '@context': 'https://schema.org',
+    '@graph': [
+      {
+        '@type': 'WebPage',
+        '@id': `${url}#webpage`,
+        name: title,
+        description,
+        url,
+        isPartOf: { '@id': `${siteUrl('/')}#website` },
+        inLanguage: 'en',
+      },
+      article,
+      {
+        '@type': 'BreadcrumbList',
+        itemListElement: [
+          { '@type': 'ListItem', position: 1, name: SITE_NAME, item: siteUrl('/') },
+          { '@type': 'ListItem', position: 2, name: 'Updates', item: siteUrl('/updates') },
+          { '@type': 'ListItem', position: 3, name: title, item: url },
+        ],
+      },
+    ],
+  }
+}

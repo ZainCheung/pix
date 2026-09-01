@@ -3,6 +3,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { SITEMAP_LASTMOD } from '#/generated/sitemap-lastmod'
 import { siteUrl } from '#/lib/seo'
 import { source } from '#/lib/source'
+import { updateSource } from '#/lib/updates'
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
@@ -13,6 +14,7 @@ const STATIC_PATHS = [
   '/use-cases/remote-pi',
   '/use-cases/continue-pi-sessions',
   '/use-cases/local-first-ai-coding',
+  '/updates',
 ]
 
 function escapeXml(value: string) {
@@ -32,6 +34,7 @@ function sitemapXml() {
   const paths = new Set([
     ...STATIC_PATHS,
     ...source.getPages().map((page) => page.url),
+    ...updateSource.getPages().map((page) => page.url),
   ])
   const urls = [...paths]
     .sort()

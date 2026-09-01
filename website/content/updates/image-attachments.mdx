@@ -1,0 +1,80 @@
+---
+title: Send Multiple Images to Pi from Your iPhone
+description: Add up to nine image attachments to one Pi prompt from Pix, with session history and image dimensions preserved.
+date: '2026-08-31'
+updated: '2026-09-01'
+version: Next Pix release
+platform: iPhone client · macOS and Linux host
+status: Preview on main
+order: 3
+---
+
+More context, straight from your phone. Pix now supports up to nine image
+attachments in a single prompt to Pi.
+
+## What changed
+
+New Pix clients negotiate the attachment limit with the host and can add
+several images before sending one prompt. Older clients keep their compatible
+lower limit instead of failing against a newer host.
+
+Use the same prompt for a group of related references:
+
+```text
+[UI screenshot] [error message] [design reference]
+       … up to nine images …
+                         │
+                         ▼
+                    one Pi prompt
+```
+
+Screenshots, error messages, UI references, and photos can now travel with the
+question they explain instead of being sent as disconnected follow-up notes.
+
+## Why it matters
+
+Visual debugging rarely fits into one image. A layout issue may need the
+current screen, a console error, and the intended design side by side. Sending
+those references together gives Pi the same context you can see on your
+phone.
+
+The limit is negotiated rather than assumed, so a newer client can use the
+larger capacity while legacy clients remain compatible with the host.
+
+## Images remain part of the session
+
+Attachments are not just temporary UI blobs. Pix associates image assets with
+the host-side Pi session so history can restore them later. The original Pi
+image content remains the durable source, while the host derives bounded
+session-scoped assets for the client.
+
+Image references can be loaded lazily when a history view opens. Pix also
+preserves each image's original pixel dimensions, allowing the client to
+reserve the right geometry for mixed-size attachments before the full image
+data arrives.
+
+## Try it
+
+Update Pix on your iPhone and the Pix Host on the Mac or Linux machine. Open a
+Pi session, add several images in the composer, and send one prompt. The host
+stages the attachments within bounded connection memory before associating
+them with the session.
+
+## Current limits
+
+Image attachments through a Pi TUI-owned session are not supported yet. Use a
+Pix-owned prompt path for images, and confirm that the model provider selected
+for the session supports vision input.
+
+## Availability
+
+This update describes the implementation currently available on `main` and is
+targeted for the next Pix release. The nine-image limit requires a client and
+host that negotiate the current attachment capability; legacy clients retain
+their compatible limit.
+
+## Learn more
+
+- [Send prompts and attachments from iPhone](/use-cases/pi-from-iphone)
+- [Understand image history and host boundaries](/docs/architecture)
+- [Review the Pix wire capabilities on GitHub](https://github.com/ZainCheung/pix/tree/main/protocol/schema)

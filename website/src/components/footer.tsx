@@ -11,6 +11,7 @@ export function Footer() {
         </a>
         <nav className="footer-nav-v2" aria-label="Footer navigation">
           <a href="/use-cases">Use cases</a>
+          <a href="/updates">Updates</a>
           <a href="/docs">Docs</a>
         </nav>
       </div>
