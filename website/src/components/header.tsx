@@ -6,7 +6,7 @@ export function Header() {
   return (
     <header className="site-header-v2">
       <div className="header-inner-v2">
-        <a className="brand-link-v2" href="#top" aria-label="Pix home">
+        <a className="brand-link-v2" href="/" aria-label="Pix home">
           <BrandMark />
           <span>Pix</span>
         </a>
