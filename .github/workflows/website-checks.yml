@@ -6,10 +6,12 @@ on:
       - main
     paths:
       - website/**
+      - docs/**
       - .github/workflows/website-checks.yml
   pull_request:
     paths:
       - website/**
+      - docs/**
       - .github/workflows/website-checks.yml
   workflow_dispatch:
 

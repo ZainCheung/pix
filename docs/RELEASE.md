@@ -1,4 +1,7 @@
-# Release workflow
+---
+title: Release workflow
+description: Cut Pix releases, publish platform packages, and deploy the relay and website.
+---
 
 Pix has one product version source: `[workspace.package].version` in the root
 `Cargo.toml`. Every workspace crate must use `version.workspace = true`, and a
@@ -122,11 +125,11 @@ and builds when `website/**` changes. Workers Builds does not inherit that
 filter: set Build watch paths on the Worker to include `website/*` and exclude
 nothing, or a docs-only push to `main` will still deploy the site. The Worker
 root directory (`website/`) is the build working directory, not the watch
-filter. See [website/README.md](../website/README.md).
+filter. See the [website README](https://github.com/ZainCheung/pix/blob/main/website/README.md).
 
 ## Pi package release
 
-The Pi TUI bridge is a separately versioned npm package:
+The [Pi TUI bridge](/docs/pi-tui-bridge) is a separately versioned npm package:
 `@zaincheung/pix`. Its source and manifest live entirely under
 `packages/pix/`.
 

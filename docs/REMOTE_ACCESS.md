@@ -1,4 +1,7 @@
-# Remote access
+---
+title: Remote access
+description: Connect an iPhone to Pix over a local network or an encrypted relay.
+---
 
 Pix supports two paths between a client and the host. Both paths use the same
 encrypted Pix channel after the connection is established.
@@ -93,7 +96,8 @@ npm ci
 npm run dev
 ```
 
-For the contract, limits, and test fixtures, see [relay/README.md](../relay/README.md).
+For the contract, limits, and test fixtures, see the
+[relay README](https://github.com/ZainCheung/pix/blob/main/relay/README.md).
 
 ## Security notes
 

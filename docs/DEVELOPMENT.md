@@ -1,4 +1,7 @@
-# Pix development
+---
+title: Pix development
+description: Build, run, test, package, and contribute to the public Pix repository.
+---
 
 This guide covers the local loop for the public Pix Host repository:
 
@@ -6,8 +9,9 @@ This guide covers the local loop for the public Pix Host repository:
 clone → build → run → inspect → test → package
 ~~~
 
-For the design rationale, read [ARCHITECTURE.md](ARCHITECTURE.md) first. For
-contribution rules, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+For the design rationale, read the [architecture guide](/docs/architecture)
+first. For contribution rules, see
+[CONTRIBUTING.md](https://github.com/ZainCheung/pix/blob/main/CONTRIBUTING.md).
 
 ## Prerequisites
 
@@ -109,7 +113,7 @@ npm run dev
 
 `npm run deploy` targets a configured Cloudflare account and should
 only be used with the credentials and environment described in
-[RELEASE.md](RELEASE.md). The relay never receives the channel secret or
+[release workflow](/docs/release). The relay never receives the channel secret or
 application payload.
 
 Relay tests consume `protocol/fixtures/v1/relay-channel.json`. If a
@@ -192,7 +196,7 @@ SOURCE_DATE_EPOCH=0 packaging/release/finalize.sh dist
 ~~~
 
 The release process, artifact names, version rules, and relay deployment
-workflow are documented in [RELEASE.md](RELEASE.md).
+workflow is documented in the [release workflow](/docs/release).
 
 ## Protocol and Apple boundary
 
@@ -212,6 +216,11 @@ The public Apple wire build helper is
 `apps/macos`. The private iOS client consumes the generated XCFramework from
 the public repository.
 
+The optional Pi TUI bridge is developed as the standalone package under
+`packages/pix/`. Its source is TypeScript loaded directly by Pi. Keep changes
+to the host-local bridge contract aligned with the [Pi TUI bridge guide](/docs/pi-tui-bridge)
+and the Rust ownership tests under `crates/pix-core/tests/tui_bridge.rs`.
+
 ## Pull request checklist
 
 Before requesting review:
@@ -221,5 +230,5 @@ Before requesting review:
 2. Run the formatting, Rust, Clippy, and relay checks above.
 3. Update documentation and fixtures when behavior or compatibility changes.
 4. Confirm logs and diagnostic output remain payload-free.
-5. Read [CONTRIBUTING.md](../CONTRIBUTING.md) and
-   [SECURITY.md](../SECURITY.md).
+5. Read [CONTRIBUTING.md](https://github.com/ZainCheung/pix/blob/main/CONTRIBUTING.md)
+   and [SECURITY.md](https://github.com/ZainCheung/pix/blob/main/SECURITY.md).

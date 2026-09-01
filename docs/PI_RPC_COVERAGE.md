@@ -1,4 +1,7 @@
-# Pi RPC coverage matrix
+---
+title: Pi RPC coverage matrix
+description: See how Pi's RPC surface maps onto the versioned Pix wire protocol.
+---
 
 How Pi's RPC surface (verified against Pi 0.84.x, the supported line
 `>=0.84.1, <0.85.0`) maps onto the Pix wire protocol. Update this file

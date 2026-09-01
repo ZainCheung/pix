@@ -1,4 +1,7 @@
-# Pix troubleshooting
+---
+title: Pix troubleshooting
+description: Diagnose common Pi, workspace, pairing, relay, service, and configuration issues.
+---
 
 Start with the four commands below. They inspect the resolved configuration,
 Pi compatibility, host liveness, and payload-free operational history:
@@ -214,5 +217,6 @@ Before opening an issue:
 4. Remove paths, prompts, session content, credentials, keys, tokens, and
    relay secrets from any report.
 
-For suspected vulnerabilities, follow [SECURITY.md](../SECURITY.md) instead of
+For suspected vulnerabilities, follow
+[SECURITY.md](https://github.com/ZainCheung/pix/blob/main/SECURITY.md) instead of
 filing a public issue.

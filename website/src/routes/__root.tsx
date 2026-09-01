@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
+import { RootProvider } from 'fumadocs-ui/provider/tanstack'
 import { useState, type ReactNode } from 'react'
 
 import { THEME_BOOTSTRAP_SCRIPT } from '#/lib/theme'
@@ -65,8 +66,10 @@ function RootDocument({ children }: { children: ReactNode }) {
       </head>
       <body>
         <QueryClientProvider client={queryClient}>
-          <a className="skip-link" href="#main-content">Skip to main content</a>
-          {children}
+          <RootProvider theme={{ enabled: false }} search={{ preload: false }}>
+            <a className="skip-link" href="#main-content">Skip to main content</a>
+            {children}
+          </RootProvider>
         </QueryClientProvider>
         <Scripts />
       </body>
