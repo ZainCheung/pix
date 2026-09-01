@@ -14,7 +14,7 @@ const features = [
   {
     icon: <Laptop size={18} />,
     title: 'Your machine stays in control',
-    body: 'Your code, credentials, tools, and Pi processes stay on your Mac or Linux machine.',
+    body: 'Your workspace, credentials, tools, and Pi processes stay on your Mac or Linux machine. Model requests follow the provider you choose and its data policy.',
   },
   {
     icon: <Wifi size={18} />,

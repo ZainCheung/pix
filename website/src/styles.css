@@ -2138,6 +2138,201 @@ h3 {
   line-height: 1.62;
 }
 
+.use-case-media {
+  margin: 0 0 25px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.use-case-media-image img,
+.use-case-media-video video {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.use-case-media-image img {
+  max-height: 560px;
+  object-fit: cover;
+  object-position: center;
+}
+
+.use-case-media figcaption {
+  border-top: 1px solid var(--border);
+  padding: 13px 16px 14px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.use-case-media-diagram {
+  overflow: hidden;
+}
+
+.use-case-diagram-canvas {
+  min-height: 240px;
+  padding: 27px;
+  background:
+    linear-gradient(135deg, color-mix(in oklch, var(--accent) 7%, transparent), transparent 55%),
+    repeating-linear-gradient(0deg, transparent 0 39px, var(--grid-line) 40px),
+    repeating-linear-gradient(90deg, transparent 0 39px, var(--grid-line) 40px);
+}
+
+.use-case-diagram-row {
+  display: grid;
+  grid-template-columns: minmax(105px, 0.75fr) minmax(96px, 1fr) minmax(150px, 1.45fr) minmax(110px, 1fr);
+  align-items: center;
+  gap: 15px;
+  min-height: 86px;
+  border-bottom: 1px solid var(--border);
+}
+
+.use-case-diagram-row:last-child {
+  border-bottom: 0;
+}
+
+.use-case-diagram-label,
+.use-case-diagram-session-note {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.use-case-diagram-node,
+.use-case-diagram-boundary-card {
+  display: inline-flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  border: 1px solid var(--accent);
+  background: color-mix(in oklch, var(--background) 82%, var(--accent));
+  padding: 12px 13px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+}
+
+.use-case-diagram-node small,
+.use-case-diagram-boundary-card span {
+  display: block;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.use-case-diagram-node small {
+  margin-top: 4px;
+}
+
+.use-case-diagram-connector {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.use-case-diagram-session-note {
+  display: block;
+  margin-bottom: 18px;
+  text-align: center;
+}
+
+.use-case-diagram-session-flow,
+.use-case-diagram-phone-flow {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(125px, 1.1fr) minmax(110px, 1fr) minmax(95px, 0.9fr) minmax(110px, 1fr);
+  align-items: center;
+  gap: 13px;
+  min-height: 130px;
+}
+
+.use-case-diagram-phone-flow {
+  grid-template-columns: minmax(125px, 1fr) minmax(150px, 1.35fr) minmax(125px, 1fr);
+  max-width: 700px;
+  margin: 25px auto;
+}
+
+.use-case-diagram-boundary-grid {
+  display: grid;
+  grid-template-columns: minmax(125px, 1fr) minmax(100px, 0.9fr) minmax(125px, 1fr) minmax(100px, 0.9fr) minmax(125px, 1fr);
+  align-items: center;
+  gap: 13px;
+  min-height: 185px;
+}
+
+.use-case-diagram-boundary-card {
+  min-height: 104px;
+  flex-direction: column;
+  gap: 8px;
+  border-color: var(--border);
+  background: var(--background);
+}
+
+.use-case-diagram-boundary-card strong {
+  color: var(--foreground);
+  font-size: 14px;
+}
+
+.use-case-diagram-boundary-host {
+  border-color: var(--accent);
+}
+
+.use-case-diagram-boundary-provider {
+  border-color: var(--accent-strong);
+}
+
+.use-case-table-wrap {
+  margin-top: 24px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+}
+
+.use-case-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.use-case-table caption {
+  padding: 14px 16px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-align: left;
+}
+
+.use-case-table th,
+.use-case-table td {
+  border-top: 1px solid var(--border);
+  padding: 13px 16px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.use-case-table th {
+  color: var(--foreground);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.use-case-table td + td,
+.use-case-table th + th {
+  border-left: 1px solid var(--border);
+}
+
 .use-case-sections {
   border-top: 1px solid var(--border);
 }
@@ -2163,6 +2358,24 @@ h3 {
   color: var(--muted-foreground);
   font-size: 15px;
   line-height: 1.7;
+}
+
+.use-case-section .use-case-context-link {
+  margin-top: 21px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.use-case-context-link a {
+  color: var(--foreground);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  text-underline-offset: 4px;
+}
+
+.use-case-context-link a:hover {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
 }
 
 .use-case-section ul,
@@ -2385,6 +2598,47 @@ h3 {
 
   .use-case-card {
     min-height: 0;
+  }
+
+  .use-case-diagram-canvas {
+    padding: 21px 16px;
+  }
+
+  .use-case-diagram-row {
+    grid-template-columns: minmax(86px, 0.8fr) minmax(95px, 1fr) minmax(120px, 1.25fr);
+    gap: 10px;
+    padding: 14px 0;
+  }
+
+  .use-case-diagram-row .use-case-diagram-label {
+    grid-column: 1 / -1;
+  }
+
+  .use-case-diagram-session-flow,
+  .use-case-diagram-phone-flow,
+  .use-case-diagram-boundary-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .use-case-diagram-session-flow .use-case-diagram-connector,
+  .use-case-diagram-phone-flow .use-case-diagram-connector,
+  .use-case-diagram-boundary-grid .use-case-diagram-connector {
+    padding: 2px 0;
+  }
+
+  .use-case-diagram-session-flow .use-case-diagram-connector,
+  .use-case-diagram-phone-flow .use-case-diagram-connector {
+    font-size: 9px;
+  }
+
+  .use-case-diagram-boundary-card {
+    min-height: 82px;
+  }
+
+  .use-case-table {
+    min-width: 500px;
   }
 }
 

@@ -5,9 +5,9 @@ import { Header } from '#/components/header'
 import { USE_CASES } from '#/components/use-case-page'
 import { createSeoHead, useCaseStructuredData } from '#/lib/seo'
 
-const TITLE = 'Pi Coding Agent Use Cases | Pix'
+const TITLE = 'Pi Coding Agent Use Cases for iPhone and Remote Access | Pix'
 const DESCRIPTION =
-  'See how Pix connects your iPhone to Pi for remote access, native session continuity, and local-first coding.'
+  'Answer four Pi coding agent questions: use Pi on iPhone, connect remotely, resume the same session, and understand Pix’s local-first data boundary.'
 
 export const Route = createFileRoute('/use-cases/')({
   head: () =>
@@ -33,11 +33,12 @@ function UseCasesIndex() {
       <main id="main-content" className="use-cases-index-page">
         <section className="use-cases-index-hero">
           <p className="use-case-eyebrow">Pi + remote access</p>
-          <h1>Use Pi from your phone</h1>
+          <h1>Pi Coding Agent use cases for iPhone and remote access</h1>
           <p>
             Pix connects the Pi coding agent on your Mac or Linux machine to a
-            paired iPhone. These use cases explain what stays local and what
-            you can control remotely.
+            paired iPhone. Each guide answers a different question about using
+            Pi remotely: the iPhone workflow, network access, session handoff,
+            and the local-first security boundary.
           </p>
         </section>
 
