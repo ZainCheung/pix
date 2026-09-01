@@ -37,10 +37,11 @@ jobs:
       - run: npm ci
       - name: Generate route tree
         run: npm run generate-routes
-      - name: Verify generated route tree is committed
-        run: git diff --exit-code -- src/routeTree.gen.ts
       - run: npm run typecheck
       - run: npm run build
+      # TanStack Start restores its generated type footer during the Vite build.
+      - name: Verify generated route tree is committed
+        run: git diff --exit-code -- src/routeTree.gen.ts
       - name: Smoke test generated endpoints
         run: |
           set -eu
