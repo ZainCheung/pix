@@ -1,0 +1,15 @@
+{
+  "title": "Understand Pix",
+  "pages": [
+    "HOW_PIX_WORKS",
+    "LOCAL_FIRST",
+    "SESSION_OWNERSHIP",
+    "PAIRING_AND_TRUST",
+    "DIRECT_VS_RELAY",
+    "PIX_AND_PI",
+    "SECURITY",
+    "LIMITATIONS"
+  ],
+  "defaultOpen": false,
+  "collapsible": true
+}

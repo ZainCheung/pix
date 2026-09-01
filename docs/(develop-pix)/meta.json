@@ -1,0 +1,15 @@
+{
+  "title": "Develop Pix",
+  "pages": [
+    "DEVELOPMENT",
+    "ARCHITECTURE",
+    "REPOSITORY",
+    "WIRE_PROTOCOL",
+    "TUI_BRIDGE_INTERNALS",
+    "PI_RPC_COVERAGE",
+    "TESTING",
+    "RELEASE"
+  ],
+  "defaultOpen": false,
+  "collapsible": true
+}

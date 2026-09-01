@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/react-query'
 
 import { Button, ButtonLink } from '#/components/ui/button'
 import {
-  GITHUB_URL,
   GITHUB_RELEASES_URL,
   findReleaseAsset,
   getLatestRelease,
@@ -13,7 +12,7 @@ import {
 
 const IOS_APP_URL = 'https://deepoke.com/pix'
 const INSTALL_COMMAND = 'curl -fsSL https://pix.deepoke.com/install.sh | sh'
-const HOMEBREW_DOCS_URL = `${GITHUB_URL}/blob/main/docs/INSTALLATION.md#homebrew`
+const HOMEBREW_DOCS_URL = '/docs/installation#homebrew'
 
 export function Download({ release }: { release: PixRelease | null }) {
   const [copied, setCopied] = useState(false)
@@ -72,7 +71,7 @@ export function Download({ release }: { release: PixRelease | null }) {
             <span>No sudo required</span>
           </p>
           <nav className="install-links-v2" aria-label="More installation options">
-            <a href={HOMEBREW_DOCS_URL} target="_blank" rel="noreferrer">Homebrew</a>
+            <a href={HOMEBREW_DOCS_URL}>Homebrew</a>
             <a href={macUrl} target="_blank" rel="noreferrer">Download macOS</a>
             <a href={linuxPackagesUrl} target="_blank" rel="noreferrer">Linux packages</a>
           </nav>

@@ -12,11 +12,16 @@ The Rust workspace lives under `crates/` (`pix-cli`, `pix-core`, and
 does not replace the Pi runtime. The protocol contract, Relay, and platform
 packaging remain separate top-level boundaries.
 
+The [Development page](/docs/development#repository-map) has the concise map
+of these directories and the [Architecture page](/docs/architecture) explains
+which process owns each responsibility.
+
 The compatibility boundary is versioned `pix-wire` plus
 `protocol/schema/v1.md` and `protocol/fixtures/v1`. The private iOS client
 pins a Host tag and exact commit and builds the XCFramework from that checkout.
 The public macOS target embeds a CLI built from the same source commit for
-source and release builds.
+source and release builds. See [Wire protocol](/docs/wire-protocol) for the
+protocol layering and [Testing](/docs/testing) for fixture checks.
 
 The public repository contains no Apple signing material, App Store Connect
 metadata, private workspace paths, or production Cloudflare credentials.

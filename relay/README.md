@@ -42,7 +42,7 @@ The hostname must be in an active Cloudflare zone and must not already have a
 CNAME record.
 
 This deploys to your account; it does not modify Pix's hosted relay. See
-[`docs/REMOTE_ACCESS.md`](../docs/REMOTE_ACCESS.md) for the pairing flow and
+[`docs/(use-pix)/REMOTE_ACCESS.md`](<../docs/(use-pix)/REMOTE_ACCESS.md>) for the pairing flow and
 self-hosting notes.
 
 ## Contract

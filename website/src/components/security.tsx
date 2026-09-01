@@ -5,7 +5,7 @@ import { GITHUB_URL } from '#/lib/release'
 
 const securityLinks = [
   { label: 'Security policy', href: `${GITHUB_URL}/blob/main/SECURITY.md`, icon: <ShieldCheck size={15} /> },
-  { label: 'Architecture', href: `${GITHUB_URL}/blob/main/docs/ARCHITECTURE.md`, icon: <BookOpen size={15} /> },
+  { label: 'Architecture', href: '/docs/architecture', icon: <BookOpen size={15} /> },
   { label: 'Wire protocol v1', href: `${GITHUB_URL}/blob/main/protocol/schema/v1.md`, icon: <GitBranch size={15} /> },
 ]
 
@@ -22,7 +22,7 @@ export function Security() {
             end. A relay only needs enough metadata to join the two endpoints.
           </p>
           <div className="security-actions">
-            <ButtonLink href={`${GITHUB_URL}/tree/main/docs`} target="_blank" rel="noreferrer" variant="primary">
+            <ButtonLink href="/docs" variant="primary">
               Read the docs <ExternalLink size={15} />
             </ButtonLink>
             <ButtonLink href={`${GITHUB_URL}/tree/main/protocol`} target="_blank" rel="noreferrer" variant="quiet">
@@ -63,7 +63,12 @@ export function Security() {
       </div>
       <div className="section-shell security-links">
         {securityLinks.map((link) => (
-          <a key={link.label} href={link.href} target="_blank" rel="noreferrer">
+          <a
+            key={link.label}
+            href={link.href}
+            target={link.href.startsWith('/docs') ? undefined : '_blank'}
+            rel={link.href.startsWith('/docs') ? undefined : 'noreferrer'}
+          >
             {link.icon}
             {link.label}
             <ExternalLink size={12} />

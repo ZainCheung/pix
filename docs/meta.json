@@ -1,19 +1,11 @@
 {
   "pages": [
     "index",
-    "---Getting Started---",
-    "INSTALLATION",
-    "---Using Pix---",
-    "REMOTE_ACCESS",
-    "CLI",
-    "PI_TUI_BRIDGE",
-    "TROUBLESHOOTING",
-    "---Concepts---",
-    "ARCHITECTURE",
-    "---Development---",
-    "DEVELOPMENT",
-    "REPOSITORY",
-    "RELEASE",
-    "PI_RPC_COVERAGE"
+    "(start)",
+    "(use-pix)",
+    "(understand-pix)",
+    "(advanced)",
+    "(reference)",
+    "(develop-pix)"
   ]
 }

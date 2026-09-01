@@ -1,0 +1,10 @@
+{
+  "title": "Start",
+  "pages": [
+    "QUICKSTART",
+    "INSTALLATION",
+    "PAIRING"
+  ],
+  "defaultOpen": true,
+  "collapsible": true
+}

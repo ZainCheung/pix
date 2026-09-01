@@ -15,5 +15,5 @@ repository and consumes the public `pix-wire` protocol boundary.
 - Never commit secrets, signing material, private keys, or local workspace
   paths.
 
-Before changing the host contract, read `docs/ARCHITECTURE.md`,
+Before changing the host contract, read `docs/(develop-pix)/ARCHITECTURE.md`,
 `docs/DECISIONS.md`, and `protocol/schema/v1.md`.

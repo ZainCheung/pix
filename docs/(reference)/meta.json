@@ -1,0 +1,12 @@
+{
+  "title": "Reference",
+  "pages": [
+    "CLI",
+    "CONFIGURATION",
+    "PLATFORM_SUPPORT",
+    "ENVIRONMENT",
+    "COMPATIBILITY"
+  ],
+  "defaultOpen": false,
+  "collapsible": true
+}
