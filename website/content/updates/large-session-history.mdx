@@ -1,0 +1,39 @@
+---
+title: Long-Running Pi Sessions Open Incrementally
+description: Pix loads recent Pi history first and reads older messages as you need them.
+date: '2026-08-31'
+updated: '2026-09-01'
+version: Next Pix release
+platform: macOS and Linux host · iPhone client
+status: Available on main
+releaseStatus: preview
+order: 2
+---
+
+Long-running Pi sessions no longer need to fit into a single Pix message before
+they can open.
+
+## Before
+
+Opening a session meant sending its full history in the initial snapshot. A
+large enough session could exceed Pix's 1 MiB encrypted-frame limit and fail to
+open.
+
+## Now
+
+Pix opens recent history first and loads older messages as you scroll back.
+
+```text
+Recent history ─────► opens immediately
+       │
+       └── older history ◄──── load when needed
+                              while live events continue
+```
+
+Pi's JSONL file remains the session source of truth. Pix does not keep a second
+history database, and live agent events continue while older pages load. Clients
+without incremental history keep the existing snapshot path.
+
+**A 1 MiB frame limit is a frame limit, not a session limit.**
+
+[Read the session history and architecture details](/docs/architecture).

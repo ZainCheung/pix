@@ -6,12 +6,15 @@ export function Header() {
   return (
     <header className="site-header-v2">
       <div className="header-inner-v2">
-        <a className="brand-link-v2" href="#top" aria-label="Pix home">
+        <a className="brand-link-v2" href="/" aria-label="Pix home">
           <BrandMark />
           <span>Pix</span>
         </a>
 
         <nav className="header-actions-v2" aria-label="Primary navigation">
+          <a className="header-updates-v2" href="/updates">
+            Updates
+          </a>
           <a className="header-docs-v2" href="/docs">
             Docs
           </a>

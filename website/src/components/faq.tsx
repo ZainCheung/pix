@@ -17,7 +17,7 @@ const questions = [
   },
   {
     question: 'Does my code leave my computer?',
-    answer: 'Your repositories, credentials, Pi processes, and session data stay on your computer. Pix remotely controls the host instead of moving your workspace into a hosted environment.',
+    answer: 'Pix does not upload your repository to Pix infrastructure. Pi may send relevant prompt context to the model provider you configured, while the Pix relay forwards only opaque encrypted frames and stores no application payloads.',
   },
   {
     question: 'What do I need to use Pix?',

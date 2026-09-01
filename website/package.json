@@ -7,9 +7,10 @@
     "#/*": "./src/*"
   },
   "scripts": {
-    "dev": "vite dev --port 3000",
+    "dev": "npm run generate-sitemap-lastmod && vite dev --port 3000",
     "generate-routes": "tsr generate",
-    "build": "vite build",
+    "generate-sitemap-lastmod": "node scripts/generate-sitemap-lastmod.mjs",
+    "build": "npm run generate-sitemap-lastmod && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "deploy": "npm run build && wrangler deploy"
@@ -25,7 +26,8 @@
     "fumadocs-ui": "^16.15.4",
     "lucide-react": "^1.33.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.53.1",

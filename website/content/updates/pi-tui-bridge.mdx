@@ -1,0 +1,53 @@
+---
+title: Pi TUI Bridge
+description: Connect the Pi session already open in your terminal to Pix.
+date: '2026-09-01'
+updated: '2026-09-01'
+version: Next Pix release
+platform: macOS and Linux host · iPhone client
+status: Available on main
+releaseStatus: preview
+order: 1
+---
+
+Pix can now connect the Pi session already open in your terminal to Pix Host
+through the optional `@zaincheung/pix` extension. Pi remains the agent, and its
+native JSONL session remains the source of truth.
+
+```text
+Pi TUI
+  │
+  │ @zaincheung/pix
+  ▼
+Local Unix socket
+  │
+  ▼
+Pix Host ─── Pix on iPhone
+```
+
+## Keep starting Pi the way you already do
+
+Install the extension, then restart Pi or run `/reload` in an existing session:
+
+```sh
+pi install npm:@zaincheung/pix
+```
+
+When Pi starts, the extension connects the TUI to Pix Host over a local Unix
+socket. The same live session then appears in Pix.
+
+## One session, one writer
+
+The terminal and Pix do not write to the same Pi session at the same time. Pix
+Host coordinates ownership and rejects a competing claim, so the native JSONL
+file stays consistent. If the host is unavailable, Pi continues as a standalone
+TUI; run `/reload` after the host starts if you want to attach it.
+
+## For now
+
+- Text prompts, model selection, and thinking-level controls work from a
+  TUI-owned session.
+- Image prompts from TUI-owned sessions are not supported yet.
+
+[Read the Pi TUI bridge guide](/docs/pi-tui-bridge) or [resume the same session
+on your phone](/use-cases/continue-pi-sessions).
