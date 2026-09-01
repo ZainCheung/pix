@@ -84,6 +84,7 @@ jobs:
           grep -Fq 'https://pix.deepoke.com/docs/installation' "$llms_file"
           grep -Fq 'https://pix.deepoke.com/use-cases/pi-from-iphone' "$llms_file"
           grep -Fq 'https://pix.deepoke.com/docs/installation' "$sitemap_file"
+          grep -Eq '<lastmod>[0-9]{4}-[0-9]{2}-[0-9]{2}</lastmod>' "$sitemap_file"
           grep -Fq 'Sitemap: https://pix.deepoke.com/sitemap.xml' "$robots_file"
           grep -Fq 'Pix connects your iPhone to the Pi coding agent' "$home_file"
           if grep -Fq 'Invalid hook call' "$log_file" ||

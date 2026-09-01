@@ -1,7 +1,10 @@
 import { createFileRoute } from '@tanstack/react-router'
 
+import { SITEMAP_LASTMOD } from '#/generated/sitemap-lastmod'
 import { siteUrl } from '#/lib/seo'
 import { source } from '#/lib/source'
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 const STATIC_PATHS = [
   '/',
@@ -32,7 +35,19 @@ function sitemapXml() {
   ])
   const urls = [...paths]
     .sort()
-    .map((path) => `  <url><loc>${escapeXml(siteUrl(path))}</loc></url>`)
+    .map((path) => {
+      const lastmod = SITEMAP_LASTMOD[path]
+      if (!lastmod || !ISO_DATE.test(lastmod)) {
+        throw new Error(`Missing sitemap lastmod metadata for ${path}`)
+      }
+
+      return [
+        '  <url>',
+        `    <loc>${escapeXml(siteUrl(path))}</loc>`,
+        `    <lastmod>${escapeXml(lastmod)}</lastmod>`,
+        '  </url>',
+      ].join('\n')
+    })
     .join('\n')
 
   return `<?xml version="1.0" encoding="UTF-8"?>
