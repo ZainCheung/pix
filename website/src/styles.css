@@ -3963,3 +3963,12 @@ h3 {
 .prose a[data-card]:is(:hover, :focus-visible) > div {
   color: var(--color-fd-accent-foreground);
 }
+
+/* Search results keep their muted child colors unless the active item resets them. */
+[role='dialog'] button[aria-selected='true'] {
+  color: var(--color-fd-accent-foreground);
+}
+
+[role='dialog'] button[aria-selected='true'] * {
+  color: var(--color-fd-accent-foreground);
+}
