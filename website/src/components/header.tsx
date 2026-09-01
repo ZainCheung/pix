@@ -12,6 +12,9 @@ export function Header() {
         </a>
 
         <nav className="header-actions-v2" aria-label="Primary navigation">
+          <a className="header-docs-v2" href="/docs">
+            Docs
+          </a>
           <a
             className="header-github-v2"
             href={GITHUB_URL}

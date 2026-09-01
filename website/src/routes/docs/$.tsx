@@ -12,16 +12,36 @@ import { Suspense, use } from 'react'
 
 import { useMDXComponents } from '#/components/mdx'
 import { baseOptions } from '#/lib/layout.shared'
+import { createSeoHead, docsStructuredData } from '#/lib/seo'
 import { docs, source } from '#/lib/source'
 
 export const Route = createFileRoute('/docs/$')({
-  component: Page,
   loader: async ({ params }) => {
     const slugs = params._splat?.split('/').filter(Boolean) ?? []
     const data = await serverLoader({ data: slugs })
     await docs.getPage(data.path)?.preload()
     return data
   },
+  head: ({ loaderData }) => {
+    if (!loaderData) return {}
+
+    const title = loaderData.title === 'Pix documentation'
+      ? loaderData.title
+      : `${loaderData.title} | Pix`
+
+    return createSeoHead({
+      title,
+      description: loaderData.description,
+      path: loaderData.url,
+      type: 'article',
+      structuredData: docsStructuredData({
+        title,
+        description: loaderData.description,
+        path: loaderData.url,
+      }),
+    })
+  },
+  component: Page,
 })
 
 const serverLoader = createServerFn({
@@ -34,6 +54,11 @@ const serverLoader = createServerFn({
 
     return {
       path: page.path,
+      url: page.url,
+      title: page.data.title ?? 'Pix documentation',
+      description:
+        page.data.description ??
+        'Documentation for installing, using, and developing Pix with Pi.',
       pageTree: await source.serializePageTree(source.getPageTree()),
     }
   })

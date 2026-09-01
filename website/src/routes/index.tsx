@@ -8,8 +8,16 @@ import { Header } from '#/components/header'
 import { Hero } from '#/components/hero'
 import { ProductPreview } from '#/components/product-preview'
 import { getLatestRelease } from '#/lib/release'
+import { createSeoHead, HOME_DESCRIPTION, HOME_TITLE, homeStructuredData } from '#/lib/seo'
 
 export const Route = createFileRoute('/')({
+  head: () =>
+    createSeoHead({
+      title: HOME_TITLE,
+      description: HOME_DESCRIPTION,
+      path: '/',
+      structuredData: homeStructuredData(),
+    }),
   loader: () => getLatestRelease(),
   component: Home,
 })

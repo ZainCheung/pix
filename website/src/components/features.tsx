@@ -38,7 +38,12 @@ export function Features() {
     <section className="features-v2" aria-labelledby="features-heading">
       <div className="features-intro-v2">
         <div className="features-label-v2">Why Pix</div>
-        <h2 id="features-heading">Your Pi, wherever you are.</h2>
+        <div className="features-heading-row-v2">
+          <h2 id="features-heading">Your Pi, wherever you are.</h2>
+          <a className="features-link-v2" href="/use-cases">
+            Explore use cases <span aria-hidden="true">→</span>
+          </a>
+        </div>
       </div>
       <div className="features-grid-v2">
         {features.map((feature) => (

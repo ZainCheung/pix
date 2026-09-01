@@ -9,6 +9,10 @@ export function Footer() {
           <BrandMark />
           <span>Pix</span>
         </a>
+        <nav className="footer-nav-v2" aria-label="Footer navigation">
+          <a href="/use-cases">Use cases</a>
+          <a href="/docs">Docs</a>
+        </nav>
       </div>
       <div className="footer-bottom-v2">
         <span>© {new Date().getFullYear()} Pix contributors</span>

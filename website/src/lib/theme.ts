@@ -7,7 +7,9 @@ export const THEME_OPTIONS = ['system', 'light', 'dark'] as const
 
 const THEME_CHANGE_EVENT = 'pix-theme-change'
 
-export const THEME_BOOTSTRAP_SCRIPT = `(function(){try{var t=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});var p=t==="light"||t==="dark"?t:"system";var r=document.documentElement;r.setAttribute("data-theme",p);r.style.colorScheme=p==="system"?"light dark":p;}catch(e){document.documentElement.setAttribute("data-theme","system");document.documentElement.style.colorScheme="light dark";}})();`
+// Fumadocs uses the `.dark` class for its dark-mode utilities and Shiki token
+// colors, while Pix uses `data-theme` for its own color tokens.
+export const THEME_BOOTSTRAP_SCRIPT = `(function(){try{var t=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});var p=t==="light"||t==="dark"?t:"system";var r=document.documentElement;var d=p==="dark"||(p==="system"&&window.matchMedia("(prefers-color-scheme: dark)").matches);r.setAttribute("data-theme",p);r.classList.toggle("dark",d);r.style.colorScheme=p==="system"?"light dark":p;}catch(e){var r=document.documentElement;var d=window.matchMedia("(prefers-color-scheme: dark)").matches;r.setAttribute("data-theme","system");r.classList.toggle("dark",d);r.style.colorScheme="light dark";}})();`
 
 export function isThemePreference(value: unknown): value is ThemePreference {
   return value === 'system' || value === 'light' || value === 'dark'
@@ -35,6 +37,7 @@ export function applyTheme(preference: ThemePreference) {
   const root = document.documentElement
   const resolved = resolveTheme(preference)
   root.dataset.theme = preference
+  root.classList.toggle('dark', resolved === 'dark')
   root.style.colorScheme = preference === 'system' ? 'light dark' : resolved
 
   const themeColor = document.querySelector('meta[name="theme-color"]')

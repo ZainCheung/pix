@@ -3,6 +3,7 @@ import { HeadContent, Scripts, createRootRoute } from '@tanstack/react-router'
 import { RootProvider } from 'fumadocs-ui/provider/tanstack'
 import { useState, type ReactNode } from 'react'
 
+import { HOME_DESCRIPTION, HOME_TITLE, siteUrl } from '#/lib/seo'
 import { THEME_BOOTSTRAP_SCRIPT } from '#/lib/theme'
 import appCss from '#/styles.css?url'
 
@@ -11,32 +12,30 @@ export const Route = createRootRoute({
     meta: [
       { charSet: 'utf-8' },
       { name: 'viewport', content: 'width=device-width, initial-scale=1, viewport-fit=cover' },
-      { title: 'Pix · Your Pi stays on your machine' },
+      { title: HOME_TITLE },
       {
         name: 'description',
-        content:
-          'Pix is an open-source, local-first remote host for Pi. Keep your code and sessions on your machine, then control them from anywhere.',
+        content: HOME_DESCRIPTION,
       },
       { name: 'theme-color', content: '#ffffff' },
-      { property: 'og:title', content: 'Pix · Your Pi stays on your machine' },
+      { property: 'og:site_name', content: 'Pix' },
+      { property: 'og:title', content: HOME_TITLE },
       {
         property: 'og:description',
-        content: 'Secure remote control for the Pi already running on your machine.',
+        content: HOME_DESCRIPTION,
       },
       { property: 'og:type', content: 'website' },
-      { property: 'og:url', content: 'https://pix.deepoke.com/' },
-      { property: 'og:image', content: 'https://pix.deepoke.com/og-image.png' },
+      { property: 'og:image', content: siteUrl('/og-image.png') },
       { name: 'twitter:card', content: 'summary_large_image' },
-      { name: 'twitter:title', content: 'Pix · Your Pi stays on your machine' },
+      { name: 'twitter:title', content: HOME_TITLE },
       {
         name: 'twitter:description',
-        content: 'Secure remote control for the Pi already running on your machine.',
+        content: HOME_DESCRIPTION,
       },
-      { name: 'twitter:image', content: 'https://pix.deepoke.com/og-image.png' },
+      { name: 'twitter:image', content: siteUrl('/og-image.png') },
     ],
     links: [
       { rel: 'stylesheet', href: appCss },
-      { rel: 'canonical', href: 'https://pix.deepoke.com/' },
       { rel: 'icon', href: '/favicon.png', type: 'image/png' },
       { rel: 'apple-touch-icon', href: '/apple-touch-icon.png' },
     ],

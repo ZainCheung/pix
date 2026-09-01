@@ -14,6 +14,7 @@ between your devices.
 - [Connect remotely](/docs/remote-access) over your local network or a relay.
 - [Use the CLI](/docs/cli) to configure workspaces, devices, and sessions.
 - [Mirror a Pi TUI session](/docs/pi-tui-bridge) in Pix App from the same computer.
+- [Browse use cases](/use-cases) for common ways to use Pi from your phone.
 
 ## Learn how Pix works
 
