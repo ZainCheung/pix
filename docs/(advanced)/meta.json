@@ -1,8 +1,11 @@
 {
   "title": "Advanced",
   "pages": [
+    "HEADLESS_HOST",
     "INSTALLATION_DETAILS",
-    "SELF_HOST_RELAY"
+    "SERVICES",
+    "SELF_HOST_RELAY",
+    "DIAGNOSTICS"
   ],
   "defaultOpen": false,
   "collapsible": true

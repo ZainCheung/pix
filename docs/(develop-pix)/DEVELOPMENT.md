@@ -16,16 +16,16 @@ first. For contribution rules, see
 ## Prerequisites
 
 - Rust 1.91 or newer.
-- A Pi installation in the verified range `>=0.84.1, <0.85.0`.
-- Linux or macOS for host development. Linux packages and unsigned macOS app
-  archives are published from this repository.
+- A Pi installation that meets the [current compatibility requirements](/docs/compatibility).
+- Linux or macOS for host development. Linux packages and signed macOS app
+  archives are published by the release workflow.
 - Node.js and npm when changing the relay.
 - A running local relay only when exercising remote transport end to end.
 
 Check the Pi executable and its RPC flags before starting:
 
 ~~~bash
-pix doctor
+pix status
 ~~~
 
 When the executable is not the one found on `PATH`, pin it for the
@@ -56,7 +56,7 @@ The resulting executable is `target/release/pix`.
 Run the CLI directly during development:
 
 ~~~bash
-cargo run -p pix-cli -- doctor
+cargo run -p pix-cli -- status
 cargo run -p pix-cli -- serve
 ~~~
 
@@ -67,7 +67,7 @@ needs machine-readable JSONL events.
 Keep test configuration separate from your normal host state:
 
 ~~~bash
-cargo run -p pix-cli -- --config /tmp/pix.json doctor
+cargo run -p pix-cli -- --config /tmp/pix.json status
 cargo run -p pix-cli -- --config /tmp/pix.json workspace add /tmp/pix-workspace
 cargo run -p pix-cli -- --config /tmp/pix.json serve
 ~~~
@@ -159,7 +159,6 @@ keys, pairing tokens, or relay secrets in fixtures.
 Start with the built-in checks:
 
 ~~~bash
-pix doctor
 pix status
 pix logs --tail 100
 pix diagnostics export ./diagnostics
@@ -169,7 +168,7 @@ Use an isolated configuration when reproducing a stateful issue. Rust failures
 can be made more verbose with `RUST_BACKTRACE=1`:
 
 ~~~bash
-RUST_BACKTRACE=1 cargo run -p pix-cli -- --config /tmp/pix.json doctor
+RUST_BACKTRACE=1 cargo run -p pix-cli -- --config /tmp/pix.json status
 ~~~
 
 Diagnostic bundles redact workspace paths, device public keys, relay URLs,

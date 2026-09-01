@@ -58,6 +58,6 @@ run_case() {
 
 run_case relay/README.md true false
 run_case relay/src/index.ts true true
-run_case docs/REMOTE_ACCESS.md false false
+run_case 'docs/(use-pix)/REMOTE_ACCESS.md' false false
 
 printf 'CI path classification tests passed.\n'

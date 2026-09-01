@@ -1,6 +1,6 @@
 ---
 name: pix-cli
-description: Operate the Pix host (remote access for the Pi agent runtime) through its headless CLI. Use for managing Pix status, doctor checks, authorized workspaces, paired devices, pairing approvals, remote pairing offers, active Pi sessions, the relay endpoint, the Pi executable, the background host service, logs, or diagnostic exports from scripts and agents. Also use when a user mentions pix, pix://pair QR codes, or controlling a Pix host.
+description: Operate the Pix host (remote access for the Pi agent runtime) through its headless CLI. Use for managing Pix status checks, authorized workspaces, paired devices, pairing approvals, remote pairing offers, active Pi sessions, the relay endpoint, the Pi executable, the background host service, logs, or diagnostic exports from scripts and agents. Also use when a user mentions pix, pix://pair QR codes, or controlling a Pix host.
 ---
 
 # Pix CLI for agents
@@ -67,7 +67,7 @@ Read-only first. Most commands are safe; mutations are marked.
 setup gap, not an empty value.
 
 `config_state` is one of `missing`, `ready`, or a broken state that
-`pix doctor` explains.
+`pix status` explains.
 
 ### Devices and pairing
 

@@ -8,10 +8,10 @@ These are current product limits, not a roadmap.
 ## Host and Pi requirements
 
 - The documented installer targets Apple Silicon macOS and Linux x86_64 or
-  ARM64. Windows service integration is not included.
-- Pix checks Pi compatibility with the range listed in
-  [Installation](/docs/installation) and requires Pi to expose the RPC options
-  used by the host.
+  ARM64. Windows service integration is not included; see [Platform
+  support](/docs/platform-support) for the release matrix.
+- Pix checks the Pi version and RPC options listed in
+  [Compatibility](/docs/compatibility).
 - The computer running Pi must be powered on and reachable for remote access.
 - Direct access requires the iPhone and host to share a local network. Remote
   access through different networks depends on a configured relay.

@@ -3,9 +3,9 @@ title: Pi RPC coverage matrix
 description: See how Pi's RPC surface maps onto the versioned Pix wire protocol.
 ---
 
-How Pi's RPC surface (verified against Pi 0.84.x, the supported line
-`>=0.84.1, <0.85.0`) maps onto the Pix wire protocol. Update this file
-whenever `SUPPORTED_PI_VERSION` or the bridge changes.
+How Pi's RPC surface (verified against the supported line listed in
+[Compatibility](/docs/compatibility)) maps onto the Pix wire protocol. Update
+this file whenever `SUPPORTED_PI_VERSION` or the bridge changes.
 
 Status legend:
 

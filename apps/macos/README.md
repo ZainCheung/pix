@@ -31,7 +31,7 @@ status item on the right side of the menu bar.
 ```bash
 cargo build --release -p pix-cli --locked
 export PIX_CLI="$PWD/target/release/pix"
-"$PIX_CLI" doctor
+"$PIX_CLI" status
 ```
 
 The Debug Xcode target also builds and embeds the matching `target/debug/pix`

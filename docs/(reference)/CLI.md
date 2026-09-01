@@ -182,11 +182,14 @@ pix service start
 pix service status
 pix service restart
 pix service stop
+pix service repair-identity
 pix service logs --tail 100
 pix service uninstall
 ```
 
 The service is per-user: systemd user units on Linux and LaunchAgents on macOS.
+`pix service repair-identity` reauthorizes the existing host identity and
+refreshes its protected local recovery copy when a service cannot access it.
 `pix serve` remains available for a foreground host during development or
 automation:
 

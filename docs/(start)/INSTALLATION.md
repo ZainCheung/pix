@@ -20,13 +20,18 @@ installs `Pix.app` in `~/Applications`. If the installer asks, add
 `~/.local/bin` to `PATH`.
 
 The installer supports Apple Silicon macOS and Linux x86_64 or ARM64. Pix
-checks that a compatible Pi installation is available when setup runs. The
-currently verified Pi range is `>=0.84.1, <0.85.0`.
+checks that a compatible Pi installation is available when setup runs. See
+[Platform support](/docs/platform-support) for the release matrix and
+[Compatibility](/docs/compatibility) for the current Pi range.
 
 ## macOS
 
 You can use the app and CLI installed above. The release page also publishes a
-macOS arm64 archive, and the repository provides a first-party Homebrew Cask:
+macOS arm64 archive.
+
+### Homebrew
+
+The repository provides a first-party Homebrew Cask:
 
 ```sh
 brew tap ZainCheung/pix https://github.com/ZainCheung/pix.git
@@ -48,12 +53,13 @@ and then run `pix setup`.
 Check the Pi executable and host before pairing:
 
 ```sh
-pix doctor
 pix status
+pix pi show
 ```
 
-`pix doctor` verifies the Pi version and the Pi interface options Pix needs. `pix
-status` shows the resolved configuration and host-service state.
+`pix status` probes the installed Pi and shows the host-service state. `pix pi
+show` shows the executable Pix will use; use `pix pi set` when PATH discovery
+selects the wrong installation.
 
 For alternative install methods, background-service commands, and uninstall
 details, see [Installation details](/docs/installation-details).

@@ -1,6 +1,6 @@
 ---
 title: Installation details
-description: Package, archive, source-build, service, and uninstall details for Pix.
+description: Alternative package, archive, source-build, update, and uninstall details for Pix.
 ---
 
 This page keeps alternative installation and service details out of the normal
@@ -56,34 +56,33 @@ cp target/release/pix "$HOME/.local/bin/pix"
 Run the CLI without copying it into `PATH` with:
 
 ```sh
-cargo run -p pix-cli -- doctor
+cargo run -p pix-cli -- status
 ```
 
 Build the public macOS menu-bar client from the
 [macOS development guide](https://github.com/ZainCheung/pix/blob/main/apps/macos/README.md).
 
+## Updating
+
+For a released installer or app installation, update in place with:
+
+```sh
+pix update
+```
+
+The command downloads the matching latest release asset and replaces the
+running CLI. On macOS it also updates `~/Applications/Pix.app` when the app
+bundle is available. If a host service is running, restart it after the update
+so the service uses the new executable. A source build should be rebuilt with
+Cargo instead.
+
 ## Background service
 
 `pix setup` installs and starts a per-user service on supported macOS and Linux
-hosts. To manage it directly:
+hosts. For service commands, ownership checks, and uninstall behavior, see
+[Service management](/docs/services).
 
-```sh
-pix service install
-pix service install --adopt  # only when intentionally changing the CLI owner
-pix service status
-pix service restart
-pix service uninstall
-```
-
-The Linux service is a systemd user unit. The macOS service is a per-user
-LaunchAgent. Neither requires root. Uninstalling the service preserves the Pix
-configuration, host identity, authorized workspaces, and Pi session files.
-
-On macOS, the app's embedded CLI is the canonical owner. Homebrew's `pix`
-command is a PATH entry for that same binary. A different CLI can inspect or
-control the installed service, but it must use `--adopt` to replace the owner.
-
-## Uninstall
+## Uninstalling Pix
 
 Stop and remove the service first:
 

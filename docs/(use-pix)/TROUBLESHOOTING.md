@@ -6,7 +6,6 @@ description: Fix common Pix installation, pairing, session, workspace, and conne
 Start with these checks on the host:
 
 ```sh
-pix doctor
 pix status
 pix logs --tail 100
 ```
@@ -68,7 +67,7 @@ pix device pending
   pix workspace list
   ```
 
-- Confirm the host service can find Pi with `pix doctor`.
+- Confirm the host service can find Pi with `pix status`.
 
 **Fix**
 
@@ -95,7 +94,7 @@ pix service install
 pix service start
 ```
 
-If the host service starts and stops again, run `pix doctor` and inspect the
+If the host service starts and stops again, run `pix status` and inspect the
 last entries from `pix logs --tail 100`.
 
 ## Pix works on my local network but not remotely
@@ -162,12 +161,11 @@ pix status
 **Checks**
 
 ```sh
-pix doctor
 pix status
 pix service status
 ```
 
-Run `pix doctor` to check Pi compatibility. If several Pi installations exist,
+Run `pix status` to check Pi compatibility. If several Pi installations exist,
 select the executable Pix should use:
 
 ```sh
@@ -188,5 +186,6 @@ pix workspace add /absolute/path/to/project
 
 ## Deeper diagnostics
 
-See the [CLI reference](/docs/cli) for command details and [Architecture](/docs/architecture)
-for host and transport boundaries.
+Still not working? See [Diagnostics](/docs/diagnostics) for status, logs, and
+a shareable bundle. The [CLI reference](/docs/cli) has command details, and
+[Architecture](/docs/architecture) explains host and transport boundaries.
