@@ -1,233 +1,146 @@
 ---
-title: Pix development
-description: Build, run, test, package, and contribute to the public Pix repository.
+title: Develop Pix
+description: Build Pix locally, understand its boundaries, and contribute changes.
 ---
 
-This guide covers the local loop for the public Pix Host repository:
+Build Pix locally, understand its architecture, and contribute changes without
+crossing component boundaries.
 
-~~~text
-clone → build → run → inspect → test → package
-~~~
-
-For the design rationale, read the [architecture guide](/docs/architecture)
-first. For contribution rules, see
-[CONTRIBUTING.md](https://github.com/ZainCheung/pix/blob/main/CONTRIBUTING.md).
+Looking for help using Pix? Start with the [user documentation](/docs).
 
 ## Prerequisites
 
-- Rust 1.91 or newer.
-- A Pi installation that meets the [current compatibility requirements](/docs/compatibility).
-- Linux or macOS for host development. Linux packages and signed macOS app
-  archives are published by the release workflow.
-- Node.js and npm when changing the relay.
-- A running local relay only when exercising remote transport end to end.
+- Rust 1.91 or newer, matching the workspace toolchain.
+- A Pi installation that meets the [compatibility requirements](/docs/compatibility).
+- Linux or macOS for Host development. Check the released targets in
+  [Platform support](/docs/platform-support).
+- Node.js and npm when changing the relay or the Pi package.
+- Xcode when changing the macOS app.
 
-Check the Pi executable and its RPC flags before starting:
+From an installed Pix CLI, `pix status` checks the selected Pi executable and
+reports whether its version and startup options are supported. Use
+`pix pi set /absolute/path/to/pi` when development should use a different
+executable.
 
-~~~bash
-pix status
-~~~
+## Build the CLI
 
-When the executable is not the one found on `PATH`, pin it for the
-host:
+From the repository root:
 
-~~~bash
-pix pi set /absolute/path/to/pi
-~~~
-
-## Clone and build
-
-~~~bash
-git clone https://github.com/ZainCheung/pix.git
-cd pix
+```bash
 cargo build --workspace
-~~~
-
-A release-mode CLI build is:
-
-~~~bash
 cargo build --release -p pix-cli --locked
-~~~
+```
 
-The resulting executable is `target/release/pix`.
+The release binary is `target/release/pix`. The workspace uses the same
+`pix-core` and `pix-wire` crates for debug and release builds.
 
-## Run a local host
+## Run a development host
 
-Run the CLI directly during development:
+Run the CLI in the foreground with an isolated configuration while testing
+stateful changes:
 
-~~~bash
-cargo run -p pix-cli -- status
-cargo run -p pix-cli -- serve
-~~~
-
-`pix serve` runs in the foreground and accepts `quit` or
-`exit` on stdin. Use `--json-events` when a local UI bridge
-needs machine-readable JSONL events.
-
-Keep test configuration separate from your normal host state:
-
-~~~bash
+```bash
 cargo run -p pix-cli -- --config /tmp/pix.json status
 cargo run -p pix-cli -- --config /tmp/pix.json workspace add /tmp/pix-workspace
 cargo run -p pix-cli -- --config /tmp/pix.json serve
-~~~
+```
 
-The host configuration, status file, control socket, logs, and temporary Pi
-context guard are all derived from the selected configuration path.
+`pix serve` accepts `quit` or `exit` on stdin. The selected configuration path
+also determines the host state, control and event sockets, logs, and temporary
+Pi context guard. Keep `/tmp/pix.json` and the workspace above separate from a
+normal Pix installation.
 
-### Pairing during development
+For setup and pairing behavior, run the same binary with `setup` or
+`device pair`. The [user pairing flow](/docs/pairing) describes the product
+behavior; the [service page](/docs/services) describes the persistent host.
 
-For the product-facing flow, use `pix setup`; it installs/starts the
-platform user service, attaches to its local JSON event socket, renders a QR
-when relay transport is configured, and maps the confirmation prompt to the
-pairing request ID internally:
+## Run the macOS app
 
-~~~bash
-cargo run -p pix-cli -- --config /tmp/pix.json setup
-~~~
+The public client is the SwiftUI menu-bar app under `apps/macos/`. Build and
+test it on a Mac with the `Pix` scheme:
 
-The focused pairing command attaches to the same persistent service; it does
-not stop or replace an existing `serve` process:
+```bash
+cd apps/macos
+xcodegen generate
+xcodebuild -project Pix.xcodeproj -scheme Pix \
+  -destination 'platform=macOS' build
+xcodebuild test -project Pix.xcodeproj -scheme Pix \
+  -destination 'platform=macOS'
+```
 
-~~~bash
-cargo run -p pix-cli -- --config /tmp/pix.json device pair
-~~~
+CI disables code signing for this test. The app embeds the matching Rust CLI
+for a source checkout; see the [macOS README](https://github.com/ZainCheung/pix/blob/main/apps/macos/README.md)
+for the menu-bar development loop and service-owner details.
 
-Use `pix serve --json-events` when testing a foreground automation bridge. The
-public macOS client uses the platform-managed service and its config-scoped
-JSONL event socket instead; both paths retain request IDs and never print raw
-relay payloads.
+## Run the relay locally
 
-## Relay development
+The content-blind relay lives under `relay/`:
 
-The relay is a Cloudflare Worker under `relay/`. Install dependencies
-and run its checks from that directory:
-
-~~~bash
+```bash
 cd relay
 npm ci
 npm test
 npm run typecheck
 npm run dev
-~~~
+```
 
-`npm run deploy` targets a configured Cloudflare account and should
-only be used with the credentials and environment described in
-[release workflow](/docs/release). The relay never receives the channel secret or
-application payload.
+The relay forwards encrypted records and does not receive the Pix channel
+secret or application payload. Relay deployment is a release operation; see
+[Self-host a relay](/docs/self-host-relay) and the [release workflow](/docs/release).
 
-Relay tests consume `protocol/fixtures/v1/relay-channel.json`. If a
-derivation or protocol fixture changes, regenerate the fixture from the Rust
-implementation and review the resulting diff:
+## Run tests
 
-~~~bash
-cargo run -p pix-wire --example generate_fixtures
-~~~
+The short pre-review loop is:
 
-## Tests and quality checks
-
-Run the complete local checks before opening a pull request:
-
-~~~bash
+```bash
 cargo fmt --all -- --check
 cargo test --workspace --all-features --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-(cd relay && npm ci && npm test && npm run typecheck)
-~~~
+```
 
-For a focused Rust test, use the package or test name:
+Use [Testing](/docs/testing) to choose a focused suite, check protocol
+fixtures, test the website, or run the CI path-classification test. The
+[release workflow](/docs/release) owns packaging and signing checks.
 
-~~~bash
-cargo test -p pix-wire
-cargo test -p pix-core pairing
-cargo test -p pix-cli --test e2e_lan
-~~~
+## Repository map
 
-GitHub CI classifies changed paths before starting platform jobs. Pull requests
-run only the affected Rust, Relay, Apple, macOS, or packaging checks and expose
-one `CI gate` result for branch protection; documentation-only changes still
-run the detector and gate. A weekday scheduled run and manual dispatch execute
-the complete matrix, while Relay deployment runs only after its checks pass on
-`main`.
+| Area | Responsibility |
+| --- | --- |
+| `crates/pix-core` | Host control-plane primitives: workspaces, pairing, transports, Pi processes, sessions, and TUI ownership. |
+| `crates/pix-wire` | Versioned Pix application protocol, encrypted framing, Noise channel support, validation, and wire fixtures. |
+| `crates/pix-cli` | The `pix` diagnostic, setup, workspace, pairing, session, relay, and service CLI. |
+| `apps/macos` | Public SwiftUI menu-bar client and its local Host service bridge. |
+| `packages/pix` | Optional `@zaincheung/pix` Pi extension for the host-local TUI bridge. |
+| `relay` | Cloudflare Worker that forwards one host/client encrypted channel. |
+| `protocol` | Versioned schema and canonical protocol fixtures. |
+| `packaging` | Linux, macOS, and Apple wire build/package scripts used by releases. |
+| `website` | Fumadocs site, route generation, and documentation validation. |
+| `skills` | Agent-facing Pix CLI instructions shipped with the repository. |
 
-Tests that need a real Pi are explicitly ignored unless the executable is
-available. Do not put real workspace paths, prompts, credentials, private
-keys, pairing tokens, or relay secrets in fixtures.
+The iOS client is private and consumes the public `pix-wire` boundary. It is
+not another source tree in this repository; see [Repository boundary](/docs/repository).
 
-## Debugging and diagnostics
+## Where facts belong
 
-Start with the built-in checks:
+Keep one authoritative page for facts that change:
 
-~~~bash
-pix status
-pix logs --tail 100
-pix diagnostics export ./diagnostics
-~~~
+| Fact | Source of truth |
+| --- | --- |
+| User workflows | [Start and Use Pix](/docs) |
+| Product model and trust boundaries | [Understand Pix](/docs/how-pix-works) |
+| Platform support | [Platform support](/docs/platform-support) |
+| Pi and protocol compatibility | [Compatibility](/docs/compatibility) |
+| CLI syntax | [CLI reference](/docs/cli) |
+| Configuration contract | [Configuration](/docs/configuration) |
+| Service lifecycle | [Service management](/docs/services) |
+| Application protocol schema | [`protocol/schema/v1.md`](https://github.com/ZainCheung/pix/blob/main/protocol/schema/v1.md) |
+| Protocol architecture | [Wire protocol](/docs/wire-protocol) |
+| Pi command mapping | [Pi RPC coverage](/docs/pi-rpc-coverage) |
+| TUI ownership | [TUI bridge internals](/docs/tui-bridge-internals) |
+| Test commands | [Testing](/docs/testing) |
+| Release process | [Release workflow](/docs/release) |
+| Repository boundaries | [Repository boundary](/docs/repository) |
 
-Use an isolated configuration when reproducing a stateful issue. Rust failures
-can be made more verbose with `RUST_BACKTRACE=1`:
-
-~~~bash
-RUST_BACKTRACE=1 cargo run -p pix-cli -- --config /tmp/pix.json status
-~~~
-
-Diagnostic bundles redact workspace paths, device public keys, relay URLs,
-channel secrets, and Pi executable paths. Review the archive contents before
-sharing it.
-
-## Packaging
-
-The release scripts support Linux x86_64 and ARM64. Install the target
-toolchains first, then run the reproducible all-in-one helper:
-
-~~~bash
-rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
-SOURCE_DATE_EPOCH=0 packaging/linux/release.sh
-~~~
-
-The output is written to `target/release-pkg` by default. To run the
-CI-style steps separately:
-
-~~~bash
-packaging/linux/build-release.sh x86_64-unknown-linux-gnu dist
-packaging/linux/package.sh x86_64-unknown-linux-gnu dist
-SOURCE_DATE_EPOCH=0 packaging/release/finalize.sh dist
-~~~
-
-The release process, artifact names, version rules, and relay deployment
-workflow is documented in the [release workflow](/docs/release).
-
-## Protocol and Apple boundary
-
-`pix-wire` is the only implementation of encrypted framing and
-protocol validation. Keep Rust, protocol schemas, fixtures, and the private
-Apple client boundary aligned:
-
-- Update `protocol/schema/v1.md` for a protocol change.
-- Regenerate or add fixtures under `protocol/fixtures/v1`.
-- Run the Rust and relay tests.
-- Do not reimplement crypto or framing in Swift, TypeScript, or another
-  language.
-- Do not commit signing material or private client files to this repository.
-
-The public Apple wire build helper is
-`packaging/apple/build-pix-wire-xcframework.sh`; the macOS client lives under
-`apps/macos`. The private iOS client consumes the generated XCFramework from
-the public repository.
-
-The optional Pi TUI bridge is developed as the standalone package under
-`packages/pix/`. Its source is TypeScript loaded directly by Pi. Keep changes
-to the host-local bridge contract aligned with the [Pi TUI bridge guide](/docs/pi-tui-bridge)
-and the Rust ownership tests under `crates/pix-core/tests/tui_bridge.rs`.
-
-## Pull request checklist
-
-Before requesting review:
-
-1. Keep the change scoped to the public host, wire protocol, or content-blind
-   relay.
-2. Run the formatting, Rust, Clippy, and relay checks above.
-3. Update documentation and fixtures when behavior or compatibility changes.
-4. Confirm logs and diagnostic output remain payload-free.
-5. Read [CONTRIBUTING.md](https://github.com/ZainCheung/pix/blob/main/CONTRIBUTING.md)
-   and [SECURITY.md](https://github.com/ZainCheung/pix/blob/main/SECURITY.md).
+Before changing a component boundary, read [Architecture](/docs/architecture).
+For contribution rules, read
+[CONTRIBUTING.md](https://github.com/ZainCheung/pix/blob/main/CONTRIBUTING.md).

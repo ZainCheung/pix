@@ -36,9 +36,11 @@ export const docs = defineDocs({
       '(develop-pix)/ARCHITECTURE.md',
       '(develop-pix)/DEVELOPMENT.md',
       '(develop-pix)/REPOSITORY.md',
-      '(develop-pix)/RELEASE.md',
-      '(develop-pix)/PI_RPC_COVERAGE.md',
+      '(develop-pix)/WIRE_PROTOCOL.md',
       '(develop-pix)/TUI_BRIDGE_INTERNALS.md',
+      '(develop-pix)/PI_RPC_COVERAGE.md',
+      '(develop-pix)/TESTING.md',
+      '(develop-pix)/RELEASE.md',
     ],
     async: true,
     postprocess: {

@@ -15,6 +15,11 @@ Git tag:    v0.1.0
 The wire protocol version and Relay deployment revision are independent of the
 product version. A product release does not deploy the Relay.
 
+Before cutting a release, use the checks in [Testing](/docs/testing), confirm
+the target matrix in [Platform support](/docs/platform-support), and keep the
+public/private split in [Repository boundary](/docs/repository). Protocol
+changes should also follow [Wire protocol](/docs/wire-protocol).
+
 ## GitHub release
 
 After the version change has landed on `main`:

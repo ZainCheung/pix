@@ -4,9 +4,11 @@
     "DEVELOPMENT",
     "ARCHITECTURE",
     "REPOSITORY",
-    "RELEASE",
+    "WIRE_PROTOCOL",
+    "TUI_BRIDGE_INTERNALS",
     "PI_RPC_COVERAGE",
-    "TUI_BRIDGE_INTERNALS"
+    "TESTING",
+    "RELEASE"
   ],
   "defaultOpen": false,
   "collapsible": true

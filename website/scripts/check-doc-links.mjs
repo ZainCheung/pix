@@ -243,10 +243,15 @@ function checkRouteGroupOutput() {
 }
 
 const pages = readPageTree()
+const sourceFiles = sourceFileList()
+const sourceSet = new Set(sourceFiles.map((file) => `docs/${file}`))
 const navigation = navigationFiles()
-for (const file of sourceFileList()) {
+for (const file of sourceFiles) {
   const relative = `docs/${file}`
   if (!navigation.has(relative)) report(`source.ts page is not represented in navigation: ${relative}`)
+}
+for (const file of navigation) {
+  if (!sourceSet.has(file)) report(`navigation page is not loaded by source.ts: ${file}`)
 }
 
 const markdownFiles = walk(repositoryDirectory, (file) => {

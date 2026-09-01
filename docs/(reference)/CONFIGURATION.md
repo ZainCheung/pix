@@ -33,7 +33,7 @@ it. A missing file is reported by read-only commands such as `pix status`.
 
 | Area | Stored information | Supported command |
 | --- | --- | --- |
-| Host | Host UUID and display name | `pix setup --advanced` |
+| Host | Host UUID and display name | Pix generates and persists the host UUID; `pix setup --advanced` edits the display name |
 | Workspaces | Explicitly authorized folder roots and names | `pix workspace add`, `list`, `remove` |
 | Devices | Approved device identities and pairing metadata | `pix device pair`, `list`, `revoke` |
 | Relay | WebSocket endpoint and enabled/disabled state | `pix relay set`, `show`, `enable`, `disable`, `clear` |

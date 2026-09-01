@@ -7,6 +7,10 @@ How Pi's RPC surface (verified against the supported line listed in
 [Compatibility](/docs/compatibility)) maps onto the Pix wire protocol. Update
 this file whenever `SUPPORTED_PI_VERSION` or the bridge changes.
 
+For the protocol layers and capability negotiation around this mapping, see
+[Wire protocol](/docs/wire-protocol). This page remains the exact operation
+matrix.
+
 Status legend:
 
 - **supported + exposed** — Pi capability mapped to a stable Pix wire surface.
