@@ -1,29 +1,37 @@
 ---
-title: Pix documentation
-description: Install, use, and develop Pix, the local-first remote host for Pi.
+title: Pix Documentation
+description: Use Pi from your iPhone while Pi, your repositories, credentials, and sessions stay on your computer.
 ---
 
-Pix lets you use the Pi coding agent from your iPhone while Pi continues to run
-on your Mac or Linux machine. Your repositories, credentials, and native Pi
-sessions stay on that computer; Pix provides the paired, encrypted connection
-between your devices.
+Pix lets your iPhone control Pi while Pi runs on your Mac or Linux computer.
+Your repositories, credentials, and native Pi sessions stay on that computer.
+Pix provides the paired connection to that local environment.
 
-## Start here
+## New to Pix?
 
-- [Install Pix](/docs/installation) on a supported Mac or Linux machine.
-- [Connect remotely](/docs/remote-access) over your local network or a relay.
-- [Use the CLI](/docs/cli) to configure workspaces, devices, and sessions.
-- [Mirror a Pi TUI session](/docs/pi-tui-bridge) in Pix App from the same computer.
-- [Browse use cases](/use-cases) for common ways to use Pi from your phone.
+- [Quickstart](/docs/quickstart): reach a first usable session.
+- [Installation](/docs/installation): install the host on your computer.
+- [Pair your iPhone](/docs/pairing): connect a phone to the host.
+- [Sessions](/docs/sessions): open an existing session or start a new one.
 
-## Learn how Pix works
+## Use Pix
 
-Read the [architecture guide](/docs/architecture) for the host boundaries,
-transport, and security invariants. For a deeper look at the Pi protocol
-surface, see the [Pi RPC coverage matrix](/docs/pi-rpc-coverage).
+- [Sessions](/docs/sessions)
+- [Workspaces](/docs/workspaces)
+- [Remote access](/docs/remote-access)
+- [Use Pix with Pi TUI](/docs/pi-tui-bridge)
+- [Devices](/docs/devices)
+- [Troubleshooting](/docs/troubleshooting)
 
-## Contribute
+## Understand Pix
 
-The [development guide](/docs/development) covers the local build and test
-loop. Read the [repository boundary](/docs/repository) and [release workflow](/docs/release)
-before changing packaging or protocol-facing code.
+- [How Pix works](/docs/how-pix-works)
+- [Local-first by design](/docs/local-first)
+- [Pairing and trust](/docs/pairing-and-trust)
+- [Direct connection vs relay](/docs/direct-vs-relay)
+
+## Going deeper
+
+- [CLI reference](/docs/cli)
+- [Architecture](/docs/architecture)
+- [Developer documentation](/docs/development)

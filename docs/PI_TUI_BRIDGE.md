@@ -1,80 +1,49 @@
 ---
-title: Pi TUI bridge
-description: Mirror an interactive Pi TUI session in Pix App with the optional @zaincheung/pix extension.
+title: Use Pix with Pi TUI
+description: Connect an interactive Pi terminal session to Pix with the optional npm extension.
 ---
 
-The `@zaincheung/pix` package is an optional Pi extension that connects an
-interactive Pi TUI session to Pix App on the same computer. Pi remains the
-agent and its native JSONL session remains the durable source of truth. The
-extension gives Pix App a live view of the TUI session and lets the app send a
-bounded set of controls back to Pi.
+I already use `pi` in the terminal. Can Pix follow the same session?
 
-## Install
+Yes. The optional `@zaincheung/pix` extension connects an interactive Pi TUI
+session to the Pix host on the same computer. Pi remains the agent and Pix
+shows the same session on the phone.
 
-Install Pix first, then run `pix setup` so the host service is available:
+## Install the extension
+
+Install the package through Pi after Pix Host is installed and set up:
 
 ```sh
 pi install npm:@zaincheung/pix
 ```
 
-Restart Pi, or run `/reload` in an existing Pi session, after installing. The
-extension only attaches to Pi's interactive TUI mode. If the Pix host is not
-running, Pi continues as a standalone TUI and shows no Pix status.
+Restart Pi after installing, or run `/reload` in an existing interactive
+session.
 
-If an older Pix release installed a copy at
-`~/.pi/agent/extensions/pix-bridge`, remove that legacy copy before enabling
-the package. Pi loads both locations when both are present.
+## What appears in Pix
 
-## Connection and status
+When the host is available, Pix can show the TUI session's current snapshot,
+including messages, model, thinking level, and active tools. Assistant and tool
+updates appear while Pi is running, along with session and compaction status.
 
-The extension connects to a host-local Unix socket. With the default
-configuration, the socket is:
-
-```text
-$HOME/.config/pix/run/tui-bridge.sock
-```
-
-When `PIX_CONFIG` points to another configuration file, Pix uses the `run/`
-directory beside that file. The Pix host validates the session and workspace
-before granting the bridge lease. A successful attachment adds `Pix running`
-to the Pi TUI footer.
-
-This bridge stays on the computer and is separate from `pix-wire`. It does not
-create another network path or another session database.
-
-## What syncs
-
-Pi sends Pix App:
-
-- the current session snapshot, including messages, model, thinking level, and
-  active tools;
-- assistant and tool execution updates while an agent run is active;
-- session, compaction, and agent lifecycle events.
-
-Pix App can send Pi:
+Pix can send the TUI:
 
 - text prompts and abort requests;
 - model-list requests, model selection, and thinking-level changes;
-- command-list requests and a session rename.
+- the available command list and a session rename.
 
-Prompts sent through a TUI owner are text-only. Image attachments are not
-supported on this bridge yet.
+## If the host is unavailable
 
-## Session ownership
+Pi continues as a normal standalone TUI when Pix Host is not running. Start the
+host, then run `/reload` when you want that session to attach to Pix.
 
-Each Pi session has one live writer. If Pix or another Pi TUI already owns a
-session, the extension warns the TUI and closes it instead of allowing two
-processes to write the same JSONL session.
+## Current limits
 
-When you use `/resume`, the extension asks the host to check the target session
-before Pi switches. `/new`, `/fork`, `/quit`, and signal-driven shutdown release
-the current bridge lease. A temporary socket loss triggers bounded reconnect
-attempts. If the host is unavailable, the TUI stays usable on its own; run
-`/reload` after starting the host when you want to attach it.
+The TUI bridge accepts text prompts only. Image attachments are not supported
+there, and the bridge does not expose every native Pi control. Steer,
+follow-up, compact, fork, and shutdown commands remain unavailable for TUI
+owners.
 
-## Development
-
-The package source and manifest live under [`packages/pix/`](https://github.com/ZainCheung/pix/tree/main/packages/pix).
-Pi loads [`index.ts`](https://github.com/ZainCheung/pix/blob/main/packages/pix/index.ts)
-through the `pi.extensions` entry in `package.json`. The extension connects to
-the host socket and never replaces the `pi` executable.
+If the session does not appear, check [Troubleshooting](/docs/troubleshooting).
+For the ownership and reconnect rules behind this feature, see [TUI bridge
+internals](/docs/tui-bridge-internals).

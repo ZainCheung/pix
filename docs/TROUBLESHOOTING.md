@@ -1,222 +1,192 @@
 ---
-title: Pix troubleshooting
-description: Diagnose common Pi, workspace, pairing, relay, service, and configuration issues.
+title: Troubleshooting
+description: Fix common Pix installation, pairing, session, workspace, and connection problems.
 ---
 
-Start with the four commands below. They inspect the resolved configuration,
-Pi compatibility, host liveness, and payload-free operational history:
+Start with these checks on the host:
 
-~~~bash
+```sh
 pix doctor
 pix status
 pix logs --tail 100
-pix diagnostics export ./diagnostics
-~~~
+```
 
-Use an explicit configuration path when the problem is isolated to a test or
-service instance:
+`pix diagnostics export ./diagnostics` creates a scrubbed bundle for a
+maintainer. Review it before sharing. Do not share QR offers, pairing codes,
+prompts, session content, credentials, or private keys.
 
-~~~bash
-pix --config /path/to/config.json doctor
-pix --config /path/to/config.json status
-~~~
+## Pix can't find my computer
 
-Do not attach raw configuration, host identity files, pairing tokens, or
-unredacted logs to an issue.
+**Checks**
 
-## Pi is missing or incompatible
+- Confirm `pix status` reports a running host service.
+- For a direct connection, put the iPhone and host on the same network and
+  allow local discovery.
+- For a relay connection, run `pix relay show` and check that the endpoint is
+  enabled.
 
-`pix doctor` probes the Pi executable and checks the RPC flags and
-version range that Pix currently supports:
+**Fix**
 
-~~~bash
-pix doctor
-pix doctor --pi /absolute/path/to/pi
-pix pi set /absolute/path/to/pi
-~~~
+Start the service if needed:
 
-The verified range is `>=0.84.1, <0.85.0`. If Pi is installed
-through a version manager, use `pix pi set` to pin the executable
-that the host should launch. A successful probe must advertise
-`--mode`, `--approve`, `--session`, and
-`--session-id`.
+```sh
+pix service start
+```
 
-If the probe works in a terminal but not from a background service, inspect
-the resolved environment printed by `pix doctor`. GUI and systemd
-launches may have a different `PATH` from an interactive shell.
+Then retry discovery in Pix. See [Remote access](/docs/remote-access) if the
+phone is on another network.
 
-## Workspace is inaccessible
+## Pairing fails
 
-Pix only exposes explicitly authorized canonical workspace roots. Check the
-current registry and authorize the intended project directory:
+**Checks**
 
-~~~bash
-pix workspace list
-pix workspace add /absolute/path/to/project
-~~~
+- Start a fresh flow with `pix setup` or `pix device pair`.
+- For remote pairing, confirm a relay is configured and enabled with
+  `pix relay show`.
+- Check that the six-digit code on the phone matches the host before approval.
+- A pairing offer expires after two minutes. A remote QR offer must be scanned
+  before it expires.
 
-Use the root directory that contains the files the Pi session should access.
-If a path was moved, renamed, or replaced by a symlink, remove the old entry
-and add the current path again:
+**Fix**
 
-~~~bash
-pix workspace remove <workspace-id>
-pix workspace add /absolute/path/to/project
-~~~
+Run `pix device pair --remote` only when an enabled relay is configured. For a
+local pairing, keep both devices on the same network. If a request is waiting
+for approval, inspect it with:
 
-Never work around an authorization error by exposing a broad parent directory
-that contains unrelated files.
+```sh
+pix device pending
+```
 
-## A client cannot discover the host
+## My session doesn't appear
 
-For LAN pairing and access:
+**Checks**
 
-1. Start `pix setup` for first-use pairing, or `pix serve` for an already
-   paired device.
-2. Keep the host process running while the client searches.
-3. Confirm the client and host are on the same network and that local
-   discovery is allowed.
-4. Confirm the six-digit code shown by `pix setup` on the phone, then accept
-   the pairing prompt.
-5. Check `pix status` for a live service and paired-device count.
+- Select the workspace where Pi created the session.
+- Confirm the workspace is still authorized:
 
-The focused `pix device pair` command attaches to the running service and keeps
-the Bonjour listener and encrypted transport alive while you approve the
-request:
+  ```sh
+  pix workspace list
+  ```
 
-~~~bash
-pix device pair
-~~~
+- Confirm the host service can find Pi with `pix doctor`.
 
-After pairing, `pix setup` installs and starts the platform user service unless
-`--no-service` was supplied. `pix serve --json-events` remains the foreground
-diagnostic bridge; native menu apps should use the local event socket instead
-of starting a second `serve` process.
+**Fix**
 
-## Relay or remote pairing fails
+Add the intended folder again if it was moved or removed. Pix discovers
+existing native Pi sessions from each authorized workspace.
 
-Inspect the stored endpoint and active flag:
+## Pix says the host is offline
 
-~~~bash
-pix relay show
+**Checks**
+
+Run:
+
+```sh
 pix status
-~~~
+pix service status
+```
 
-Configure a WebSocket endpoint with the scheme that the deployment supports:
+**Fix**
 
-~~~bash
+Start or install the per-user service:
+
+```sh
+pix service install
+pix service start
+```
+
+If the host service starts and stops again, run `pix doctor` and inspect the
+last entries from `pix logs --tail 100`.
+
+## Pix works on my local network but not remotely
+
+**Checks**
+
+```sh
+pix relay show
+```
+
+The endpoint must be a valid `ws://` or `wss://` URL and relay transport must
+be enabled. A running service may need a restart after the setting changes.
+
+**Fix**
+
+```sh
 pix relay set wss://relay.example.com
 pix relay enable
-~~~
+pix service restart
+```
 
-For a local Worker, use the URL printed by your Wrangler dev server. The relay
-does not receive the channel secret, so a successful `pix relay show`
-does not prove that the endpoint is reachable.
+Relay loss affects remote reachability. It does not stop Pi on the host.
 
-For remote pairing, run `pix setup` or `pix device pair`. Pix starts the
-short-lived pairing channel and renders a QR automatically. If the code
-expires, start a new pairing flow. Treat the QR and join code as credentials
-and do not paste them into issues or logs.
+## My Pi TUI session doesn't appear in Pix
 
-Inspect only payload-free relay lifecycle entries:
+**Checks**
 
-~~~bash
-pix logs --tail 200
-~~~
+- Install `@zaincheung/pix` with `pi install npm:@zaincheung/pix`.
+- Restart Pi or run `/reload` in the interactive TUI.
+- Confirm the Pix host service is running with `pix status`.
 
-If the relay is unavailable, a direct LAN connection can still work. Relay
-loss changes remote reachability only; it does not stop Pi's local process.
+**Fix**
 
-## The background service is not running
+Start the host, then run `/reload`. Pi remains usable as a standalone TUI
+when the host is unavailable. The [Pi TUI guide](/docs/pi-tui-bridge) lists the
+controls and current limits.
 
-The built-in service manager is a per-user systemd unit on Linux or a
-LaunchAgent on macOS:
+## Messages stopped updating
 
-~~~bash
+**Checks**
+
+- Check `pix status` and the connection path you are using.
+- Reopen the same session after reconnecting the phone.
+- For a TUI session, check that Pi still shows the Pix status after `/reload`.
+
+**Fix**
+
+If Pi is still running on the host, reconnecting to the same session resumes
+the view. If the host is unavailable, restore it first and then attach again.
+Use `pix logs --tail 200` for payload-free connection events.
+
+## The `pix` command isn't found
+
+The installer puts the executable in `~/.local/bin`. Add that directory to your
+shell `PATH`, then open a new shell or reload its configuration:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
 pix status
-pix service install
+```
+
+## Pix stopped working after an update
+
+**Checks**
+
+```sh
+pix doctor
+pix status
 pix service status
-~~~
+```
 
-`pix service status` reports the executable that owns the installed service.
-If it belongs to another CLI, lifecycle commands leave that owner unchanged;
-run `pix service install --adopt` only after intentionally choosing the
-current CLI as the new owner.
+Pix currently verifies Pi `>=0.84.1, <0.85.0`. If several Pi installations
+exist, select the executable Pix should use:
 
-To install/enable the manager entry without starting it immediately:
+```sh
+pix pi set /absolute/path/to/pi
+pix service restart
+```
 
-~~~bash
-pix service install --no-start
-pix service start
-~~~
+## A workspace is inaccessible
 
-To stop or remove it:
+Pix only uses folders that are explicitly authorized and still available on the
+host. If the folder was moved, remove the old authorization and add the new
+path:
 
-~~~bash
-pix service stop
-pix service uninstall
-~~~
+```sh
+pix workspace remove <workspace-id>
+pix workspace add /absolute/path/to/project
+```
 
-No root privileges are required. On Linux, the underlying unit is
-`systemctl --user status pix.service`; on macOS, inspect
-`~/Library/LaunchAgents/com.deepoke.pix.host.plist` and
-`launchctl print gui/$(id -u)/com.deepoke.pix.host`.
+## Deeper diagnostics
 
-## A service starts but the client cannot connect
-
-Check all of the following:
-
-- `pix status` reports a live service, not a stale status file.
-- At least one workspace is listed by `pix workspace list`.
-- The intended Pi executable is shown by `pix pi show`.
-- The client device is still listed by `pix device list`.
-- Relay transport is enabled only when its endpoint is valid.
-- The host and client clocks are not so far apart that pairing offers expire.
-
-A service restart does not grant a new device access. Revoke and pair again if
-the device identity is no longer trusted.
-
-## Logs and diagnostic bundles
-
-The host log location is printed by `pix logs` and is derived from
-the Pix configuration directory. Logs are payload-free and contain no prompts,
-files, model output, private keys, pairing tokens, or relay channel secrets.
-
-Create a scrubbed bundle for a maintainer:
-
-~~~bash
-pix diagnostics export ./diagnostics
-~~~
-
-The command refuses to overwrite an existing archive. Review the archive before
-sharing it and remove any unrelated local notes from the destination directory.
-
-## Configuration confusion
-
-Every command accepts the global `--config <path>` override. The
-resolved path is printed by `pix status` and `pix doctor`:
-
-~~~bash
-pix --config /tmp/pix.json status
-pix --config /tmp/pix.json logs
-~~~
-
-If a service was installed with a custom configuration path, use that same
-path for status, logs, and service commands. The systemd unit or macOS
-LaunchAgent stores the absolute path it was installed with.
-
-## Reporting a problem
-
-Before opening an issue:
-
-1. Reproduce with the smallest authorized workspace possible.
-2. Run `pix doctor`, `pix status`, and
-   `pix diagnostics export ./diagnostics`.
-3. Record the Pix version, operating system, architecture, and whether the
-   failure is LAN-only, relay-only, or both.
-4. Remove paths, prompts, session content, credentials, keys, tokens, and
-   relay secrets from any report.
-
-For suspected vulnerabilities, follow
-[SECURITY.md](https://github.com/ZainCheung/pix/blob/main/SECURITY.md) instead of
-filing a public issue.
+See the [CLI reference](/docs/cli) for command details and [Architecture](/docs/architecture)
+for host and transport boundaries.
