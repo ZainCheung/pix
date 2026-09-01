@@ -1,4 +1,3 @@
-import { ButtonLink } from '#/components/ui/button'
 import { BrandMark } from '#/components/ui/brand-mark'
 import { GithubMark } from '#/components/ui/github-mark'
 import { GITHUB_URL } from '#/lib/release'
@@ -22,13 +21,6 @@ export function Header() {
           >
             <GithubMark />
           </a>
-          <ButtonLink
-            className="header-download-v2"
-            href="#download"
-            variant="primary"
-          >
-            Download
-          </ButtonLink>
         </nav>
       </div>
     </header>

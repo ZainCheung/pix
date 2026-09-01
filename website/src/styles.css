@@ -2186,7 +2186,6 @@ h3 {
 
 .site-header-v2 {
   height: 64px;
-  border-bottom: 1px solid var(--border);
   padding: 0 40px;
 }
 
@@ -2221,7 +2220,7 @@ h3 {
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  color: var(--muted-foreground);
+  color: var(--foreground);
   transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out;
 }
 
@@ -2242,21 +2241,6 @@ h3 {
   transform: scale(0.96);
 }
 
-.header-download-v2 {
-  min-height: 38px;
-  border-radius: 0.7rem;
-  padding: 0 17px;
-  font-family: var(--font-sans);
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-.header-download-v2 svg {
-  width: 16px;
-  height: 16px;
-}
-
 .hero-actions-v2 .button-primary {
   min-height: 42px;
   border-radius: 0.7rem;
@@ -2272,21 +2256,13 @@ h3 {
   height: 17px;
 }
 
-.hero-actions-v2 .button-primary:hover,
-.header-download-v2:hover {
+.hero-actions-v2 .button-primary:hover {
   background: var(--accent-strong);
   color: var(--accent-foreground);
 }
 
-.hero-actions-v2 .button-primary:active,
-.header-download-v2:active {
+.hero-actions-v2 .button-primary:active {
   transform: scale(0.96);
-}
-
-.header-download-v2 {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
 }
 
 .header-github-v2:focus-visible {
@@ -2458,251 +2434,72 @@ h3 {
 }
 
 .download-v2 {
-  padding: 64px 40px 73px;
+  padding: 76px 40px 82px;
 }
 
-.download-content-v2 h2,
-.faq-content-v2 h2 {
-  margin: 11px 0 0;
+.install-panel-v2 {
+  max-width: 840px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.install-panel-v2 h2 {
+  margin: 0;
   color: var(--foreground);
   font-size: 29px;
   font-weight: 620;
   letter-spacing: -0.045em;
 }
 
-.download-header-v2 {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
-  margin-top: 25px;
-}
-
-.download-menu-v2 {
-  position: relative;
-}
-
-.download-menu-v2 > summary {
-  list-style: none;
-}
-
-.download-menu-v2 > summary::-webkit-details-marker,
-.download-more-v2 > summary::-webkit-details-marker {
-  display: none;
-}
-
-.download-button-v2 {
-  min-height: 42px;
-  gap: 7px;
-  border-radius: 0.7rem;
-  padding-inline: 18px;
-  font-family: var(--font-sans);
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-.download-button-v2 svg {
-  width: 17px;
-  height: 17px;
-}
-
-.download-button-v2:hover {
-  border-color: var(--accent-strong);
-  background: var(--accent-strong);
-  color: var(--accent-foreground);
-}
-
-.download-button-v2:active {
-  transform: scale(0.96);
-}
-
-.download-menu-panel-v2 {
-  position: absolute;
-  z-index: 5;
-  top: calc(100% + 9px);
-  left: 0;
-  width: 285px;
-  border: 1px solid var(--border);
-  border-radius: 0.65rem;
-  background: var(--card);
-  padding: 8px;
-}
-
-.download-platform-v2 {
-  display: flex;
-  min-height: 52px;
-  align-items: center;
-  gap: 12px;
-  border-radius: 0.4rem;
-  padding: 7px 8px;
-  color: var(--muted-foreground);
-  transition: background-color 150ms ease-out, color 150ms ease-out;
-}
-
-.download-platform-v2:hover {
-  background: var(--muted);
+.clients-v2 h2,
+.faq-content-v2 h2 {
+  margin: 0;
   color: var(--foreground);
-}
-
-.download-platform-v2 > span {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.download-platform-v2 strong {
-  color: var(--foreground);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.download-platform-v2 small {
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 9px;
-}
-
-.download-more-v2 {
-  margin: 4px 0;
-  border-top: 1px solid var(--border);
-  padding-top: 4px;
-}
-
-.download-more-v2 > summary {
-  display: flex;
-  min-height: 35px;
-  align-items: center;
-  padding: 0 8px;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.download-all-v2 {
-  display: flex;
-  min-height: 36px;
-  align-items: center;
-  justify-content: space-between;
-  border-top: 1px solid var(--border);
-  padding: 4px 8px 0;
-  color: var(--muted-foreground);
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.download-all-v2:hover {
-  color: var(--foreground);
-}
-
-.install-tabs-v2 {
-  width: 100%;
-  max-width: none;
-  margin-top: 28px;
-}
-
-.install-tabs-list-v2 {
-  display: inline-flex;
-  min-height: 39px;
-  align-items: center;
-  gap: 2px;
-  border: 1px solid var(--border);
-  border-radius: 0.7rem;
-  background: var(--surface-2);
-  padding: 3px;
-}
-
-.install-tab-trigger-v2 {
-  position: relative;
-  min-height: 31px;
-  border: 0;
-  border-radius: 0.5rem;
-  padding: 0 12px;
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: 12px;
-  font-weight: 560;
-  transition: color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out;
-}
-
-.install-tab-trigger-v2[data-state='active'] {
-  background: var(--foreground);
-  color: var(--background);
-}
-
-.install-tab-trigger-v2:active {
-  transform: scale(0.96);
-}
-
-.install-tabs-v2[data-variant='line'] .install-tabs-list-v2 {
-  display: flex;
-  width: 100%;
-  min-height: 38px;
-  gap: 34px;
-  overflow-x: auto;
-  border: 0;
-  border-bottom: 1px solid var(--border);
-  border-radius: 0;
-  background: transparent;
-  padding: 0;
-  scrollbar-width: none;
-}
-
-.install-tabs-v2[data-variant='line'] .install-tabs-list-v2::-webkit-scrollbar {
-  display: none;
-}
-
-.install-tabs-v2[data-variant='line'] .install-tab-trigger-v2 {
-  flex: 0 0 auto;
-  min-height: 38px;
-  border-radius: 0;
-  padding: 0;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 540;
-}
-
-.install-tabs-v2[data-variant='line'] .install-tab-trigger-v2[data-state='active'] {
-  background: transparent;
-  color: var(--foreground);
-  font-weight: 650;
-}
-
-.install-tabs-v2[data-variant='line'] .install-tab-trigger-v2[data-state='active']::after {
-  position: absolute;
-  right: 0;
-  bottom: -1px;
-  left: 0;
-  height: 3px;
-  background: var(--foreground);
-  content: '';
-}
-
-.install-tab-content-v2 {
-  margin-top: 22px;
+  font-size: 29px;
+  font-weight: 620;
+  letter-spacing: -0.045em;
 }
 
 .install-command-v2 {
   position: relative;
   display: block;
   width: 100%;
+  margin-top: 31px;
+  overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 1.25rem;
+  border-radius: 0.7rem;
   background: var(--surface-2);
-  padding: 27px 28px 28px 32px;
+  text-align: left;
+}
+
+.install-command-toolbar-v2 {
+  display: flex;
+  min-height: 35px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 12px;
+}
+
+.install-command-language-v2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+}
+
+.install-command-language-v2 svg {
+  opacity: 0.7;
 }
 
 .install-command-v2 pre {
   min-width: 0;
-  width: calc(100% - 86px);
-  max-width: calc(100% - 86px);
+  width: 100%;
   margin: 0;
   overflow-x: auto;
+  padding: 18px 16px 20px;
   scrollbar-width: thin;
 }
 
@@ -2710,65 +2507,94 @@ h3 {
   display: block;
   min-width: max-content;
   color: var(--foreground);
+  font-family: var(--font-mono);
   font-size: 15px;
   line-height: 1.5;
   white-space: pre;
 }
 
-.install-app-link-v2 {
-  display: flex;
-  min-height: 100px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 18px 28px;
-  border: 1px solid var(--border);
-  border-radius: 1.25rem;
-  background: var(--surface-2);
-  padding: 27px 28px 28px 32px;
-}
-
-.install-app-link-v2 > div {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.install-app-link-v2 strong {
-  color: var(--foreground);
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.install-app-link-v2 span {
-  color: var(--muted-foreground);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.install-app-link-v2 .button {
-  flex-shrink: 0;
-}
-
 .copy-button-v2 {
+  display: inline-flex;
   position: absolute;
-  top: 16px;
-  right: 24px;
-  min-height: 32px;
-  gap: 7px;
+  z-index: 1;
+  top: 7px;
+  right: 8px;
+  width: 28px;
+  min-height: 28px;
+  align-items: center;
+  justify-content: center;
   border-color: transparent;
+  border-radius: 0.35rem;
   background: transparent;
-  padding-inline: 0;
+  padding: 0;
   color: var(--muted-foreground);
-  font-family: var(--font-sans);
-  font-size: 13px;
-  font-weight: 540;
+  opacity: 0.7;
 }
 
 .copy-button-v2:hover {
   border-color: transparent;
-  background: transparent;
+  background: var(--muted);
   color: var(--foreground);
+  opacity: 1;
+}
+
+.copy-button-v2:active {
+  transform: scale(0.96);
+}
+
+.install-note-v2 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 25px 0 0;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.install-note-v2 span:nth-child(2) {
+  color: var(--muted-foreground);
+}
+
+.install-links-v2 {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 20px 42px;
+  margin-top: 30px;
+}
+
+.install-links-v2 a {
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  transition: color 150ms ease-out;
+}
+
+.install-links-v2 a:hover {
+  color: var(--muted-foreground);
+}
+
+.clients-v2 {
+  max-width: 840px;
+  margin: 80px auto 0;
+  border-top: 1px solid var(--border);
+  padding-top: 52px;
+}
+
+.client-options-v2 {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 25px;
+}
+
+.client-options-v2 .button {
+  min-height: 40px;
+  border-radius: 0.6rem;
+  font-size: 13px;
 }
 
 .faq-v2 {
@@ -2964,52 +2790,49 @@ h3 {
     padding-bottom: 60px;
   }
 
-  .download-header-v2 {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .download-menu-panel-v2 {
-    right: 0;
-    left: auto;
-  }
-
-  .install-tabs-list-v2 {
-    display: flex;
-    width: 100%;
-  }
-
-  .install-tab-trigger-v2 {
-    flex: 1;
-    padding-inline: 8px;
-    font-size: 11px;
-  }
-
-  .install-tabs-v2[data-variant='line'] .install-tab-trigger-v2 {
-    flex: 0 0 auto;
-    padding-inline: 0;
-    font-size: 13px;
+  .install-panel-v2 h2,
+  .clients-v2 h2 {
+    font-size: 26px;
   }
 
   .install-command-v2 {
-    padding: 20px 16px 21px 20px;
+    margin-top: 38px;
+  }
+
+  .install-command-toolbar-v2 {
+    min-height: 34px;
+    padding: 4px 10px;
+  }
+
+  .install-command-language-v2 {
+    font-size: 10px;
   }
 
   .install-command-v2 pre {
-    width: calc(100% - 70px);
-    max-width: calc(100% - 70px);
+    padding: 16px 16px 18px;
   }
 
   .install-command-v2 code {
     font-size: 13px;
   }
 
-  .install-app-link-v2 {
-    align-items: flex-start;
-    flex-direction: column;
-    min-height: 0;
-    padding: 20px;
+  .install-note-v2 {
+    gap: 8px;
+    font-size: 12px;
+  }
+
+  .install-links-v2 {
+    gap: 16px 26px;
+    margin-top: 24px;
+  }
+
+  .install-links-v2 a {
+    font-size: 12px;
+  }
+
+  .clients-v2 {
+    margin-top: 60px;
+    padding-top: 40px;
   }
 
   .faq-item-v2 p {
