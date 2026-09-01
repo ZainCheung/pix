@@ -2261,14 +2261,6 @@ h3 {
   margin: 25px auto;
 }
 
-.use-case-diagram-boundary-grid {
-  display: grid;
-  grid-template-columns: minmax(125px, 1fr) minmax(100px, 0.9fr) minmax(125px, 1fr) minmax(100px, 0.9fr) minmax(125px, 1fr);
-  align-items: center;
-  gap: 13px;
-  min-height: 185px;
-}
-
 .use-case-diagram-boundary-card {
   min-height: 104px;
   flex-direction: column;
@@ -2286,8 +2278,65 @@ h3 {
   border-color: var(--accent);
 }
 
+.use-case-diagram-boundary-title,
+.use-case-diagram-boundary-remote-label {
+  margin: 0 0 17px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.use-case-diagram-boundary-main {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.85fr) minmax(0, 1.8fr);
+  align-items: center;
+  gap: 22px;
+}
+
+.use-case-diagram-boundary-branches {
+  display: grid;
+  gap: 13px;
+}
+
+.use-case-diagram-boundary-branch-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.7fr) minmax(120px, 1.1fr) minmax(125px, 1fr);
+  align-items: center;
+  gap: 11px;
+}
+
+.use-case-diagram-boundary-branch-label {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.use-case-diagram-boundary-client {
+  border-color: var(--accent);
+}
+
 .use-case-diagram-boundary-provider {
   border-color: var(--accent-strong);
+}
+
+.use-case-diagram-boundary-remote-label {
+  margin-top: 25px;
+  margin-bottom: 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 20px;
+}
+
+.use-case-diagram-boundary-remote {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(80px, 0.75fr) minmax(125px, 1fr) minmax(80px, 0.75fr) minmax(135px, 1.1fr);
+  align-items: center;
+  gap: 11px;
 }
 
 .use-case-table-wrap {
@@ -2616,7 +2665,8 @@ h3 {
 
   .use-case-diagram-session-flow,
   .use-case-diagram-phone-flow,
-  .use-case-diagram-boundary-grid {
+  .use-case-diagram-boundary-main,
+  .use-case-diagram-boundary-remote {
     grid-template-columns: 1fr;
     gap: 10px;
     min-height: 0;
@@ -2624,13 +2674,23 @@ h3 {
 
   .use-case-diagram-session-flow .use-case-diagram-connector,
   .use-case-diagram-phone-flow .use-case-diagram-connector,
-  .use-case-diagram-boundary-grid .use-case-diagram-connector {
+  .use-case-diagram-boundary-main .use-case-diagram-connector,
+  .use-case-diagram-boundary-remote .use-case-diagram-connector {
     padding: 2px 0;
   }
 
   .use-case-diagram-session-flow .use-case-diagram-connector,
   .use-case-diagram-phone-flow .use-case-diagram-connector {
     font-size: 9px;
+  }
+
+  .use-case-diagram-boundary-branch-row {
+    grid-template-columns: minmax(90px, 0.75fr) minmax(120px, 1fr);
+    gap: 10px;
+  }
+
+  .use-case-diagram-boundary-branch-row .use-case-diagram-boundary-branch-label {
+    grid-column: 1 / -1;
   }
 
   .use-case-diagram-boundary-card {

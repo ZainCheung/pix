@@ -316,9 +316,26 @@ export const USE_CASES: Record<string, UseCase> = {
           'Pi’s native JSONL session remains the durable source of truth. Pix Host connects the paired client to that host-side runtime instead of copying messages into a second hosted conversation database.',
       },
       {
+        heading: 'Connect an active terminal session with the Pi extension',
+        body:
+          'For a Pi session that is currently open in the terminal, the Pix Pi extension, @zaincheung/pix, connects that TUI to Pix Host so the same live session can be controlled remotely. A bare Pi TUI without the bridge is not automatically adopted by Pix.',
+        steps: [
+          'Install the optional @zaincheung/pix extension with pi install npm:@zaincheung/pix.',
+          'Restart Pi, or run /reload in the existing TUI, so the extension can connect to Pix Host.',
+        ],
+        contextLinks: [
+          {
+            before: 'Read the setup and ownership requirements in the',
+            href: '/docs/pi-tui-bridge',
+            label: 'Pi TUI bridge guide',
+          },
+        ],
+      },
+      {
         heading: 'Desktop → iPhone → desktop',
         steps: [
           'Start a Pi session in the workspace on your Mac or Linux machine.',
+          'For a session already open in the terminal, connect its TUI with the @zaincheung/pix extension.',
           'Run Pix Host and pair your iPhone with the host.',
           'Open the same workspace and session in Pix when you leave your desk.',
           'Return to the terminal later; the native Pi session and its context are still on the host.',
@@ -379,7 +396,7 @@ export const USE_CASES: Record<string, UseCase> = {
       {
         question: 'Can I start on my computer and continue on my phone?',
         answer:
-          'Yes. Keep the host running, then choose the same workspace and Pi session from Pix on your iPhone.',
+          'Yes. Keep the host running, and for a Pi session already open in the terminal install the @zaincheung/pix extension so its TUI connects to Pix Host. Then choose the same workspace and Pi session from Pix on your iPhone.',
       },
       {
         question: 'What if my phone disconnects while Pi is working?',
@@ -389,7 +406,7 @@ export const USE_CASES: Record<string, UseCase> = {
       {
         question: 'Can I use the Pi TUI and Pix with the same session?',
         answer:
-          'Yes, with one live writer at a time. Pix and the Pi TUI bridge coordinate ownership through the host session lock so two processes do not write concurrently.',
+          'Yes, with the @zaincheung/pix extension installed and one live writer at a time. Pix and the Pi TUI bridge coordinate ownership through the host session lock; a bare Pi TUI is not automatically adopted by Pix.',
       },
       {
         question: 'Does the host computer need to stay on?',
@@ -415,7 +432,7 @@ export const USE_CASES: Record<string, UseCase> = {
     media: {
       type: 'diagram',
       variant: 'boundary',
-      alt: 'Data boundary diagram showing the repository and Pi runtime on the host, opaque encrypted frames through the relay, and model requests handled by the provider configured in Pi.',
+      alt: 'Data boundary diagram showing two separate paths: an encrypted Pix channel between the host and iPhone, optionally through the relay, and a model request from Pi to the provider configured in Pi.',
       caption: 'Pix infrastructure is distinct from the model provider configured for Pi.',
     },
     sections: [
@@ -596,23 +613,48 @@ function UseCaseDiagram({ variant, alt }: { variant: UseCaseDiagramVariant; alt:
   if (variant === 'boundary') {
     return (
       <div className="use-case-diagram-canvas" role="img" aria-label={alt}>
-        <div className="use-case-diagram-boundary-grid">
+        <p className="use-case-diagram-boundary-title">Two independent paths</p>
+        <div className="use-case-diagram-boundary-main">
           <div className="use-case-diagram-boundary-card use-case-diagram-boundary-host">
             <strong>Your host</strong>
-            <span>repository · credentials</span>
-            <span>Pi · tools · sessions</span>
+            <span>Pi · repository · tools</span>
+            <span>credentials · sessions</span>
           </div>
-          <span className="use-case-diagram-connector">encrypted frames</span>
+          <div className="use-case-diagram-boundary-branches">
+            <div className="use-case-diagram-boundary-branch-row">
+              <span className="use-case-diagram-boundary-branch-label">control channel</span>
+              <span className="use-case-diagram-connector">encrypted Pix channel →</span>
+              <div className="use-case-diagram-boundary-card use-case-diagram-boundary-client">
+                <strong>iPhone</strong>
+                <span>Pix app</span>
+              </div>
+            </div>
+            <div className="use-case-diagram-boundary-branch-row">
+              <span className="use-case-diagram-boundary-branch-label">model path</span>
+              <span className="use-case-diagram-connector">model request →</span>
+              <div className="use-case-diagram-boundary-card use-case-diagram-boundary-provider">
+                <strong>Chosen provider</strong>
+                <span>provider policy</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p className="use-case-diagram-boundary-remote-label">Optional remote path</p>
+        <div className="use-case-diagram-boundary-remote">
+          <div className="use-case-diagram-boundary-card use-case-diagram-boundary-client">
+            <strong>iPhone</strong>
+            <span>Pix app</span>
+          </div>
+          <span className="use-case-diagram-connector">encrypted →</span>
           <div className="use-case-diagram-boundary-card">
             <strong>Pix Relay</strong>
             <span>route only</span>
             <span>no payload store</span>
           </div>
-          <span className="use-case-diagram-connector">Pi sends request</span>
-          <div className="use-case-diagram-boundary-card use-case-diagram-boundary-provider">
-            <strong>Chosen provider</strong>
-            <span>model request</span>
-            <span>provider policy</span>
+          <span className="use-case-diagram-connector">→ encrypted</span>
+          <div className="use-case-diagram-boundary-card use-case-diagram-boundary-host">
+            <strong>Mac / Linux host</strong>
+            <span>Pix Host + Pi</span>
           </div>
         </div>
       </div>
