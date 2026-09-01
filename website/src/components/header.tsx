@@ -12,6 +12,9 @@ export function Header() {
         </a>
 
         <nav className="header-actions-v2" aria-label="Primary navigation">
+          <a className="header-updates-v2" href="/start">
+            Get started
+          </a>
           <a className="header-updates-v2" href="/updates">
             Updates
           </a>

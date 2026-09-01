@@ -1,7 +1,7 @@
 export const SITE_URL = 'https://pix.deepoke.com'
 export const SITE_NAME = 'Pix'
 export const GITHUB_URL = 'https://github.com/ZainCheung/pix'
-export const IOS_APP_URL = 'https://deepoke.com/pix'
+export const IOS_APP_URL = 'https://testflight.apple.com/join/crTbabdp'
 
 export const HOME_TITLE = 'Pix — Use Pi from Your iPhone'
 export const HOME_DESCRIPTION =

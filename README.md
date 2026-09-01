@@ -33,7 +33,7 @@ For Homebrew, Linux packages, manual downloads, source builds, and uninstall ins
 
 Remote control client:
 
-For iPhone, download and install [Pix app](https://deepoke.com/pix)
+For iPhone, install [Pix for iPhone](https://testflight.apple.com/join/crTbabdp) via TestFlight.
 
 ## Get started
 

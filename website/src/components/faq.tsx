@@ -21,11 +21,11 @@ const questions = [
   },
   {
     question: 'What do I need to use Pix?',
-    answer: 'A Mac or Linux machine with Pi installed and working, the Pix Host on that machine, and the Pix app on your iPhone.',
+    answer: 'A Mac or Linux computer with Pi installed and working, Pix on that computer, and Pix for iPhone.',
   },
   {
     question: 'Do I need a Pix account?',
-    answer: 'No. Pix uses explicit device pairing instead of a hosted account. You authorize each client and can revoke it later.',
+    answer: 'No. Pair your iPhone with your computer. You authorize that device, and you can revoke it later.',
   },
 ]
 

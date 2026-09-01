@@ -3,8 +3,10 @@ title: Quickstart
 description: Get from an installed Pix host to your first Pi session on an iPhone.
 ---
 
-Pix needs two things: Pi on your Mac or Linux computer and Pix on your
-iPhone. Pi, your files, and your session data stay on the computer.
+Pix needs two things: Pi on your Mac or Linux computer, and Pix for iPhone.
+Pi, your files, and your session data stay on the computer. The website
+[setup guide](https://pix.deepoke.com/start) walks through both installs and
+pairing.
 
 ## Prerequisites
 
@@ -12,10 +14,10 @@ iPhone. Pi, your files, and your session data stay on the computer.
   Pi and reports whether the host can use it.
 - The host is an Apple Silicon Mac or a Linux x86_64/ARM64 computer. See
   [Platform support](/docs/platform-support) for release targets.
-- [Download Pix for iPhone](https://deepoke.com/pix) and install it on the
-  phone you want to pair.
+- [Get Pix for iPhone on TestFlight](https://testflight.apple.com/join/crTbabdp)
+  and install it on the phone you want to pair.
 
-## Step 1: Install the host
+## Step 1: Install Pix on your computer
 
 Run the first-party installer on the computer where Pi is installed:
 

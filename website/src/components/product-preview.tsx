@@ -1,6 +1,6 @@
 export function ProductPreview() {
   return (
-    <section className="preview-v2" aria-labelledby="preview-heading">
+    <section className="preview-v2" id="demo" aria-labelledby="preview-heading">
       <figure className="preview-figure-v2">
         <div className="preview-shot-v2">
           <iframe

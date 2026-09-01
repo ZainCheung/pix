@@ -9,6 +9,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 const STATIC_PATHS = [
   '/',
+  '/start',
   '/use-cases',
   '/use-cases/pi-from-iphone',
   '/use-cases/remote-pi',

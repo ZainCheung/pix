@@ -1,13 +1,13 @@
 import { createFileRoute } from '@tanstack/react-router'
 
-import { Download } from '#/components/download'
 import { FAQ } from '#/components/faq'
-import { Features } from '#/components/features'
+import { Capabilities, WhyPix } from '#/components/features'
 import { Footer } from '#/components/footer'
+import { GetStarted } from '#/components/get-started'
 import { Header } from '#/components/header'
 import { Hero } from '#/components/hero'
+import { HowItWorks } from '#/components/how-it-works'
 import { ProductPreview } from '#/components/product-preview'
-import { getLatestRelease } from '#/lib/release'
 import { createSeoHead, HOME_DESCRIPTION, HOME_TITLE, homeStructuredData } from '#/lib/seo'
 
 export const Route = createFileRoute('/')({
@@ -18,21 +18,20 @@ export const Route = createFileRoute('/')({
       path: '/',
       structuredData: homeStructuredData(),
     }),
-  loader: () => getLatestRelease(),
   component: Home,
 })
 
 function Home() {
-  const release = Route.useLoaderData()
-
   return (
     <div className="site-root-v2">
       <Header />
       <main id="main-content">
-        <Hero release={release} />
+        <Hero />
+        <HowItWorks />
+        <Capabilities />
+        <GetStarted />
+        <WhyPix />
         <ProductPreview />
-        <Features />
-        <Download release={release} />
         <FAQ />
       </main>
       <Footer />

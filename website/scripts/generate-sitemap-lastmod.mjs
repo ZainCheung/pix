@@ -20,9 +20,16 @@ const STATIC_SOURCES = {
     'website/src/components/hero.tsx',
     'website/src/components/product-preview.tsx',
     'website/src/components/features.tsx',
-    'website/src/components/download.tsx',
+    'website/src/components/get-started.tsx',
+    'website/src/components/how-it-works.tsx',
     'website/src/components/faq.tsx',
     'website/src/lib/seo.ts',
+  ],
+  '/start': [
+    'website/src/routes/start.tsx',
+    'website/src/components/setup-guide.tsx',
+    'website/src/components/install-command.tsx',
+    'website/src/lib/install.ts',
   ],
   '/use-cases': [
     'website/src/routes/use-cases/index.tsx',
