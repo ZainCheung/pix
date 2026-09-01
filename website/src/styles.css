@@ -2365,17 +2365,17 @@ h3 {
 .preview-shot-v2 {
   overflow: hidden;
   max-width: 100%;
+  aspect-ratio: 16 / 9;
   border: 1px solid var(--border);
   border-radius: 0.75rem;
   background: #000;
 }
 
-.preview-shot-v2 img {
+.preview-video-v2 {
   display: block;
   width: 100%;
-  max-width: 100%;
-  height: auto;
-  aspect-ratio: 2364 / 1932;
+  height: 100%;
+  border: 0;
 }
 
 .preview-caption-v2 {
