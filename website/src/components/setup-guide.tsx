@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
 
@@ -39,15 +39,16 @@ export function SetupGuide({
   const navigate = useNavigate({ from: '/start' })
   const step = parseSetupStep(search.step)
   const os = parseSetupOs(search.os)
+  const [onPhone, setOnPhone] = useState(false)
   const query = useQuery({
     queryKey: ['latest-release'],
     queryFn: () => getLatestRelease(),
-    initialData: release,
+    initialData: release ?? undefined,
     staleTime: 10 * 60 * 1000,
     retry: 1,
     refetchOnWindowFocus: false,
   })
-  const latestRelease = query.data
+  const latestRelease = query.data ?? null
   const macDmg = findReleaseAsset(latestRelease, /macos-arm64\.dmg$/i)
   const macZip = findReleaseAsset(latestRelease, /macos-arm64\.zip$/i)
   const macUrl = macDmg?.url ?? macZip?.url ?? GITHUB_RELEASES_URL
@@ -56,6 +57,7 @@ export function SetupGuide({
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     const ua = navigator.userAgent
+    setOnPhone(isAppleMobile(ua))
     const nextStep = params.has('step')
       ? parseSetupStep(params.get('step'))
       : isAppleMobile(ua) ? 'iphone' : 'computer'
@@ -84,14 +86,14 @@ export function SetupGuide({
       <nav className="setup-progress-v2" aria-label="Setup steps">
         {SETUP_STEPS.map((item, index) => {
           const current = item.id === step
-          const done = SETUP_STEPS.findIndex((entry) => entry.id === step) > index
+          const previous = SETUP_STEPS.findIndex((entry) => entry.id === step) > index
           return (
             <button
               key={item.id}
               type="button"
               className="setup-progress-step-v2"
               data-current={current ? 'true' : undefined}
-              data-done={done ? 'true' : undefined}
+              data-previous={previous ? 'true' : undefined}
               aria-current={current ? 'step' : undefined}
               onClick={() => go(item.id)}
             >
@@ -104,7 +106,7 @@ export function SetupGuide({
 
       {step === 'computer' ? (
         <ComputerStep
-          os={os ?? 'mac'}
+          os={os}
           version={latestRelease?.version}
           macUrl={macUrl}
           linuxPackagesUrl={linuxPackagesUrl}
@@ -115,14 +117,52 @@ export function SetupGuide({
 
       {step === 'iphone' ? (
         <IphoneStep
+          hideQr={onPhone}
           onBack={() => go('computer')}
           onContinue={() => go('pair')}
         />
       ) : null}
 
       {step === 'pair' ? (
-        <PairStep os={os ?? 'mac'} onBack={() => go('iphone')} />
+        <PairStep
+          os={os}
+          onOsChange={(nextOs) => go('pair', nextOs)}
+          onBack={() => go('iphone')}
+        />
       ) : null}
+    </div>
+  )
+}
+
+function OsToggle({
+  os,
+  onChange,
+  label,
+}: {
+  os?: SetupOs
+  onChange: (os: SetupOs) => void
+  label: string
+}) {
+  return (
+    <div className="setup-os-v2" role="tablist" aria-label={label}>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={os === 'mac'}
+        data-active={os === 'mac' ? 'true' : undefined}
+        onClick={() => onChange('mac')}
+      >
+        Mac
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={os === 'linux'}
+        data-active={os === 'linux' ? 'true' : undefined}
+        onClick={() => onChange('linux')}
+      >
+        Linux
+      </button>
     </div>
   )
 }
@@ -135,7 +175,7 @@ function ComputerStep({
   onOsChange,
   onContinue,
 }: {
-  os: SetupOs
+  os?: SetupOs
   version?: string
   macUrl: string
   linuxPackagesUrl: string
@@ -144,63 +184,62 @@ function ComputerStep({
 }) {
   return (
     <section className="setup-panel-v2" aria-labelledby="setup-computer-heading">
-      <div className="setup-os-v2" role="tablist" aria-label="Computer platform">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={os === 'mac'}
-          data-active={os === 'mac' ? 'true' : undefined}
-          onClick={() => onOsChange('mac')}
-        >
-          Mac
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={os === 'linux'}
-          data-active={os === 'linux' ? 'true' : undefined}
-          onClick={() => onOsChange('linux')}
-        >
-          Linux
-        </button>
-      </div>
-
-      {os === 'mac' ? (
+      {os == null ? (
         <>
-          <h2 id="setup-computer-heading">Install Pix on this Mac</h2>
-          <p>
-            Pix runs alongside Pi and makes your sessions available to your
-            paired iPhone.
-          </p>
-          <ButtonLink href={macUrl} target="_blank" rel="noreferrer" variant="primary">
-            Download Pix for Mac
-          </ButtonLink>
-          <p className="setup-meta-v2">
-            Apple Silicon · macOS Sonoma or later
-            {version ? ` · v${version}` : ''}
-          </p>
-          <p className="setup-more-v2">
-            <a href={HOMEBREW_DOCS_URL}>Homebrew and command-line installation</a>
-          </p>
+          <h2 id="setup-computer-heading">Choose your computer</h2>
+          <p>Pix currently supports Apple silicon Macs and Linux.</p>
+          <div className="setup-os-pick-v2">
+            <button type="button" className="button button-secondary" onClick={() => onOsChange('mac')}>
+              Mac
+            </button>
+            <button type="button" className="button button-secondary" onClick={() => onOsChange('linux')}>
+              Linux
+            </button>
+          </div>
         </>
       ) : (
         <>
-          <h2 id="setup-computer-heading">Install Pix on Linux</h2>
-          <p>
-            Run this on the machine where Pi already works. The installer
-            sets Pix up next to Pi.
-          </p>
-          <InstallCommand />
-          <p className="setup-meta-v2">Debian · Ubuntu · Fedora · x86_64 · ARM64</p>
-          <p className="setup-more-v2">
-            <a href={linuxPackagesUrl} target="_blank" rel="noreferrer">Linux packages</a>
-          </p>
+          <OsToggle os={os} onChange={onOsChange} label="Computer platform" />
+          {os === 'mac' ? (
+            <>
+              <h2 id="setup-computer-heading">Install Pix on this Mac</h2>
+              <p>
+                Pix runs alongside Pi and makes your sessions available to your
+                paired iPhone.
+              </p>
+              <ButtonLink href={macUrl} target="_blank" rel="noreferrer" variant="primary">
+                Download Pix for Mac
+              </ButtonLink>
+              <p className="setup-constraint-v2">
+                Apple silicon · macOS Sonoma or later
+                {version ? ` · v${version}` : ''}
+              </p>
+              <p className="setup-more-v2">
+                <a href={HOMEBREW_DOCS_URL}>Homebrew and command-line installation</a>
+                <span aria-hidden="true"> · </span>
+                <a href="/docs/platform-support">Intel Mac? Build from source</a>
+              </p>
+            </>
+          ) : (
+            <>
+              <h2 id="setup-computer-heading">Install Pix on Linux</h2>
+              <p>
+                Run this on the machine where Pi already works. The installer
+                sets up Pix on the same machine as Pi.
+              </p>
+              <InstallCommand />
+              <p className="setup-meta-v2">Debian · Ubuntu · Fedora · x86_64 · ARM64</p>
+              <p className="setup-more-v2">
+                <a href={linuxPackagesUrl} target="_blank" rel="noreferrer">Linux packages</a>
+              </p>
+            </>
+          )}
         </>
       )}
 
       <div className="setup-nav-v2">
         <button type="button" className="button button-primary" onClick={onContinue}>
-          Continue to iPhone
+          I&apos;ve installed Pix — Continue
         </button>
       </div>
     </section>
@@ -208,9 +247,11 @@ function ComputerStep({
 }
 
 function IphoneStep({
+  hideQr,
   onBack,
   onContinue,
 }: {
+  hideQr: boolean
   onBack: () => void
   onContinue: () => void
 }) {
@@ -218,25 +259,35 @@ function IphoneStep({
     <section className="setup-panel-v2" aria-labelledby="setup-iphone-heading">
       <h2 id="setup-iphone-heading">Get Pix on your iPhone</h2>
       <p>
-        This is a TestFlight beta, not an App Store listing. Scan the code
-        from the computer you are setting up, or open TestFlight on the phone.
+        {hideQr
+          ? 'This is a TestFlight beta, not an App Store listing. Open TestFlight on this iPhone to install Pix.'
+          : 'This is a TestFlight beta, not an App Store listing. Scan the code from the computer you are setting up, or open TestFlight on the phone.'}
       </p>
-      <div className="setup-iphone-v2">
-        <a className="setup-qr-v2" href={IOS_APP_URL} target="_blank" rel="noreferrer">
-          <img
-            src={TESTFLIGHT_QR_SRC}
-            alt="QR code for the Pix TestFlight beta"
-            width={196}
-            height={196}
-            decoding="async"
-          />
-          <span>Scan to open TestFlight</span>
-        </a>
+      <div className={hideQr ? 'setup-iphone-v2 setup-iphone-v2-phone' : 'setup-iphone-v2'}>
+        {hideQr ? null : (
+          <a className="setup-qr-v2" href={IOS_APP_URL} target="_blank" rel="noreferrer">
+            <img
+              src={TESTFLIGHT_QR_SRC}
+              alt="QR code for the Pix TestFlight beta"
+              width={196}
+              height={196}
+              decoding="async"
+            />
+            <span>Scan to open TestFlight</span>
+          </a>
+        )}
         <div className="setup-iphone-copy-v2">
           <ButtonLink href={IOS_APP_URL} target="_blank" rel="noreferrer" variant="primary">
             Open TestFlight
           </ButtonLink>
           <p>Public beta via TestFlight. Install TestFlight from Apple if the phone asks for it.</p>
+          {hideQr ? (
+            <p className="setup-iphone-hint-v2">
+              Setting up from a computer? Open{' '}
+              <a href="https://pix.deepoke.com/start">pix.deepoke.com/start</a>
+              {' '}there.
+            </p>
+          ) : null}
         </div>
       </div>
       <div className="setup-nav-v2">
@@ -244,7 +295,7 @@ function IphoneStep({
           Back
         </button>
         <button type="button" className="button button-primary" onClick={onContinue}>
-          Continue to pairing
+          I&apos;ve installed Pix — Continue to pairing
         </button>
       </div>
     </section>
@@ -253,53 +304,49 @@ function IphoneStep({
 
 function PairStep({
   os,
+  onOsChange,
   onBack,
 }: {
-  os: SetupOs
+  os?: SetupOs
+  onOsChange: (os: SetupOs) => void
   onBack: () => void
 }) {
   return (
     <section className="setup-panel-v2" aria-labelledby="setup-pair-heading">
       <h2 id="setup-pair-heading">Pair your iPhone</h2>
-      {os === 'mac' ? (
-        <ol className="setup-pair-list-v2">
-          <li>
-            <strong>Open Pix on your computer</strong>
-            <span>Use the Pix menu bar extra after setup finishes.</span>
-          </li>
-          <li>
-            <strong>Choose Add Device…</strong>
-            <span>Keep the phone and Mac on the same Wi-Fi when you can.</span>
-          </li>
-          <li>
-            <strong>Open Pix on your iPhone and choose this computer</strong>
-            <span>If you are not on the same network, scan the QR code Pix shows on the Mac.</span>
-          </li>
-          <li>
-            <strong>Confirm the six-digit code and approve</strong>
-            <span>Approve only when the device name and code match.</span>
-          </li>
-        </ol>
-      ) : (
-        <ol className="setup-pair-list-v2">
-          <li>
-            <strong>Finish setup on the computer</strong>
-            <span>The installer walks you through making Pix available on this machine.</span>
-          </li>
-          <li>
-            <strong>Open Pix on your iPhone</strong>
-            <span>Keep the phone and computer on the same network when you can.</span>
-          </li>
-          <li>
-            <strong>Choose this computer, or scan the QR it prints</strong>
-            <span>If you are away from that network, use the QR code from setup.</span>
-          </li>
-          <li>
-            <strong>Confirm the six-digit code and approve</strong>
-            <span>Approve the request on the computer only when the code matches.</span>
-          </li>
-        </ol>
-      )}
+      <ol className="setup-pair-list-v2">
+        <li>
+          <strong>Open Pix on your computer</strong>
+          <span>Keep the phone and computer nearby when you can.</span>
+        </li>
+        <li>
+          <strong>Start pairing / Add Device</strong>
+          <span>Start the pairing flow on the computer, then wait for the iPhone.</span>
+        </li>
+        <li>
+          <strong>Open Pix on your iPhone</strong>
+          <span>Use the same Pix app you just installed from TestFlight.</span>
+        </li>
+        <li>
+          <strong>Choose the computer, or scan its QR code</strong>
+          <span>Same network can discover the computer. Away from it, scan the QR Pix shows.</span>
+        </li>
+        <li>
+          <strong>Confirm the six-digit code</strong>
+          <span>Approve on the computer only when the device name and code match.</span>
+        </li>
+      </ol>
+
+      <div className="setup-pair-os-v2">
+        <p>Using:</p>
+        <OsToggle os={os} onChange={onOsChange} label="Pairing instructions for" />
+        {os === 'mac' ? (
+          <p className="setup-pair-os-note-v2">Use the Pix menu bar app.</p>
+        ) : null}
+        {os === 'linux' ? (
+          <p className="setup-pair-os-note-v2">Follow the terminal setup output.</p>
+        ) : null}
+      </div>
 
       <div className="setup-ready-v2">
         <h3>You&apos;re ready.</h3>

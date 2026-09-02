@@ -27,11 +27,11 @@ function Home() {
       <Header />
       <main id="main-content">
         <Hero />
+        <ProductPreview />
         <HowItWorks />
         <Capabilities />
         <GetStarted />
         <WhyPix />
-        <ProductPreview />
         <FAQ />
       </main>
       <Footer />
