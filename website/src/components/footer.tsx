@@ -10,6 +10,7 @@ export function Footer() {
           <span>Pix</span>
         </a>
         <nav className="footer-nav-v2" aria-label="Footer navigation">
+          <a href="/start">Get started</a>
           <a href="/use-cases">Use cases</a>
           <a href="/updates">Updates</a>
           <a href="/docs">Docs</a>

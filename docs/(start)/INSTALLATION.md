@@ -1,10 +1,11 @@
 ---
 title: Installation
-description: Install the Pix host on a supported Mac or Linux computer.
+description: Install Pix on a supported Mac or Linux computer.
 ---
 
-Pix runs next to Pi on your computer. Install the host there first, then run
-`pix setup` to choose a workspace, configure connectivity, and pair a phone.
+Pix runs next to Pi on your computer. Install Pix there first, then pair
+your iPhone. The website [setup guide](https://pix.deepoke.com/start) is the
+shortest path for first-time install.
 
 ## Install
 

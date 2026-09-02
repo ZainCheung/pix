@@ -15,7 +15,7 @@ target in CI is not by itself a shipped product.
 | Linux ARM64 | Supported | Not shipped | Supported | Supported | `systemd --user` | First-party installer, archive, `.deb`, `.rpm` |
 | macOS Intel | Not shipped | Not shipped | Not shipped | Not a released workflow | No released integration | Build from source only; no release artifact |
 | Windows | Not supported by the current release | Not applicable | Not supported | Not supported | Not supported | No release artifact |
-| iPhone / iOS | Client only | Not applicable | Not applicable | Client connects to a supported host | Not applicable | Private iOS client; use the [Pix download](https://deepoke.com/pix) link |
+| iPhone / iOS | Client only | Not applicable | Not applicable | Client connects to a supported host | Not applicable | Pix for iPhone; join the [TestFlight beta](https://testflight.apple.com/join/crTbabdp) |
 
 The released macOS app and Homebrew Cask require macOS 14 (Sonoma) or newer
 and Apple Silicon. The macOS build helper accepts x86_64 for local builds, but

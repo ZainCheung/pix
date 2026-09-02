@@ -1,6 +1,7 @@
 export function ProductPreview() {
   return (
-    <section className="preview-v2" aria-labelledby="preview-heading">
+    <section className="preview-v2" id="demo" aria-labelledby="preview-heading">
+      <div className="section-label-v2" id="preview-heading">Watch Pix in action</div>
       <figure className="preview-figure-v2">
         <div className="preview-shot-v2">
           <iframe
@@ -8,7 +9,7 @@ export function ProductPreview() {
             width="560"
             height="315"
             src="https://www.youtube.com/embed/OLZ0yUpsOD0?si=i3UOg0TbmbI3Q2XX"
-            title="YouTube video player"
+            title="Pix demo: continue a Pi session from an iPhone"
             frameBorder="0"
             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
             referrerPolicy="strict-origin-when-cross-origin"
@@ -17,8 +18,7 @@ export function ProductPreview() {
           />
         </div>
         <figcaption className="preview-caption-v2">
-          <span>01 / Overview</span>
-          <span id="preview-heading">Your Pi coding agent, in your pocket.</span>
+          Continue a Pi session from your iPhone.
         </figcaption>
       </figure>
     </section>

@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SplatRouteImport } from './routes/$'
 import { Route as LlmsDottxtRouteImport } from './routes/llms[.]txt'
 import { Route as SitemapDotxmlRouteImport } from './routes/sitemap[.]xml'
+import { Route as StartRouteImport } from './routes/start'
 import { Route as UpdatesRouteImport } from './routes/updates'
 import { Route as UseCasesRouteImport } from './routes/use-cases'
 import { Route as ApiSearchRouteImport } from './routes/api/search'
@@ -43,6 +44,11 @@ const LlmsDottxtRoute = LlmsDottxtRouteImport.update({
 const SitemapDotxmlRoute = SitemapDotxmlRouteImport.update({
   id: '/sitemap.xml',
   path: '/sitemap.xml',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StartRoute = StartRouteImport.update({
+  id: '/start',
+  path: '/start',
   getParentRoute: () => rootRouteImport,
 } as any)
 const UpdatesRoute = UpdatesRouteImport.update({
@@ -108,6 +114,7 @@ export interface FileRoutesByFullPath {
   '/$': typeof SplatRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/start': typeof StartRoute
   '/updates': typeof UpdatesRouteWithChildren
   '/use-cases': typeof UseCasesRouteWithChildren
   '/api/search': typeof ApiSearchRoute
@@ -125,6 +132,7 @@ export interface FileRoutesByTo {
   '/$': typeof SplatRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/start': typeof StartRoute
   '/api/search': typeof ApiSearchRoute
   '/docs/$': typeof DocsSplatRoute
   '/updates/$slug': typeof UpdatesSlugRoute
@@ -141,6 +149,7 @@ export interface FileRoutesById {
   '/$': typeof SplatRoute
   '/llms.txt': typeof LlmsDottxtRoute
   '/sitemap.xml': typeof SitemapDotxmlRoute
+  '/start': typeof StartRoute
   '/updates': typeof UpdatesRouteWithChildren
   '/use-cases': typeof UseCasesRouteWithChildren
   '/api/search': typeof ApiSearchRoute
@@ -160,6 +169,7 @@ export interface FileRouteTypes {
     | '/$'
     | '/llms.txt'
     | '/sitemap.xml'
+    | '/start'
     | '/updates'
     | '/use-cases'
     | '/api/search'
@@ -177,6 +187,7 @@ export interface FileRouteTypes {
     | '/$'
     | '/llms.txt'
     | '/sitemap.xml'
+    | '/start'
     | '/api/search'
     | '/docs/$'
     | '/updates/$slug'
@@ -192,6 +203,7 @@ export interface FileRouteTypes {
     | '/$'
     | '/llms.txt'
     | '/sitemap.xml'
+    | '/start'
     | '/updates'
     | '/use-cases'
     | '/api/search'
@@ -210,6 +222,7 @@ export interface RootRouteChildren {
   SplatRoute: typeof SplatRoute
   LlmsDottxtRoute: typeof LlmsDottxtRoute
   SitemapDotxmlRoute: typeof SitemapDotxmlRoute
+  StartRoute: typeof StartRoute
   UpdatesRoute: typeof UpdatesRouteWithChildren
   UseCasesRoute: typeof UseCasesRouteWithChildren
   ApiSearchRoute: typeof ApiSearchRoute
@@ -244,6 +257,13 @@ declare module '@tanstack/react-router' {
       path: '/sitemap.xml'
       fullPath: '/sitemap.xml'
       preLoaderRoute: typeof SitemapDotxmlRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/start': {
+      id: '/start'
+      path: '/start'
+      fullPath: '/start'
+      preLoaderRoute: typeof StartRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/updates': {
@@ -364,6 +384,7 @@ const rootRouteChildren: RootRouteChildren = {
   SplatRoute: SplatRoute,
   LlmsDottxtRoute: LlmsDottxtRoute,
   SitemapDotxmlRoute: SitemapDotxmlRoute,
+  StartRoute: StartRoute,
   UpdatesRoute: UpdatesRouteWithChildren,
   UseCasesRoute: UseCasesRouteWithChildren,
   ApiSearchRoute: ApiSearchRoute,
