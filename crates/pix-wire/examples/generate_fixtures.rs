@@ -9,8 +9,10 @@ use pix_wire::{
     HostSnapshot, HostSummary, MAX_ENCRYPTED_FRAME_BYTES, ModelSummary, PROTOCOL_MAJOR,
     RelayAccess, RelayRole, ServerEnvelope, ServerEvent, SessionHistoryPage, SessionQueue,
     SessionSnapshot, SessionState, SessionSummary, SessionUsage, ThinkingLevel, ToolEvent,
-    WorkspaceAvailability, WorkspaceSummary, confirmation_code, encode_encrypted_frame,
-    host_public_key_fingerprint, pairing_offer, relay_channel_id,
+    WORKSPACE_FILES_CAPABILITY, WorkspaceAvailability, WorkspaceFileContentKind,
+    WorkspaceFileEncoding, WorkspaceFileEntry, WorkspaceFileEntryKind, WorkspaceFileList,
+    WorkspaceFileRead, WorkspaceFileStat, WorkspaceSummary, confirmation_code,
+    encode_encrypted_frame, host_public_key_fingerprint, pairing_offer, relay_channel_id,
     relay_channel_secret_from_join_code, relay_join_proof,
 };
 use uuid::Uuid;
@@ -138,11 +140,37 @@ fn client_fixtures() -> Vec<(String, ClientEnvelope)> {
                     "session_history.v1".to_owned(),
                     "history_items.v1".to_owned(),
                     "history_presentation.v1".to_owned(),
+                    WORKSPACE_FILES_CAPABILITY.to_owned(),
                 ],
             },
         ),
         named("client-host-defaults.json", ClientRequest::HostDefaults),
         named("client-workspace-list.json", ClientRequest::WorkspaceList),
+        named(
+            "client-workspace-files-list.json",
+            ClientRequest::WorkspaceFilesList {
+                workspace_id,
+                path: "src".to_owned(),
+                limit: Some(1_000),
+            },
+        ),
+        named(
+            "client-workspace-files-read.json",
+            ClientRequest::WorkspaceFilesRead {
+                workspace_id,
+                path: "src/lib.rs".to_owned(),
+                offset: 262_144,
+                limit: 262_144,
+                expected_revision: Some("opaque-revision".to_owned()),
+            },
+        ),
+        named(
+            "client-workspace-files-stat.json",
+            ClientRequest::WorkspaceFilesStat {
+                workspace_id,
+                path: "src/lib.rs".to_owned(),
+            },
+        ),
         named(
             "client-session-list.json",
             ClientRequest::SessionList {
@@ -392,6 +420,75 @@ fn host_and_session_events() -> Vec<(String, ServerEnvelope)> {
             "server-workspace-changed.json",
             None,
             ServerEvent::WorkspaceChanged { workspace },
+        ),
+        server(
+            "server-workspace-files-list.json",
+            Some(REQUEST_ID),
+            ServerEvent::WorkspaceFilesList {
+                list: WorkspaceFileList {
+                    workspace_id,
+                    path: "src".to_owned(),
+                    entries: vec![
+                        WorkspaceFileEntry {
+                            name: "lib".to_owned(),
+                            path: "src/lib".to_owned(),
+                            kind: WorkspaceFileEntryKind::Directory,
+                            size: None,
+                            modified_at: Some("2026-08-13T00:00:00Z".to_owned()),
+                            language: None,
+                            encoding: WorkspaceFileEncoding::Unknown,
+                            revision: Some("opaque-dir-entry".to_owned()),
+                        },
+                        WorkspaceFileEntry {
+                            name: "main.rs".to_owned(),
+                            path: "src/main.rs".to_owned(),
+                            kind: WorkspaceFileEntryKind::File,
+                            size: Some(12),
+                            modified_at: Some("2026-08-13T00:00:00Z".to_owned()),
+                            language: Some("rust".to_owned()),
+                            encoding: WorkspaceFileEncoding::Unknown,
+                            revision: Some("opaque-file-revision".to_owned()),
+                        },
+                    ],
+                    truncated: false,
+                    revision: "opaque-directory-revision".to_owned(),
+                },
+            },
+        ),
+        server(
+            "server-workspace-files-read.json",
+            Some(REQUEST_ID),
+            ServerEvent::WorkspaceFilesRead {
+                read: WorkspaceFileRead {
+                    workspace_id,
+                    path: "README.md".to_owned(),
+                    offset: 0,
+                    bytes_read: 5,
+                    total_size: 5,
+                    eof: true,
+                    kind: WorkspaceFileContentKind::Text,
+                    data: "aGVsbG8=".to_owned(),
+                    encoding: WorkspaceFileEncoding::Utf8,
+                    language: Some("markdown".to_owned()),
+                    revision: "opaque-file-revision".to_owned(),
+                },
+            },
+        ),
+        server(
+            "server-workspace-files-stat.json",
+            Some(REQUEST_ID),
+            ServerEvent::WorkspaceFilesStat {
+                stat: WorkspaceFileStat {
+                    workspace_id,
+                    path: "README.md".to_owned(),
+                    kind: WorkspaceFileEntryKind::File,
+                    size: Some(5),
+                    modified_at: Some("2026-08-13T00:00:00Z".to_owned()),
+                    language: Some("markdown".to_owned()),
+                    encoding: WorkspaceFileEncoding::Utf8,
+                    revision: Some("opaque-file-revision".to_owned()),
+                },
+            },
         ),
         server(
             "server-session-list.json",

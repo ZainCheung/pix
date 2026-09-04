@@ -113,3 +113,15 @@ presentation concern; it does not change the Host's authoritative history.
 Model summaries carry Pi's optional `input` modalities. Clients use the
 advertised `image` value to gate image composition; the host does not infer
 model capability from the existence of an attachment upload.
+
+### Workspace Files boundary
+
+`workspace_files_v1` is a Host-owned, read-only capability for browsing files
+inside an already authorized workspace. It is deliberately separate from the
+`workspace.list` catalog operation and does not depend on a Pi session. The
+wire contract accepts only workspace-relative paths and bounded byte ranges;
+the Host revalidates authorization and traverses directory descriptors with
+no-follow semantics. Symlink entries may be listed for context, but symlink
+traversal and opening are denied. Opaque revisions prevent a client from
+concatenating ranges from different file versions. Arbitrary host filesystem
+browsing and file mutation remain out of scope.

@@ -10,7 +10,9 @@ use pix_core::{
     RuntimeManagerOptions, WorkspaceRegistry,
 };
 use pix_wire::{
-    ClientEnvelope, ClientRequest, ErrorCode, PROTOCOL_MAJOR, ServerEvent, SessionState,
+    ClientEnvelope, ClientRequest, ErrorCode, MAX_WORKSPACE_FILE_READ_BYTES, PROTOCOL_MAJOR,
+    ServerEvent, SessionState, WORKSPACE_FILES_CAPABILITY, WorkspaceFileContentKind,
+    WorkspaceFileEntryKind,
 };
 use tempfile::tempdir;
 
@@ -454,6 +456,213 @@ fn snapshot_marks_a_missing_workspace_unavailable() {
         }
         event => panic!("expected host snapshot, got {event:?}"),
     }
+}
+
+#[test]
+fn workspace_files_are_read_only_and_independent_of_pi_runtime() {
+    let (_script, workspace, _locks, mut dispatcher, manager, workspace_id) = setup();
+    let source = workspace.path().join("src");
+    fs::create_dir(&source).expect("source directory");
+    fs::write(source.join("main.rs"), "hello workspace\n").expect("source file");
+
+    let snapshot = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec![WORKSPACE_FILES_CAPABILITY.to_owned()],
+        },
+    ));
+    assert!(matches!(
+        snapshot[0].event,
+        ServerEvent::HostSnapshot { .. }
+    ));
+
+    let listed = dispatcher.dispatch(request(
+        2,
+        ClientRequest::WorkspaceFilesList {
+            workspace_id,
+            path: "src".to_owned(),
+            limit: None,
+        },
+    ));
+    let entry = match &listed[0].event {
+        ServerEvent::WorkspaceFilesList { list } => list
+            .entries
+            .iter()
+            .find(|entry| entry.name == "main.rs")
+            .expect("main.rs entry"),
+        event => panic!("expected workspace file list, got {event:?}"),
+    };
+    assert_eq!(entry.kind, WorkspaceFileEntryKind::File);
+    assert_eq!(entry.language.as_deref(), Some("rust"));
+    let revision = entry.revision.clone().expect("entry revision");
+
+    let stat = dispatcher.dispatch(request(
+        3,
+        ClientRequest::WorkspaceFilesStat {
+            workspace_id,
+            path: "src/main.rs".to_owned(),
+        },
+    ));
+    match &stat[0].event {
+        ServerEvent::WorkspaceFilesStat { stat } => {
+            assert_eq!(stat.kind, WorkspaceFileEntryKind::File);
+            assert_eq!(stat.encoding, pix_wire::WorkspaceFileEncoding::Utf8);
+            assert_eq!(stat.revision.as_deref(), Some(revision.as_str()));
+        }
+        event => panic!("expected workspace file stat, got {event:?}"),
+    }
+
+    let read = dispatcher.dispatch(request(
+        4,
+        ClientRequest::WorkspaceFilesRead {
+            workspace_id,
+            path: "src/main.rs".to_owned(),
+            offset: 0,
+            limit: 256,
+            expected_revision: Some(revision),
+        },
+    ));
+    match &read[0].event {
+        ServerEvent::WorkspaceFilesRead { read } => {
+            assert_eq!(read.kind, WorkspaceFileContentKind::Text);
+            assert_eq!(read.bytes_read, 16);
+            assert!(read.eof);
+        }
+        event => panic!("expected workspace file read, got {event:?}"),
+    }
+    assert_eq!(manager.active_count(), 0, "file reads must not start Pi");
+}
+
+#[test]
+fn workspace_files_require_capability_and_redact_filesystem_errors() {
+    let (_script, workspace, _locks, mut dispatcher, _manager, workspace_id) = setup();
+    fs::write(workspace.path().join("secret.txt"), "secret").expect("secret");
+
+    let missing_capability = dispatcher.dispatch(request(
+        1,
+        ClientRequest::WorkspaceFilesStat {
+            workspace_id,
+            path: "secret.txt".to_owned(),
+        },
+    ));
+    assert!(matches!(
+        missing_capability[0].event,
+        ServerEvent::Error {
+            code: ErrorCode::InvalidRequest,
+            ..
+        }
+    ));
+
+    let _ = dispatcher.dispatch(request(
+        2,
+        ClientRequest::HostSnapshot {
+            capabilities: vec![WORKSPACE_FILES_CAPABILITY.to_owned()],
+        },
+    ));
+    let missing = dispatcher.dispatch(request(
+        3,
+        ClientRequest::WorkspaceFilesRead {
+            workspace_id,
+            path: "does-not-exist.txt".to_owned(),
+            offset: 0,
+            limit: 256,
+            expected_revision: None,
+        },
+    ));
+    match &missing[0].event {
+        ServerEvent::Error { code, message, .. } => {
+            assert_eq!(*code, ErrorCode::NotFound);
+            assert!(!message.contains(workspace.path().to_str().expect("workspace path")));
+        }
+        event => panic!("expected missing file error, got {event:?}"),
+    }
+}
+
+#[test]
+fn bounded_workspace_reads_do_not_hide_pending_pi_events() {
+    let (_script, workspace, _locks, mut dispatcher, manager, workspace_id) = setup();
+    let _ = dispatcher.dispatch(request(
+        1,
+        ClientRequest::HostSnapshot {
+            capabilities: vec![WORKSPACE_FILES_CAPABILITY.to_owned()],
+        },
+    ));
+    let session_id = attached_session_id(&mut dispatcher, workspace_id);
+    let file = workspace.path().join("large.txt");
+    fs::write(
+        &file,
+        vec![b'x'; usize::try_from(MAX_WORKSPACE_FILE_READ_BYTES).expect("bound") * 3 + 1],
+    )
+    .expect("large file");
+
+    let first = dispatcher.dispatch(request(
+        92,
+        ClientRequest::WorkspaceFilesRead {
+            workspace_id,
+            path: "large.txt".to_owned(),
+            offset: 0,
+            limit: MAX_WORKSPACE_FILE_READ_BYTES,
+            expected_revision: None,
+        },
+    ));
+    let revision = match &first[0].event {
+        ServerEvent::WorkspaceFilesRead { read } => {
+            assert_eq!(read.bytes_read, MAX_WORKSPACE_FILE_READ_BYTES);
+            assert!(!read.eof);
+            read.revision.clone()
+        }
+        event => panic!("expected first workspace read, got {event:?}"),
+    };
+
+    let _ = dispatcher.dispatch(request(
+        93,
+        ClientRequest::SessionPrompt {
+            session_id: session_id.clone(),
+            content: "stream while reading".to_owned(),
+            attachments: Vec::new(),
+        },
+    ));
+    let mut saw_delta = false;
+    for (request_id, offset) in [
+        (94, u64::from(MAX_WORKSPACE_FILE_READ_BYTES)),
+        (95, u64::from(MAX_WORKSPACE_FILE_READ_BYTES) * 2),
+        (96, u64::from(MAX_WORKSPACE_FILE_READ_BYTES) * 3),
+    ] {
+        let response = dispatcher.dispatch(request(
+            request_id,
+            ClientRequest::WorkspaceFilesRead {
+                workspace_id,
+                path: "large.txt".to_owned(),
+                offset,
+                limit: MAX_WORKSPACE_FILE_READ_BYTES,
+                expected_revision: Some(revision.clone()),
+            },
+        ));
+        match &response[0].event {
+            ServerEvent::WorkspaceFilesRead { read } => {
+                assert!(read.bytes_read <= MAX_WORKSPACE_FILE_READ_BYTES);
+            }
+            event => panic!("expected workspace read, got {event:?}"),
+        }
+        saw_delta |= dispatcher
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event.event, ServerEvent::AssistantDelta { .. }));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !saw_delta && std::time::Instant::now() < deadline {
+        saw_delta |= dispatcher
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event.event, ServerEvent::AssistantDelta { .. }));
+        if !saw_delta {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert!(saw_delta, "Pi streaming event was starved by file reads");
+    manager
+        .release(session_id.parse().expect("session ID"))
+        .expect("release runtime");
 }
 
 #[cfg(unix)]

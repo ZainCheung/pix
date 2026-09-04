@@ -26,7 +26,8 @@ pub use protocol::{
     HostSnapshot, HostSummary, ModelSummary, PromptBehavior, RelayAccess, ServerEnvelope,
     ServerEvent, SessionHistoryPage, SessionQueue, SessionSnapshot, SessionState, SessionSummary,
     SessionUsage, ThinkingLevel, ToolEvent, TurnPresentationState, WorkspaceAvailability,
-    WorkspaceSummary, is_valid_capability,
+    WorkspaceFileContentKind, WorkspaceFileEncoding, WorkspaceFileEntry, WorkspaceFileEntryKind,
+    WorkspaceFileList, WorkspaceFileRead, WorkspaceFileStat, WorkspaceSummary, is_valid_capability,
 };
 pub use relay::{
     RELAY_CHANNEL_SECRET_BYTES, RelayRole, decode_relay_channel_secret, generate_join_code,
@@ -38,6 +39,26 @@ pub const MAX_ENCRYPTED_FRAME_BYTES: usize = 1024 * 1024;
 pub const MAX_TEXT_FIELD_BYTES: usize = 512 * 1024;
 pub const MAX_PENDING_REQUESTS: usize = 128;
 pub const PAIRING_TOKEN_BYTES: usize = 32;
+/// Capability that unlocks bounded, read-only access to authorized workspace
+/// files. The underscore form is intentional: capabilities are identifiers,
+/// while protocol operation names use dotted namespaces.
+pub const WORKSPACE_FILES_CAPABILITY: &str = "workspace_files_v1";
+/// Maximum number of entries returned for one directory listing in the first
+/// workspace-files version. Pagination is intentionally deferred until the
+/// directory snapshot contract is stable.
+pub const MAX_WORKSPACE_DIRECTORY_ENTRIES: u32 = 2_000;
+/// Default directory listing bound used by hosts when clients omit `limit`.
+pub const DEFAULT_WORKSPACE_DIRECTORY_ENTRIES: u32 = 1_000;
+/// Maximum raw bytes returned by one workspace file range read. Base64 and
+/// envelope overhead keep the encoded response below the shared wire limits.
+pub const MAX_WORKSPACE_FILE_READ_BYTES: u32 = 256 * 1024;
+/// Maximum UTF-8 bytes in one workspace-relative path. This keeps component
+/// traversal bounded independently of the general text-field ceiling.
+pub const MAX_WORKSPACE_PATH_BYTES: usize = 16 * 1024;
+/// Target encoded payload budget for one directory response. Keeping a list
+/// below half the frame ceiling leaves room for the envelope and future
+/// metadata without allowing a large path prefix to multiply by every entry.
+pub const MAX_WORKSPACE_DIRECTORY_RESPONSE_BYTES: usize = 512 * 1024;
 
 /// Capabilities this host build can honor when a client declares them.
 ///
@@ -56,6 +77,7 @@ pub const HOST_CAPABILITIES: &[&str] = &[
     "session_history.v1",
     "history_items.v1",
     "history_presentation.v1",
+    WORKSPACE_FILES_CAPABILITY,
 ];
 /// Upper bound on capability strings a client may declare per connection.
 pub const MAX_CLIENT_CAPABILITIES: usize = 16;
@@ -100,6 +122,16 @@ pub enum WireError {
     TooManyAttachments { count: usize, limit: usize },
     #[error("lazy image chunk size {size} exceeds {limit} bytes")]
     ImageChunkSizeInvalid { size: u32, limit: u32 },
+    #[error("workspace path is invalid: {0}")]
+    InvalidWorkspacePath(&'static str),
+    #[error("workspace path is {size} bytes, exceeding the {limit} byte limit")]
+    WorkspacePathTooLarge { size: usize, limit: usize },
+    #[error("workspace directory limit {size} is outside the 1..={limit} range")]
+    WorkspaceDirectoryLimitInvalid { size: u32, limit: u32 },
+    #[error("workspace file read limit {size} is outside the 1..={limit} range")]
+    WorkspaceFileReadLimitInvalid { size: u32, limit: u32 },
+    #[error("workspace file response is invalid: {0}")]
+    WorkspaceFileResponseInvalid(&'static str),
     #[error("history page size {size} is outside the 1..={limit} message range")]
     HistoryPageSizeInvalid { size: u32, limit: u32 },
     #[error("history page payload is {size} bytes, exceeding the {limit} byte target")]
