@@ -28,6 +28,7 @@ pub mod session_history_reader;
 pub mod session_lock;
 pub mod tui_bridge;
 pub mod workspace;
+pub mod workspace_files;
 
 pub use config::{ConfigStore, HostConfig};
 pub use connection_manager::{ConnectionId, ConnectionRegistry, RequestAdmission, RequestLedger};
@@ -79,3 +80,4 @@ pub use tui_bridge::{
     owner_uid,
 };
 pub use workspace::WorkspaceRegistry;
+pub use workspace_files::{WorkspaceFilesError, WorkspaceFilesService};

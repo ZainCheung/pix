@@ -12,7 +12,7 @@ use pix_wire::{
     HistoryPresentation, HistoryProcessSummary, HostSnapshot, HostSummary,
     MAX_ATTACHMENTS_PER_REQUEST, MAX_IMAGE_CHUNK_BYTES, PROTOCOL_MAJOR, RelayAccess,
     ServerEnvelope, ServerEvent, SessionState, SessionSummary as WireSessionSummary,
-    TurnPresentationState, WorkspaceAvailability, WorkspaceSummary,
+    TurnPresentationState, WORKSPACE_FILES_CAPABILITY, WorkspaceAvailability, WorkspaceSummary,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -29,6 +29,7 @@ use crate::session::{DiscoveredSession, PiSessionStore, SessionError, SessionMet
 use crate::session_history::{self, HistoryError};
 use crate::session_lock::SessionId;
 use crate::workspace::{WorkspaceError, WorkspaceRegistry};
+use crate::workspace_files::{WorkspaceFilesError, WorkspaceFilesService};
 
 const WORKSPACE_AVAILABILITY_TTL: Duration = Duration::from_secs(10);
 const MAX_SESSION_LIST: u32 = 200;
@@ -56,6 +57,7 @@ const CAPABILITY_IMAGE_REFS: &str = "image_refs.v1";
 const CAPABILITY_SESSION_HISTORY: &str = "session_history.v1";
 const CAPABILITY_HISTORY_ITEMS: &str = "history_items.v1";
 const CAPABILITY_HISTORY_PRESENTATION: &str = "history_presentation.v1";
+const CAPABILITY_WORKSPACE_FILES: &str = WORKSPACE_FILES_CAPABILITY;
 const SESSION_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(8);
 const RUNTIME_METADATA_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -407,6 +409,31 @@ impl HostProtocolDispatcher {
             ClientRequest::WorkspaceList => Ok(vec![ready(ServerEvent::WorkspaceList {
                 workspaces: self.workspace_summaries(),
             })]),
+            ClientRequest::WorkspaceFilesList {
+                workspace_id,
+                path,
+                limit,
+            } => Ok(vec![ready(self.workspace_files_list(
+                workspace_id,
+                &path,
+                limit,
+            )?)]),
+            ClientRequest::WorkspaceFilesRead {
+                workspace_id,
+                path,
+                offset,
+                limit,
+                expected_revision,
+            } => Ok(vec![ready(self.workspace_files_read(
+                workspace_id,
+                &path,
+                offset,
+                limit,
+                expected_revision.as_deref(),
+            )?)]),
+            ClientRequest::WorkspaceFilesStat { workspace_id, path } => {
+                Ok(vec![ready(self.workspace_files_stat(workspace_id, &path)?)])
+            }
             ClientRequest::SessionList {
                 workspace_id,
                 limit,
@@ -725,6 +752,80 @@ impl HostProtocolDispatcher {
     fn workspace_summaries(&self) -> Vec<WorkspaceSummary> {
         let config = self.host.snapshot();
         self.cached_workspace_summaries(&config)
+    }
+
+    fn workspace_files_list(
+        &self,
+        workspace_id: Uuid,
+        path: &str,
+        limit: Option<u32>,
+    ) -> Result<ServerEvent, DispatchError> {
+        self.require_capability(CAPABILITY_WORKSPACE_FILES)?;
+        let workspace = self.authorized_workspace(workspace_id)?;
+        let result = WorkspaceFilesService::list(workspace_id, &workspace, path, limit)?;
+        let response_bytes = serde_json::to_vec(&result)
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        crate::diagnostics::record(
+            "workspace.files.list",
+            &[
+                (
+                    "entry_count",
+                    u64::try_from(result.entries.len()).unwrap_or(u64::MAX),
+                ),
+                ("truncated", u64::from(result.truncated)),
+                ("response_bytes", response_bytes),
+            ],
+        );
+        Ok(ServerEvent::WorkspaceFilesList { list: result })
+    }
+
+    fn workspace_files_read(
+        &self,
+        workspace_id: Uuid,
+        path: &str,
+        offset: u64,
+        limit: u32,
+        expected_revision: Option<&str>,
+    ) -> Result<ServerEvent, DispatchError> {
+        self.require_capability(CAPABILITY_WORKSPACE_FILES)?;
+        let workspace = self.authorized_workspace(workspace_id)?;
+        let result = WorkspaceFilesService::read(
+            workspace_id,
+            &workspace,
+            path,
+            offset,
+            limit,
+            expected_revision,
+        )?;
+        let response_bytes = serde_json::to_vec(&result)
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        crate::diagnostics::record(
+            "workspace.files.read",
+            &[
+                ("bytes_read", u64::from(result.bytes_read)),
+                ("total_size", result.total_size),
+                ("eof", u64::from(result.eof)),
+                ("response_bytes", response_bytes),
+            ],
+        );
+        Ok(ServerEvent::WorkspaceFilesRead { read: result })
+    }
+
+    fn workspace_files_stat(
+        &self,
+        workspace_id: Uuid,
+        path: &str,
+    ) -> Result<ServerEvent, DispatchError> {
+        self.require_capability(CAPABILITY_WORKSPACE_FILES)?;
+        let workspace = self.authorized_workspace(workspace_id)?;
+        let result = WorkspaceFilesService::stat(workspace_id, &workspace, path)?;
+        let response_bytes = serde_json::to_vec(&result)
+            .map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        crate::diagnostics::record(
+            "workspace.files.stat",
+            &[("response_bytes", response_bytes)],
+        );
+        Ok(ServerEvent::WorkspaceFilesStat { stat: result })
     }
 
     fn cached_workspace_summaries(&self, config: &HostConfig) -> Vec<WorkspaceSummary> {
@@ -1685,6 +1786,8 @@ pub enum DispatchError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
+    WorkspaceFiles(#[from] WorkspaceFilesError),
+    #[error(transparent)]
     Session(#[from] SessionError),
     #[error(transparent)]
     Runtime(#[from] RuntimeManagerError),
@@ -1724,6 +1827,42 @@ impl DispatchError {
                 ErrorCode::InvalidRequest,
                 "This client did not declare the capability this request requires",
                 false,
+            ),
+            Self::WorkspaceFiles(
+                WorkspaceFilesError::InvalidPath | WorkspaceFilesError::InvalidRange,
+            ) => (
+                ErrorCode::InvalidRequest,
+                "Workspace file request is invalid",
+                false,
+            ),
+            Self::WorkspaceFiles(WorkspaceFilesError::NotFound) => (
+                ErrorCode::NotFound,
+                "Requested workspace entry was not found",
+                false,
+            ),
+            Self::WorkspaceFiles(WorkspaceFilesError::Symlink) => (
+                ErrorCode::Unauthorized,
+                "Workspace entry cannot be accessed through a symbolic link",
+                false,
+            ),
+            Self::WorkspaceFiles(WorkspaceFilesError::RevisionMismatch) => (
+                ErrorCode::Conflict,
+                "Workspace file changed; reload it",
+                false,
+            ),
+            Self::WorkspaceFiles(WorkspaceFilesError::Unsupported) => (
+                ErrorCode::InvalidRequest,
+                "Workspace entry cannot be read",
+                false,
+            ),
+            Self::WorkspaceFiles(
+                WorkspaceFilesError::PermissionDenied
+                | WorkspaceFilesError::Io(_)
+                | WorkspaceFilesError::UnsupportedPlatform,
+            ) => (
+                ErrorCode::PiUnavailable,
+                "Workspace files are temporarily unavailable",
+                true,
             ),
             Self::UnauthorizedSession(_)
             | Self::Workspace(

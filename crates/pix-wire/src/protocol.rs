@@ -1,3 +1,5 @@
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -6,7 +8,8 @@ use crate::{
     ATTACHMENT_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_REQUEST,
     MAX_CLIENT_CAPABILITIES, MAX_ENCRYPTED_FRAME_BYTES, MAX_HISTORY_PAGE_BYTES,
     MAX_HISTORY_PAGE_MESSAGES, MAX_HISTORY_PREVIEW_BYTES, MAX_IMAGE_CHUNK_BYTES,
-    MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError,
+    MAX_TEXT_FIELD_BYTES, MAX_WORKSPACE_DIRECTORY_ENTRIES, MAX_WORKSPACE_DIRECTORY_RESPONSE_BYTES,
+    MAX_WORKSPACE_FILE_READ_BYTES, MAX_WORKSPACE_PATH_BYTES, PROTOCOL_MAJOR, WireError,
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +104,35 @@ pub enum ClientRequest {
     HostDefaults,
     #[serde(rename = "workspace.list")]
     WorkspaceList,
+    /// Lists one bounded directory inside an explicitly authorized workspace.
+    /// The empty path denotes the workspace root; paths are always relative.
+    #[serde(rename = "workspace.files.list")]
+    WorkspaceFilesList {
+        workspace_id: Uuid,
+        #[serde(default)]
+        path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Reads one bounded byte range from an authorized workspace file.
+    #[serde(rename = "workspace.files.read")]
+    WorkspaceFilesRead {
+        workspace_id: Uuid,
+        path: String,
+        offset: u64,
+        limit: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Reads metadata for an authorized workspace path. Opening a file does
+    /// not require a separate stat round trip; `workspace.files.read` returns
+    /// the same metadata alongside its first byte range.
+    #[serde(rename = "workspace.files.stat")]
+    WorkspaceFilesStat {
+        workspace_id: Uuid,
+        #[serde(default)]
+        path: String,
+    },
     #[serde(rename = "session.list")]
     SessionList {
         workspace_id: Uuid,
@@ -222,6 +254,21 @@ pub enum ServerEvent {
     WorkspaceList { workspaces: Vec<WorkspaceSummary> },
     #[serde(rename = "workspace.changed")]
     WorkspaceChanged { workspace: WorkspaceSummary },
+    #[serde(rename = "workspace.files.list")]
+    WorkspaceFilesList {
+        #[serde(flatten)]
+        list: WorkspaceFileList,
+    },
+    #[serde(rename = "workspace.files.read")]
+    WorkspaceFilesRead {
+        #[serde(flatten)]
+        read: WorkspaceFileRead,
+    },
+    #[serde(rename = "workspace.files.stat")]
+    WorkspaceFilesStat {
+        #[serde(flatten)]
+        stat: WorkspaceFileStat,
+    },
     #[serde(rename = "session.list")]
     SessionList {
         workspace_id: Uuid,
@@ -353,6 +400,96 @@ pub struct WorkspaceSummary {
     pub id: Uuid,
     pub name: String,
     pub availability: WorkspaceAvailability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFileEntryKind {
+    Directory,
+    File,
+    Symlink,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFileContentKind {
+    Text,
+    Binary,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceFileEncoding {
+    Utf8,
+    Binary,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileEntry {
+    pub name: String,
+    pub path: String,
+    pub kind: WorkspaceFileEntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub encoding: WorkspaceFileEncoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileList {
+    pub workspace_id: Uuid,
+    pub path: String,
+    pub entries: Vec<WorkspaceFileEntry>,
+    pub truncated: bool,
+    /// Opaque directory state. Phase 1 does not expose a cursor, but retaining
+    /// a bounded revision keeps the response extensible for stable pagination.
+    pub revision: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileStat {
+    pub workspace_id: Uuid,
+    pub path: String,
+    pub kind: WorkspaceFileEntryKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub encoding: WorkspaceFileEncoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileRead {
+    pub workspace_id: Uuid,
+    pub path: String,
+    pub offset: u64,
+    pub bytes_read: u32,
+    pub total_size: u64,
+    pub eof: bool,
+    pub kind: WorkspaceFileContentKind,
+    /// Canonical base64 of the bounded raw byte range. Binary and unsupported
+    /// entries return an empty payload in Phase 1.
+    pub data: String,
+    #[serde(default)]
+    pub encoding: WorkspaceFileEncoding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    pub revision: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -775,6 +912,45 @@ fn validate_client_request(request: &ClientRequest) -> Result<(), WireError> {
         ClientRequest::HostDefaults
         | ClientRequest::WorkspaceList
         | ClientRequest::SessionList { .. } => Ok(()),
+        ClientRequest::WorkspaceFilesList {
+            path,
+            limit,
+            workspace_id: _,
+        } => {
+            validate_workspace_path(path)?;
+            if let Some(limit) = limit
+                && (*limit == 0 || *limit > MAX_WORKSPACE_DIRECTORY_ENTRIES)
+            {
+                return Err(WireError::WorkspaceDirectoryLimitInvalid {
+                    size: *limit,
+                    limit: MAX_WORKSPACE_DIRECTORY_ENTRIES,
+                });
+            }
+            Ok(())
+        }
+        ClientRequest::WorkspaceFilesRead {
+            path,
+            limit,
+            expected_revision,
+            workspace_id: _,
+            offset: _,
+        } => {
+            validate_workspace_path(path)?;
+            if *limit == 0 || *limit > MAX_WORKSPACE_FILE_READ_BYTES {
+                return Err(WireError::WorkspaceFileReadLimitInvalid {
+                    size: *limit,
+                    limit: MAX_WORKSPACE_FILE_READ_BYTES,
+                });
+            }
+            if let Some(revision) = expected_revision {
+                validate_identifier("expected_revision", revision)?;
+            }
+            Ok(())
+        }
+        ClientRequest::WorkspaceFilesStat {
+            path,
+            workspace_id: _,
+        } => validate_workspace_path(path),
         ClientRequest::AttachmentBegin {
             session_id,
             attachment_id,
@@ -865,8 +1041,97 @@ fn validate_image_ref(value: &str) -> Result<(), WireError> {
 
 fn validate_server_event(event: &ServerEvent) -> Result<(), WireError> {
     validate_all_strings(&serde_json::to_value(event).map_err(WireError::Encode)?)?;
+    match event {
+        ServerEvent::WorkspaceFilesList { list } => validate_workspace_file_list(list)?,
+        ServerEvent::WorkspaceFilesRead { read } => validate_workspace_file_read(read)?,
+        ServerEvent::WorkspaceFilesStat { stat } => validate_workspace_file_stat(stat)?,
+        _ => {}
+    }
     if let ServerEvent::SessionHistoryPage { page } = event {
         validate_history_page(page)?;
+    }
+    Ok(())
+}
+
+fn validate_workspace_file_list(list: &WorkspaceFileList) -> Result<(), WireError> {
+    validate_workspace_path(&list.path)?;
+    validate_identifier("workspace_directory_revision", &list.revision)?;
+    if list.entries.len() > usize::try_from(MAX_WORKSPACE_DIRECTORY_ENTRIES).unwrap_or(usize::MAX) {
+        return Err(WireError::WorkspaceDirectoryLimitInvalid {
+            size: u32::try_from(list.entries.len()).unwrap_or(u32::MAX),
+            limit: MAX_WORKSPACE_DIRECTORY_ENTRIES,
+        });
+    }
+    for entry in &list.entries {
+        validate_workspace_entry_name(&entry.name)?;
+        validate_workspace_path(&entry.path)?;
+        if let Some(revision) = &entry.revision {
+            validate_identifier("workspace_file_revision", revision)?;
+        }
+    }
+    let encoded = serde_json::to_vec(list).map_err(WireError::Encode)?;
+    if encoded.len() > MAX_WORKSPACE_DIRECTORY_RESPONSE_BYTES {
+        return Err(WireError::WorkspaceFileResponseInvalid(
+            "directory response exceeds the bounded payload",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_file_stat(stat: &WorkspaceFileStat) -> Result<(), WireError> {
+    validate_workspace_path(&stat.path)?;
+    if let Some(revision) = &stat.revision {
+        validate_identifier("workspace_file_revision", revision)?;
+    }
+    Ok(())
+}
+
+fn validate_workspace_file_read(read: &WorkspaceFileRead) -> Result<(), WireError> {
+    validate_workspace_path(&read.path)?;
+    validate_identifier("workspace_file_revision", &read.revision)?;
+    if read.bytes_read > MAX_WORKSPACE_FILE_READ_BYTES {
+        return Err(WireError::WorkspaceFileReadLimitInvalid {
+            size: read.bytes_read,
+            limit: MAX_WORKSPACE_FILE_READ_BYTES,
+        });
+    }
+    let decoded = STANDARD
+        .decode(&read.data)
+        .map_err(|_| WireError::WorkspaceFileResponseInvalid("data is not base64"))?;
+    if STANDARD.encode(&decoded) != read.data {
+        return Err(WireError::WorkspaceFileResponseInvalid(
+            "data is not canonical base64",
+        ));
+    }
+    if decoded.len() != usize::try_from(read.bytes_read).unwrap_or(usize::MAX) {
+        return Err(WireError::WorkspaceFileResponseInvalid(
+            "data length does not match bytes_read",
+        ));
+    }
+    if read.offset > read.total_size
+        || read
+            .offset
+            .checked_add(u64::from(read.bytes_read))
+            .is_none_or(|end| end > read.total_size)
+    {
+        return Err(WireError::WorkspaceFileResponseInvalid(
+            "range exceeds total_size",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_workspace_entry_name(name: &str) -> Result<(), WireError> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.as_bytes().contains(&0)
+    {
+        return Err(WireError::InvalidWorkspacePath(
+            "directory entry name is invalid",
+        ));
     }
     Ok(())
 }
@@ -959,6 +1224,52 @@ fn validate_text(field: &'static str, value: &str) -> Result<(), WireError> {
     Ok(())
 }
 
+/// Validates the platform-neutral shape of a workspace-relative path. The
+/// host repeats the check while resolving components because wire validation
+/// cannot prove anything about the local filesystem.
+fn validate_workspace_path(value: &str) -> Result<(), WireError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.len() > MAX_WORKSPACE_PATH_BYTES {
+        return Err(WireError::WorkspacePathTooLarge {
+            size: value.len(),
+            limit: MAX_WORKSPACE_PATH_BYTES,
+        });
+    }
+    if value.as_bytes().contains(&0) {
+        return Err(WireError::InvalidWorkspacePath("contains NUL"));
+    }
+    if value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return Err(WireError::InvalidWorkspacePath(
+            "must use non-empty relative components",
+        ));
+    }
+    if value.contains('\\') {
+        return Err(WireError::InvalidWorkspacePath(
+            "backslash is not a path separator",
+        ));
+    }
+    for component in value.split('/') {
+        if component.is_empty() {
+            return Err(WireError::InvalidWorkspacePath(
+                "contains an empty component",
+            ));
+        }
+        if component == "." {
+            return Err(WireError::InvalidWorkspacePath(
+                "dot components are not allowed",
+            ));
+        }
+        if component == ".." {
+            return Err(WireError::InvalidWorkspacePath(
+                "parent components are not allowed",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_all_strings(value: &Value) -> Result<(), WireError> {
     match value {
         Value::String(text) => validate_text("decoded_string", text),
@@ -971,7 +1282,10 @@ fn validate_all_strings(value: &Value) -> Result<(), WireError> {
 #[cfg(test)]
 mod tests {
     use super::{ClientEnvelope, ClientRequest, ServerEnvelope, ServerEvent};
-    use crate::{MAX_TEXT_FIELD_BYTES, PROTOCOL_MAJOR, WireError};
+    use crate::{
+        MAX_TEXT_FIELD_BYTES, MAX_WORKSPACE_FILE_READ_BYTES, MAX_WORKSPACE_PATH_BYTES,
+        PROTOCOL_MAJOR, WORKSPACE_FILES_CAPABILITY, WireError,
+    };
 
     #[test]
     fn session_create_accepts_an_omitted_or_empty_name() {
@@ -1198,6 +1512,117 @@ mod tests {
                 br#"{"protocol":1,"request_id":3,"type":"host.snapshot","capabilities":["bad capability!"]}"#
             ),
             Err(WireError::InvalidCapability(_))
+        ));
+        assert!(crate::is_valid_capability(WORKSPACE_FILES_CAPABILITY));
+    }
+
+    #[test]
+    fn workspace_file_requests_use_a_distinct_namespace_and_enforce_bounds() {
+        let workspace_id = "4cc891bc-30b9-4b5f-9298-38471d9b27ea"
+            .parse()
+            .expect("workspace id");
+        let request = ClientEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: 21,
+            request: ClientRequest::WorkspaceFilesList {
+                workspace_id,
+                path: "src/lib.rs".to_owned(),
+                limit: Some(1_000),
+            },
+        };
+        let encoded = request.encode().expect("encode file list");
+        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+        assert_eq!(value["type"], "workspace.files.list");
+        assert_eq!(ClientEnvelope::decode(&encoded).expect("decode"), request);
+
+        let read = ClientEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: 22,
+            request: ClientRequest::WorkspaceFilesRead {
+                workspace_id,
+                path: "src/lib.rs".to_owned(),
+                offset: 262_144,
+                limit: MAX_WORKSPACE_FILE_READ_BYTES,
+                expected_revision: Some("opaque-revision".to_owned()),
+            },
+        };
+        assert_eq!(
+            ClientEnvelope::decode(&read.encode().expect("encode read")).expect("decode read"),
+            read
+        );
+
+        for path in ["../secret", "/tmp/secret", "src//lib.rs", "src\\lib.rs"] {
+            let request = serde_json::json!({
+                "protocol": 1,
+                "request_id": 23,
+                "type": "workspace.files.stat",
+                "workspace_id": workspace_id,
+                "path": path,
+            });
+            let request = serde_json::to_vec(&request).expect("encode invalid path");
+            assert!(matches!(
+                ClientEnvelope::decode(&request),
+                Err(WireError::InvalidWorkspacePath(_))
+            ));
+        }
+        let oversized = format!(
+            r#"{{"protocol":1,"request_id":24,"type":"workspace.files.read","workspace_id":"{workspace_id}","path":"src/lib.rs","offset":0,"limit":{}}}"#,
+            MAX_WORKSPACE_FILE_READ_BYTES + 1
+        );
+        assert!(matches!(
+            ClientEnvelope::decode(oversized.as_bytes()),
+            Err(WireError::WorkspaceFileReadLimitInvalid { .. })
+        ));
+
+        let oversized_path = "x".repeat(MAX_WORKSPACE_PATH_BYTES + 1);
+        let request = serde_json::json!({
+            "protocol": 1,
+            "request_id": 25,
+            "type": "workspace.files.stat",
+            "workspace_id": workspace_id,
+            "path": oversized_path,
+        });
+        assert!(matches!(
+            ClientEnvelope::decode(&serde_json::to_vec(&request).expect("encode long path")),
+            Err(WireError::WorkspacePathTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn workspace_file_results_round_trip_flattened_fields() {
+        let workspace_id = "4cc891bc-30b9-4b5f-9298-38471d9b27ea"
+            .parse()
+            .expect("workspace id");
+        let event = ServerEnvelope {
+            protocol: PROTOCOL_MAJOR,
+            request_id: Some(25),
+            event: ServerEvent::WorkspaceFilesRead {
+                read: super::WorkspaceFileRead {
+                    workspace_id,
+                    path: "README.md".to_owned(),
+                    offset: 0,
+                    bytes_read: 5,
+                    total_size: 5,
+                    eof: true,
+                    kind: super::WorkspaceFileContentKind::Text,
+                    data: "aGVsbG8=".to_owned(),
+                    encoding: super::WorkspaceFileEncoding::Utf8,
+                    language: Some("markdown".to_owned()),
+                    revision: "opaque-revision".to_owned(),
+                },
+            },
+        };
+        let encoded = event.encode().expect("encode file read");
+        let value: serde_json::Value = serde_json::from_slice(&encoded).expect("json");
+        assert_eq!(value["type"], "workspace.files.read");
+        assert!(value.get("read").is_none());
+        assert_eq!(ServerEnvelope::decode(&encoded).expect("decode"), event);
+
+        let mut malformed = value;
+        malformed["data"] = serde_json::Value::String("aGVsbG8".to_owned());
+        assert!(matches!(
+            ServerEnvelope::decode(&serde_json::to_vec(&malformed).expect("encode malformed")),
+            Err(WireError::WorkspaceFileResponseInvalid(_))
         ));
     }
 
