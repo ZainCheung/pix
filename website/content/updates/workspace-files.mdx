@@ -1,0 +1,39 @@
+---
+title: Browse Authorized Workspace Files from iPhone
+description: List and read files inside a folder you already authorized, without starting Pi.
+date: '2026-09-05'
+updated: '2026-09-05'
+version: Pix 0.1.3
+platform: iPhone client · macOS and Linux host
+status: Released in Pix 0.1.3
+releaseStatus: published
+order: 1
+---
+
+Pix can now list and read files inside a workspace you already authorized on
+the host.
+
+The phone talks to Pix Host, not to an arbitrary folder on disk. An empty path
+is the workspace root. Absolute paths, parent traversal, and symlink following
+are rejected.
+
+## What this is for
+
+Open a file while composing a prompt, even if Pi is stopped or a session has
+not been created yet. File access uses the workspace you authorized, not the
+session currently on screen.
+
+```text
+iPhone  ──►  Pix Host  ──►  authorized workspace
+                              list · stat · bounded read
+```
+
+## What stays out of scope
+
+Pix still does not browse the rest of the machine. Symlinks can appear in a
+directory listing for context, but they cannot be opened or used to leave the
+workspace. Writes, deletes, and host-wide filesystem search are not part of
+this release.
+
+[Authorize a workspace](/docs/workspaces) or [read how Pix keeps the host
+boundary](/docs/architecture).
