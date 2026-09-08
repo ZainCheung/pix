@@ -71,7 +71,7 @@ interaction is unavailable.
 
 ## Automatic updates
 
-Release builds include Sparkle 2.9.4 in `Pix.app/Contents/Frameworks`. Pix
+Release builds include Sparkle 2.9.6 in `Pix.app/Contents/Frameworks`. Pix
 checks `https://pix.deepoke.com/appcast.xml` automatically and exposes
 **Check for Updates…** in the menu bar and Settings → General. Sparkle's
 standard update window verifies the EdDSA signature, replaces the complete app

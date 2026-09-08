@@ -48,8 +48,10 @@ jobs:
           import sys
 
           tag = sys.argv[1]
-          if not re.fullmatch(r"v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", tag):
-              raise SystemExit(f"invalid release tag: {tag}")
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise SystemExit(
+                  f"invalid release tag (stable vX.Y.Z required): {tag}"
+              )
           PY
 
           version="$(scripts/version.sh)"
@@ -307,6 +309,12 @@ jobs:
           [ "$(plutil -extract SUFeedURL raw -o - "$info_plist")" = "https://pix.deepoke.com/appcast.xml" ]
           public_key="$(plutil -extract SUPublicEDKey raw -o - "$info_plist")"
           [ -n "$public_key" ]
+          downloader_xpc="$unpack_dir/Pix.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+          [ -d "$downloader_xpc" ]
+          downloader_entitlements="$RUNNER_TEMP/pix-downloader-entitlements.plist"
+          codesign -d --entitlements :- "$downloader_xpc" \
+            > "$downloader_entitlements" 2>/dev/null
+          plutil -lint "$downloader_entitlements"
           packaging/macos/verify-release.sh "$unpack_dir/Pix.app"
           xcrun stapler validate "$unpack_dir/Pix.app"
 
@@ -400,8 +408,8 @@ jobs:
           path: dist
       - name: Install pinned Sparkle release tools
         env:
-          SPARKLE_VERSION: 2.9.4
-          SPARKLE_SHA256: ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9
+          SPARKLE_VERSION: 2.9.6
+          SPARKLE_SHA256: 52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192
         run: |
           set -euo pipefail
           sparkle_archive="$RUNNER_TEMP/Sparkle-$SPARKLE_VERSION.tar.xz"
@@ -416,7 +424,7 @@ jobs:
           printf 'SPARKLE_GENERATE_APPCAST=%s\n' "$sparkle_root/bin/generate_appcast" >> "$GITHUB_ENV"
       - name: Verify Sparkle private key matches the app public key
         env:
-          SPARKLE_VERSION: 2.9.4
+          SPARKLE_VERSION: 2.9.6
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           EXPECTED_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
         run: |

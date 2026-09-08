@@ -34,6 +34,20 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
     if !no_start {
         if manager_active && (definition_changed || control_upgrade_required) {
             run_systemctl(&["restart", UNIT_NAME])?;
+        } else if !manager_active
+            && (definition_changed || control_upgrade_required)
+            && host_running
+        {
+            // A host started outside systemd can keep serving the old binary
+            // after an installer replaces it. Stop that instance before
+            // starting the newly adopted user unit.
+            let _ = request_graceful_shutdown(store)?;
+            if crate::status::HostServiceStatus::current(store.path()).is_some() {
+                bail!(
+                    "the previous Pix host is still shutting down; retry `pix service install --adopt`"
+                );
+            }
+            run_systemctl(&["start", UNIT_NAME])?;
         } else if !manager_active && !host_running {
             run_systemctl(&["start", UNIT_NAME])?;
         }
@@ -49,6 +63,19 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
         }
     }
     Ok(path)
+}
+
+fn request_graceful_shutdown(store: &ConfigStore) -> Result<bool> {
+    if !crate::status::request_control_command(store.path(), "quit")? {
+        return Ok(false);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while crate::status::HostServiceStatus::current(store.path()).is_some()
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Ok(true)
 }
 
 pub(crate) fn start(store: &ConfigStore, announce: bool) -> Result<()> {

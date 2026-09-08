@@ -85,9 +85,10 @@ executable with its version. `pix logs` prints payload-free host log entries;
 use `pix service logs` for the same log through the service subcommand.
 
 `pix update` upgrades a standalone executable from the repository's latest
-GitHub release. On macOS, the menu-bar app's Sparkle **Check for Updates…**
-action is the preferred path because it replaces the GUI and embedded CLI as
-one signed bundle; the CLI command remains useful for headless installations.
+GitHub release. On macOS, the command only points to the menu-bar app's
+Sparkle **Check for Updates…** action; Sparkle replaces the GUI and embedded CLI
+as one signed bundle. The standalone CLI updater remains available for Linux
+headless installations.
 On a configured host, `pix setup` runs a health verification directly; relay
 settings live in `pix relay` (the home screen's Settings entry).
 

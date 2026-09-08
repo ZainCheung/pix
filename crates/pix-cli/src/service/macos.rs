@@ -37,13 +37,31 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
         host_running && crate::service_client::verify_control_compatibility(store).is_err();
     if launchctl_is_loaded()? {
         if !no_start && (definition_changed || control_upgrade_required) {
+            // Ask the old host to flush and close its sockets before
+            // bootout. This matters after Sparkle replaces the app bundle:
+            // the LaunchAgent path is unchanged, but its already-running
+            // process still has the previous Pix version in memory.
+            let _ = request_graceful_shutdown(store)?;
             run_launchctl(&["bootout", &launchctl_target()?])?;
             bootstrap_launch_agent(&plist_path)?;
         } else if !no_start && !host_running {
             run_launchctl(&["kickstart", "-k", &launchctl_target()?])?;
         }
-    } else if !no_start && !host_running {
-        bootstrap_launch_agent(&plist_path)?;
+    } else if !no_start {
+        if control_upgrade_required {
+            // A manually launched legacy host may exist while the LaunchAgent
+            // is unloaded. Stop it through the same private control command
+            // before starting the newly adopted LaunchAgent.
+            let _ = request_graceful_shutdown(store)?;
+            if crate::status::HostServiceStatus::current(store.path()).is_some() {
+                bail!(
+                    "the previous Pix host is still shutting down; retry `pix service install --adopt`"
+                );
+            }
+        }
+        if !host_running || control_upgrade_required {
+            bootstrap_launch_agent(&plist_path)?;
+        }
     }
     if announce {
         println!("Installed Pix LaunchAgent ({}).", plist_path.display());

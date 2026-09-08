@@ -31,7 +31,17 @@ fi
     printf '%s\n' "VERSION is required" >&2
     exit 64
 }
+case "$VERSION" in
+    *[-+]*)
+        printf '%s\n' "Sparkle appcast generation currently supports stable releases only: $VERSION" >&2
+        exit 64
+        ;;
+esac
 [ -n "$TAG" ] || TAG="v$VERSION"
+[ "$TAG" = "v$VERSION" ] || {
+    printf '%s\n' "TAG must match the stable workspace version (v$VERSION): $TAG" >&2
+    exit 64
+}
 [ -n "$RELEASE_DIR" ] || {
     printf '%s\n' "RELEASE_DIR is required" >&2
     exit 64

@@ -38,6 +38,7 @@ elif [ -z "${PIX_HOMEBREW_TAP:-}" ]; then
         'cask "pix"' \
         'version "' \
         'sha256 "' \
+        'auto_updates true' \
         'url "https://' \
         'app "Pix.app"' \
         'binary "#{appdir}/Pix.app/Contents/Resources/pix"'; do

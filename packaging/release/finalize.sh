@@ -61,7 +61,7 @@ metadata = json.loads(
 
 sparkle_package = {
     "name": "Sparkle",
-    "version": "2.9.4",
+    "version": "2.9.6",
     "license": "MIT",
     "repository": "https://github.com/sparkle-project/Sparkle",
 }

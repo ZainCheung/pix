@@ -13,18 +13,31 @@ import Sparkle
 final class UpdateController {
     @ObservationIgnored
     let updaterController: SPUStandardUpdaterController
+    @ObservationIgnored
+    private var canCheckForUpdatesObservation: NSKeyValueObservation?
+
+    /// Stored so Swift Observation can invalidate views when Sparkle's KVO
+    /// property changes. Reading the property through a computed accessor
+    /// would not create an Observation dependency on the KVO publisher.
+    private(set) var canCheckForUpdates: Bool
 
     init() {
-        updaterController = SPUStandardUpdaterController(
+        let controller = SPUStandardUpdaterController(
             startingUpdater: true,
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
-    }
-
-    /// Whether Sparkle can start an interactive update check right now.
-    var canCheckForUpdates: Bool {
-        updaterController.updater.canCheckForUpdates
+        updaterController = controller
+        canCheckForUpdates = controller.updater.canCheckForUpdates
+        canCheckForUpdatesObservation = nil
+        canCheckForUpdatesObservation = controller.updater.observe(
+            \.canCheckForUpdates,
+            options: [.initial, .new]
+        ) { [weak self] updater, _ in
+            Task { @MainActor [weak self] in
+                self?.canCheckForUpdates = updater.canCheckForUpdates
+            }
+        }
     }
 
     /// Mirrors Sparkle's persisted automatic-check preference. The initial

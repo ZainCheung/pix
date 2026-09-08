@@ -36,7 +36,10 @@ pix service start
 ```
 
 `status` reports the service manager, whether the unit is installed and active,
-the owning executable, and the host process when it is running.
+the owning executable, and the host process (including its running Pix version)
+when it is running. Starting or adopting a service after a Pix app update
+automatically restarts a still-running host whose version differs from the
+current CLI.
 
 ## Start, stop, and restart
 

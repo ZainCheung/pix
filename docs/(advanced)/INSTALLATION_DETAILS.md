@@ -64,17 +64,16 @@ Build the public macOS menu-bar client from the
 
 ## Updating
 
-For a released installer or app installation, update in place with:
+For a released Linux CLI installation, update in place with:
 
 ```sh
 pix update
 ```
 
-The command downloads the matching latest release asset and replaces the
-running CLI. On macOS it also updates `~/Applications/Pix.app` when the app
-bundle is available. If a host service is running, restart it after the update
-so the service uses the new executable. A source build should be rebuilt with
-Cargo instead.
+The command downloads the matching latest Linux release asset and replaces the
+running CLI. macOS app installations update through Sparkle's **Check for
+Updates…** action so the signed GUI bundle and embedded CLI stay together. A
+source build should be rebuilt with Cargo instead.
 
 ## Background service
 

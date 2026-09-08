@@ -1,27 +1,52 @@
-//! Self-update from the repository's GitHub releases.
-//!
-//! The update path mirrors `website/public/install.sh`: resolve the latest
-//! release, download the platform archive, and replace the running
-//! executable (plus the macOS app bundle) in place. `curl` does the
-//! transport so no new dependency enters the CLI.
+//! Self-update for headless Pix installations from the repository's GitHub
+//! releases. The macOS menu-bar application is intentionally excluded: its
+//! signed bundle must be updated by Sparkle so the GUI, embedded CLI, and
+//! installer lifecycle use one security path.
 
+#[cfg(not(target_os = "macos"))]
 use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "macos"))]
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "macos"))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(not(target_os = "macos"))]
+use anyhow::bail;
 use pix_core::ConfigStore;
 
 use crate::output::CommandOutput;
 
+#[cfg(not(target_os = "macos"))]
 const REPOSITORY: &str = "ZainCheung/pix";
+#[cfg(not(target_os = "macos"))]
 const RELEASE_API: &str = "https://api.github.com/repos/ZainCheung/pix/releases/latest";
 
+#[cfg(not(target_os = "macos"))]
 struct Release {
     tag: String,
     asset_url: String,
     asset_name: String,
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn update(_store: &ConfigStore, output: CommandOutput) -> Result<()> {
+    const MESSAGE: &str = "Pix on macOS is updated through the Pix app. Use ‘Check for Updates…’ from the menu bar or Settings.";
+    if output.is_json() {
+        return output.success(
+            "update",
+            &serde_json::json!({
+                "updated": false,
+                "managed_by": "sparkle",
+                "message": MESSAGE,
+            }),
+        );
+    }
+    println!("{MESSAGE}");
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn update(store: &ConfigStore, output: CommandOutput) -> Result<()> {
     let current = env!("CARGO_PKG_VERSION");
     let release = latest_release()?;
@@ -71,6 +96,7 @@ pub(crate) fn update(store: &ConfigStore, output: CommandOutput) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn latest_release() -> Result<Release> {
     let body = run_curl(
         &[
@@ -123,26 +149,35 @@ fn latest_release() -> Result<Release> {
 /// Resolves the latest release tag with tight timeouts; any failure means
 /// "no hint". Used by the home screen's silent update check.
 pub(crate) fn latest_version() -> Option<String> {
-    let body = run_curl(
-        &[
-            "-fsSL",
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "3",
-            RELEASE_API,
-        ],
-        "checking the latest Pix release",
-    )
-    .ok()?;
-    let payload: serde_json::Value = serde_json::from_str(&body).ok()?;
-    let tag = payload
-        .get("tag_name")
-        .and_then(serde_json::Value::as_str)?
-        .to_owned();
-    Some(tag.strip_prefix('v').unwrap_or(&tag).to_owned())
+    #[cfg(target_os = "macos")]
+    {
+        None
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let body = run_curl(
+            &[
+                "-fsSL",
+                "--connect-timeout",
+                "2",
+                "--max-time",
+                "3",
+                RELEASE_API,
+            ],
+            "checking the latest Pix release",
+        )
+        .ok()?;
+        let payload: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let tag = payload
+            .get("tag_name")
+            .and_then(serde_json::Value::as_str)?
+            .to_owned();
+        Some(tag.strip_prefix('v').unwrap_or(&tag).to_owned())
+    }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn asset_suffix() -> Result<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("macos-arm64.zip".to_owned()),
@@ -157,6 +192,7 @@ fn asset_suffix() -> Result<String> {
 /// The update replaces the executable that is actually running so dev
 /// checkouts and custom install locations keep working. Cargo target
 /// directories are refused: a `cargo build` overwrites them anyway.
+#[cfg(not(target_os = "macos"))]
 fn install_target() -> Result<PathBuf> {
     let executable = std::env::current_exe().context("locating the running pix executable")?;
     let text = executable.display().to_string();
@@ -168,6 +204,7 @@ fn install_target() -> Result<PathBuf> {
     Ok(executable)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn download_and_install(release: &Release, executable: &Path, quiet: bool) -> Result<()> {
     let staging = tempfile::tempdir().context("creating the Pix update staging directory")?;
     let archive = staging.path().join(&release.asset_name);
@@ -185,24 +222,10 @@ fn download_and_install(release: &Release, executable: &Path, quiet: bool) -> Re
     run_curl_to_terminal(&arguments, "downloading the Pix release archive")?;
 
     let extracted = extract_cli(&archive, staging.path())?;
-    let app_bundle = staging.path().join("unpacked").join("Pix.app");
-    if app_bundle.is_dir() {
-        // The release archive contains the canonical GUI app and its embedded
-        // CLI. When this command is invoked through the app's CLI (including
-        // the install.sh shim), replace that bundle in its original location
-        // and let the next launch pick up both components together.
-        if let Some(current_app) = app_bundle_for_executable(executable) {
-            install_app_bundle(&app_bundle, &current_app)?;
-            return Ok(());
-        }
-
-        if let Some(home) = crate::commands::shared::home_directory() {
-            install_app_bundle(&app_bundle, &home.join("Applications").join("Pix.app"))?;
-        }
-    }
     replace_executable(&extracted, executable)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn extract_cli(archive: &Path, staging: &Path) -> Result<PathBuf> {
     let name = archive.display().to_string();
     if name.to_ascii_lowercase().ends_with(".zip") {
@@ -232,6 +255,7 @@ fn extract_cli(archive: &Path, staging: &Path) -> Result<PathBuf> {
     Ok(extracted)
 }
 
+#[cfg(not(target_os = "macos"))]
 fn walk_for_pix(directory: &Path) -> Result<PathBuf> {
     fn visit(path: &Path, found: &mut Option<PathBuf>) {
         if found.is_some() {
@@ -258,45 +282,7 @@ fn walk_for_pix(directory: &Path) -> Result<PathBuf> {
     found.context("the release archive did not contain the Pix CLI")
 }
 
-fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
-    let resources = executable.parent()?;
-    if resources.file_name()? != "Resources" {
-        return None;
-    }
-    let contents = resources.parent()?;
-    if contents.file_name()? != "Contents" {
-        return None;
-    }
-    let bundle = contents.parent()?;
-    if bundle.extension()? != "app" || bundle.file_name()? != "Pix.app" {
-        return None;
-    }
-    Some(bundle.to_path_buf())
-}
-
-fn install_app_bundle(bundle: &Path, destination: &Path) -> Result<()> {
-    let parent = destination
-        .parent()
-        .context("the Pix app destination has no parent directory")?;
-    std::fs::create_dir_all(parent)?;
-    if destination.is_dir() && std::fs::remove_dir_all(destination).is_err() {
-        println!("Pix.app is in use; the app bundle was not replaced.");
-        return Ok(());
-    }
-    let status = Command::new("cp")
-        .args([
-            "-R",
-            &bundle.display().to_string(),
-            &destination.display().to_string(),
-        ])
-        .status()
-        .context("copying the Pix app bundle")?;
-    if status.success() {
-        println!("Updated Pix.app at {}.", destination.display());
-    }
-    Ok(())
-}
-
+#[cfg(not(target_os = "macos"))]
 fn replace_executable(new_binary: &Path, executable: &Path) -> Result<()> {
     let staged = executable.with_extension("pix-new");
     std::fs::copy(new_binary, &staged).context("staging the new pix executable")?;
@@ -305,7 +291,7 @@ fn replace_executable(new_binary: &Path, executable: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(not(target_os = "macos"), unix))]
 fn set_executable(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut permissions = std::fs::metadata(path)?.permissions();
@@ -314,11 +300,12 @@ fn set_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(target_os = "macos"), not(unix)))]
 fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run_curl(arguments: &[&str], what: &str) -> Result<String> {
     let output = Command::new("curl")
         .args(arguments)
@@ -331,6 +318,7 @@ fn run_curl(arguments: &[&str], what: &str) -> Result<String> {
 }
 
 /// Downloads inherit the terminal so curl's progress bar stays visible.
+#[cfg(not(target_os = "macos"))]
 fn run_curl_to_terminal(arguments: &[&str], what: &str) -> Result<()> {
     let status = Command::new("curl")
         .args(arguments)
@@ -342,6 +330,7 @@ fn run_curl_to_terminal(arguments: &[&str], what: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn run_command(program: &str, arguments: &[&str], what: &str) -> Result<()> {
     let status = Command::new(program)
         .args(arguments)
@@ -353,11 +342,9 @@ fn run_command(program: &str, arguments: &[&str], what: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 mod tests {
-    use std::path::Path;
-
-    use super::{app_bundle_for_executable, asset_suffix};
+    use super::asset_suffix;
 
     #[test]
     fn release_assets_match_the_installer_contract() {
@@ -369,19 +356,5 @@ mod tests {
             ("linux", "aarch64") => assert_eq!(suffix, "aarch64-unknown-linux-gnu.tar.gz"),
             _ => {}
         }
-    }
-
-    #[test]
-    fn embedded_cli_resolves_its_containing_app_bundle() {
-        assert_eq!(
-            app_bundle_for_executable(Path::new(
-                "/Users/test/Applications/Pix.app/Contents/Resources/pix"
-            )),
-            Some(Path::new("/Users/test/Applications/Pix.app").to_path_buf())
-        );
-        assert_eq!(
-            app_bundle_for_executable(Path::new("/Users/test/.local/bin/pix")),
-            None
-        );
     }
 }

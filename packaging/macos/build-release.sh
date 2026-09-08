@@ -146,13 +146,21 @@ if [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ]; then
     for nested_code in \
         "$sparkle_framework/Versions/B/Autoupdate" \
         "$sparkle_framework/Versions/B/Updater.app" \
-        "$sparkle_framework/Versions/B/XPCServices/Downloader.xpc" \
         "$sparkle_framework/Versions/B/XPCServices/Installer.xpc"; do
         if [ -e "$nested_code" ]; then
             codesign --force --options runtime --timestamp \
                 --sign "$MACOS_CODE_SIGN_IDENTITY" "$nested_code"
         fi
     done
+    downloader_xpc="$sparkle_framework/Versions/B/XPCServices/Downloader.xpc"
+    if [ -e "$downloader_xpc" ]; then
+        # Sparkle >= 2.6 may ship Downloader.xpc with its own entitlement
+        # set. Preserve it while replacing the ad-hoc signature with the
+        # product's Developer ID signature.
+        codesign --force --options runtime --timestamp \
+            --preserve-metadata=entitlements \
+            --sign "$MACOS_CODE_SIGN_IDENTITY" "$downloader_xpc"
+    fi
     codesign --force --options runtime --timestamp \
         --sign "$MACOS_CODE_SIGN_IDENTITY" "$sparkle_framework"
 

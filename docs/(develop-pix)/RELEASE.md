@@ -18,6 +18,9 @@ for example, `0.6.0-beta.1`, `0.6.0-beta.2`, and `0.6.0` become `60001`,
 `60002`, and `60099`. This keeps Sparkle's machine comparison monotonic while
 leaving the user-facing `CFBundleShortVersionString` unchanged.
 
+The v1 release workflow accepts stable tags only (`vX.Y.Z`). Prerelease tags and
+Sparkle beta channels will be added together in a later release-channel design.
+
 The wire protocol version and Relay deployment revision are independent of the
 product version. A product release does not deploy the Relay.
 
@@ -79,7 +82,11 @@ published `appcast.xml` is uploaded as a release asset; the website serves the
 current asset at `https://pix.deepoke.com/appcast.xml`, while the enclosure URL
 continues to point at the GitHub Release ZIP. Sparkle is configured for
 automatic checks with user-confirmed installation, so `SUAutomaticallyUpdate`
-is intentionally not enabled.
+is intentionally not enabled. The website's empty-feed response is limited to
+the pre-first-release 404 bootstrap; invalid appcasts and later GitHub failures
+return HTTP errors so a manual check reports the feed outage.
+The first Sparkle-enabled release must be installed over older non-Sparkle
+builds manually; Sparkle can update users only after that bootstrap release.
 
 ### Sparkle signing key
 
@@ -105,6 +112,8 @@ renders `Casks/pix.rb`, runs Homebrew Cask validation, and opens a pull request
 against this repository. The Cask installs `Pix.app` and links the bundled
 `pix` executable into Homebrew's `bin` directory. It never removes Pix Host
 configuration, Keychain identity, authorized workspaces, or Pi session files.
+It declares `auto_updates true` so Homebrew does not treat a Sparkle-updated
+bundle as stale and downgrade it on the next Cask operation.
 
 The first-party Cask is generated only after the release asset passes the
 Developer ID/notarization gate. The current release workflow publishes arm64

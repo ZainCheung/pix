@@ -43,6 +43,7 @@ cat > "$temporary" <<EOF
 cask "pix" do
   version "$version"
   sha256 "$sha256"
+  auto_updates true
 
   url "$url"
   name "Pix"
