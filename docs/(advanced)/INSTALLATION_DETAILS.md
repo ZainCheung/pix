@@ -89,6 +89,8 @@ Stop and remove the service first:
 pix service uninstall
 ```
 
-Then remove the installed CLI and, on macOS, `~/Applications/Pix.app`. The
-service command does not delete host configuration or Pi data. Check the path
-shown by `pix status` before removing the Pix configuration directory.
+Then remove the installed CLI and, on macOS, the `Pix.app` bundle at the path
+reported by the installer (`/Applications/Pix.app` or `~/Applications/Pix.app`).
+If `PIX_APP_PATH` was used, remove that explicitly selected bundle instead.
+The service command does not delete host configuration or Pi data. Check the
+path shown by `pix status` before removing the Pix configuration directory.

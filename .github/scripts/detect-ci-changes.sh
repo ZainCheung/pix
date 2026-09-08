@@ -113,6 +113,9 @@ while IFS= read -r path; do
         packaging/macos/*|packaging/release/*|scripts/*)
             mark_all
             ;;
+        website/public/install.sh)
+            macos=true
+            ;;
         docs/*|website/*|README.md|CONTRIBUTING.md|SECURITY.md|THIRD_PARTY_NOTICES.md|LICENSE|AGENTS.md|Casks/*)
             ;;
         *)
