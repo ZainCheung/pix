@@ -17,12 +17,12 @@ fn fake_pi_script() -> (tempfile::TempDir, std::path::PathBuf) {
     fs::write(
         &path,
         r#"#!/bin/sh
-printf '%s\n' '{"type":"extension_ui_request","id":"status-1","method":"setStatus","statusKey":"fake","statusText":"ready"}'
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p')
   type=$(printf '%s' "$line" | sed -n 's/.*"type":"\([^"]*\)".*/\1/p')
   case "$type" in
     get_state)
+      printf '%s\n' '{"type":"extension_ui_request","id":"status-1","method":"setStatus","statusKey":"fake","statusText":"ready"}'
       printf '%s\n' "{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"before after\"}}"
       printf '%s\n' "{\"id\":\"$id\",\"type\":\"response\",\"command\":\"get_state\",\"success\":true,\"data\":{\"sessionId\":\"fake-session\",\"sessionName\":\"Fake session\",\"model\":{\"provider\":\"fake\",\"id\":\"model\"},\"thinkingLevel\":\"medium\",\"isStreaming\":false,\"isCompacting\":false,\"pendingMessageCount\":0}}"
       ;;
