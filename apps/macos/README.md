@@ -72,12 +72,17 @@ interaction is unavailable.
 ## Automatic updates
 
 Release builds include Sparkle 2.9.6 in `Pix.app/Contents/Frameworks`. Pix
-checks `https://pix.deepoke.com/appcast.xml` automatically and exposes
-**Check for Updates…** in the menu bar and Settings → General. Sparkle's
-standard update window verifies the EdDSA signature, replaces the complete app
-bundle in its original location, and relaunches Pix; automatic installation is
-off by default. The embedded `pix` CLI therefore updates atomically with the
-menu-bar app.
+checks the GitHub Releases feed at
+`https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml`
+automatically and exposes **Check for Updates…** in the menu bar and Settings →
+General. Sparkle's standard update window verifies the EdDSA signature,
+replaces the complete app bundle in its original location, and relaunches Pix;
+automatic installation is off by default. The embedded `pix` CLI therefore
+updates atomically with the menu-bar app.
+
+The former `https://pix.deepoke.com/appcast.xml` endpoint remains only as a
+temporary HTTP 302 compatibility redirect for the v0.1.4 bootstrap build while
+the v0.1.5 Sparkle end-to-end update is validated.
 
 The public EdDSA key is in `Pix/Info.plist`. The matching private key must stay
 outside the repository and be configured as the GitHub Actions environment

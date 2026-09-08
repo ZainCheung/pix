@@ -306,7 +306,7 @@ jobs:
           build_version="$(plutil -extract CFBundleVersion raw -o - "$info_plist")"
           [ "$short_version" = "$EXPECTED_VERSION" ]
           [ "$build_version" = "$EXPECTED_BUILD_VERSION" ]
-          [ "$(plutil -extract SUFeedURL raw -o - "$info_plist")" = "https://pix.deepoke.com/appcast.xml" ]
+          [ "$(plutil -extract SUFeedURL raw -o - "$info_plist")" = "https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml" ]
           public_key="$(plutil -extract SUPublicEDKey raw -o - "$info_plist")"
           [ -n "$public_key" ]
           downloader_xpc="$unpack_dir/Pix.app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
@@ -460,7 +460,7 @@ jobs:
           TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_DIR: dist
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
-          APPCAST_URL: https://pix.deepoke.com/appcast.xml
+          APPCAST_URL: https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml
         run: packaging/macos/generate-appcast.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

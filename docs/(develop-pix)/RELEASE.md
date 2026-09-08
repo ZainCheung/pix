@@ -78,13 +78,15 @@ is a static XCFramework artifact and does not participate in Developer ID
 notarization.
 
 The macOS archive is also signed for Sparkle with the Pix EdDSA key. The
-published `appcast.xml` is uploaded as a release asset; the website serves the
-current asset at `https://pix.deepoke.com/appcast.xml`, while the enclosure URL
-continues to point at the GitHub Release ZIP. Sparkle is configured for
-automatic checks with user-confirmed installation, so `SUAutomaticallyUpdate`
-is intentionally not enabled. The website's empty-feed response is limited to
-the pre-first-release 404 bootstrap; invalid appcasts and later GitHub failures
-return HTTP errors so a manual check reports the feed outage.
+published `appcast.xml` is uploaded as a release asset, and v0.1.5+ builds read
+it directly from
+`https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml`; the
+enclosure URL continues to point at the GitHub Release ZIP. Sparkle is
+configured for automatic checks with user-confirmed installation, so
+`SUAutomaticallyUpdate` is intentionally not enabled. The former website URL
+`https://pix.deepoke.com/appcast.xml` is retained only as a temporary HTTP 302
+compatibility redirect for the v0.1.4 bootstrap build while the next Sparkle
+end-to-end update is validated.
 The first Sparkle-enabled release must be installed over older non-Sparkle
 builds manually; Sparkle can update users only after that bootstrap release.
 
