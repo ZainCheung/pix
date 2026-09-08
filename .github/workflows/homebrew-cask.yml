@@ -37,13 +37,16 @@ jobs:
         run: |
           set -eu
           tag="${INPUT_TAG:-$EVENT_TAG}"
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *)
-              printf '%s\n' "Expected a release tag such as v0.1.0, got: $tag" >&2
-              exit 1
-              ;;
-          esac
+          python3 - "$tag" <<'PY'
+          import re
+          import sys
+
+          tag = sys.argv[1]
+          if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+              raise SystemExit(
+                  f"Expected a stable release tag such as v0.1.0, got: {tag}"
+              )
+          PY
           version="${tag#v}"
           {
             printf 'tag=%s\n' "$tag"

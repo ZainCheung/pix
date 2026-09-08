@@ -757,6 +757,7 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
                         serde_json::json!({
                             "type": "capabilities",
                             "control_schema_version": 1,
+                            "pix_version": env!("CARGO_PKG_VERSION"),
                         }),
                         &log,
                     );

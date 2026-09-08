@@ -123,7 +123,8 @@ enum Command {
     },
     /// Show configuration and host-service runtime status.
     Status,
-    /// Update the pix executable from the latest GitHub release.
+    /// Update a standalone pix executable from the latest GitHub release.
+    /// The macOS menu-bar app should use Sparkle's Check for Updates action.
     Update,
     /// Install, control, and inspect the platform user service.
     Service {

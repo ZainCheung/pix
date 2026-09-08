@@ -29,7 +29,17 @@ file supplies its own publication date, release stage (`published` or
 
 The static `public/install.sh` is served at `/install.sh` by the website
 deployment. It resolves the latest GitHub Release at install time and falls
-back to the GitHub Releases page whenever a platform asset is unavailable.
+back to the GitHub Releases page whenever a platform asset is unavailable. On
+macOS it extracts and installs the signed app with `ditto`, uses an existing
+`/Applications/Pix.app` in preference to creating a user-level copy, and
+refuses to choose when both standard app locations exist; `PIX_APP_PATH` can
+select a destination explicitly.
+The `/appcast.xml` endpoint proxies the `appcast.xml` asset from the latest
+GitHub Release (and serves a valid empty feed only while that asset has not
+been published yet), so Pix can keep a stable update-feed URL without storing
+release archives on the website. Non-bootstrap invalid responses and upstream
+outages return HTTP errors so Sparkle reports a failed check instead of
+silently hiding an available update.
 
 ## Production deploys
 

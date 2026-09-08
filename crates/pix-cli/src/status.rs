@@ -861,9 +861,15 @@ pub(crate) fn legacy_status_command(store: &ConfigStore, overview: &HostOverview
     }
 
     if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
+        let version_suffix = overview
+            .service
+            .pix_version
+            .as_deref()
+            .map(|version| format!(", Pix {version}"))
+            .unwrap_or_default();
         println!(
-            "  service: running (pid {}, port {}, started_at {})",
-            current.pid, current.port, current.started_at
+            "  service: running (pid {}, port {}, started_at {}{})",
+            current.pid, current.port, current.started_at, version_suffix
         );
     } else {
         let installed = service::managed_service_installed(store).unwrap_or(false);

@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct PixMacApp: App {
     @State private var model: HostModel
+    @State private var updateController: UpdateController
 
     init() {
         // Menu-style MenuBarExtra content only exists while the menu is
@@ -14,12 +15,18 @@ struct PixMacApp: App {
             return host
         }
         _model = State(initialValue: model)
+
+        let updateController = MainActor.assumeIsolated {
+            UpdateController()
+        }
+        _updateController = State(initialValue: updateController)
     }
 
     var body: some Scene {
         MenuBarExtra {
             HostMenuView()
                 .environment(model)
+                .environment(updateController)
         } label: {
             StatusItemLabel()
                 .environment(model)
@@ -29,6 +36,7 @@ struct PixMacApp: App {
         Window(String(localized: "Set Up Pix"), id: "setup") {
             SetupWindow()
                 .environment(model)
+                .environment(updateController)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 480, height: 480)
@@ -37,6 +45,7 @@ struct PixMacApp: App {
         Window(String(localized: "Add Device"), id: "add-device") {
             AddDeviceWindow()
                 .environment(model)
+                .environment(updateController)
         }
         .windowResizability(.contentSize)
         .defaultSize(width: 460, height: 700)
@@ -45,6 +54,7 @@ struct PixMacApp: App {
         Settings {
             SettingsView()
                 .environment(model)
+                .environment(updateController)
         }
     }
 }

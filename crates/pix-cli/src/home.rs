@@ -54,6 +54,8 @@ pub(crate) struct ServiceOverview {
     pub(crate) port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) started_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) pix_version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,8 +137,16 @@ impl HostOverview {
         let current_service = HostServiceStatus::current(store.path());
         let service_installed =
             current_service.is_some() || service::managed_service_installed(store).unwrap_or(false);
-        let service = current_service.map_or_else(
-            || ServiceOverview {
+        let service = match current_service {
+            Some(status) => ServiceOverview {
+                state: ServiceState::Running,
+                installed: service_installed,
+                pid: Some(status.pid),
+                port: Some(status.port),
+                started_at: Some(status.started_at),
+                pix_version: crate::service_client::running_host_version(store).ok(),
+            },
+            None => ServiceOverview {
                 state: if service_installed {
                     ServiceState::Stopped
                 } else {
@@ -146,15 +156,9 @@ impl HostOverview {
                 pid: None,
                 port: None,
                 started_at: None,
+                pix_version: None,
             },
-            |status| ServiceOverview {
-                state: ServiceState::Running,
-                installed: service_installed,
-                pid: Some(status.pid),
-                port: Some(status.port),
-                started_at: Some(status.started_at),
-            },
-        );
+        };
 
         match store.load() {
             Ok(config) => {

@@ -11,14 +11,36 @@ use pix_core::ConfigStore;
 
 const CONTROL_SCHEMA_VERSION: u32 = 1;
 
-pub(crate) fn verify_control_compatibility(store: &ConfigStore) -> Result<()> {
-    request_event(
+/// Returns the Pix version reported by a running host process.
+///
+/// The version is intentionally read through the private local control
+/// channel rather than the supervision status file. This lets a newly started
+/// CLI detect an old long-lived host after Sparkle or another installer has
+/// replaced the executable on disk.
+pub(crate) fn running_host_version(store: &ConfigStore) -> Result<String> {
+    let data = request_event(
         store,
         "capabilities",
         "capabilities",
         Duration::from_secs(2),
     )?;
+    pix_version_from_capabilities(&data).map(ToOwned::to_owned)
+}
+
+pub(crate) fn verify_control_compatibility(store: &ConfigStore) -> Result<()> {
+    let running_version = running_host_version(store)?;
+    let current_version = env!("CARGO_PKG_VERSION");
+    if running_version != current_version {
+        bail!("running Pix host is Pix {running_version}, but this CLI is Pix {current_version}");
+    }
     Ok(())
+}
+
+fn pix_version_from_capabilities(data: &serde_json::Value) -> Result<&str> {
+    data.get("pix_version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty())
+        .context("Pix host capabilities are missing pix_version")
 }
 
 pub(crate) fn request_event(
@@ -110,7 +132,29 @@ fn required_token<'a>(words: &mut impl Iterator<Item = &'a str>, label: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::rpc_request_for;
+    use super::{pix_version_from_capabilities, rpc_request_for};
+
+    #[test]
+    fn reads_host_version_from_capabilities() {
+        let data = serde_json::json!({
+            "type": "capabilities",
+            "control_schema_version": 1,
+            "pix_version": "0.6.0",
+        });
+        assert_eq!(
+            pix_version_from_capabilities(&data).expect("host version"),
+            "0.6.0"
+        );
+    }
+
+    #[test]
+    fn rejects_missing_host_version() {
+        let data = serde_json::json!({
+            "type": "capabilities",
+            "control_schema_version": 1,
+        });
+        assert!(pix_version_from_capabilities(&data).is_err());
+    }
 
     #[test]
     fn maps_cli_operations_to_typed_control_requests() {

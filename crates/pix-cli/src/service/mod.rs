@@ -414,9 +414,14 @@ fn status(store: &ConfigStore) -> Result<()> {
         None => println!("  owner: not registered"),
     }
     if let Some(current) = crate::status::HostServiceStatus::current(store.path()) {
+        let running_version = crate::service_client::running_host_version(store).ok();
+        let version_suffix = running_version
+            .as_deref()
+            .map(|version| format!(", Pix {version}"))
+            .unwrap_or_default();
         println!(
-            "  host: running (pid {}, port {}, started_at {})",
-            current.pid, current.port, current.started_at
+            "  host: running (pid {}, port {}, started_at {}{})",
+            current.pid, current.port, current.started_at, version_suffix
         );
     } else {
         println!("  host: not running");
@@ -436,6 +441,9 @@ fn snapshot(store: &ConfigStore) -> Result<serde_json::Value> {
     let installed = platform_installed(store)?;
     let manager_active = platform_active(store)?;
     let current = crate::status::HostServiceStatus::current(store.path());
+    let running_version = current
+        .as_ref()
+        .and_then(|_| crate::service_client::running_host_version(store).ok());
     let owner = read_service_owner(store)?;
     let current_cli = current_service_owner()?;
     let owner_snapshot = owner.map(|owner| {
@@ -461,6 +469,7 @@ fn snapshot(store: &ConfigStore) -> Result<serde_json::Value> {
                 "pid": status.pid,
                 "port": status.port,
                 "started_at": status.started_at,
+                "pix_version": running_version,
             }),
             None => serde_json::json!({"state": "stopped"}),
         },

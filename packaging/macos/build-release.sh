@@ -34,7 +34,9 @@ case "$mac_arch" in
         ;;
 esac
 cli_target=${MACOS_CLI_TARGET:-$default_cli_target}
-macos_build_version=${version%%[-+]*}
+macos_build_version=$(
+    "$repository_root/scripts/macos-build-version.sh" "$version"
+)
 
 notary_profile=${MACOS_NOTARY_PROFILE:-}
 notary_key_path=${MACOS_NOTARY_KEY_PATH:-}
@@ -78,7 +80,7 @@ cli_binary="$repository_root/target/$cli_target/release/pix"
 
 cd "$repository_root/apps/macos"
 if command -v xcodegen >/dev/null 2>&1; then
-    xcodegen generate
+    xcodegen generate --no-env
 fi
 
 mkdir -p "$output_dir"
@@ -136,7 +138,34 @@ mkdir -p "$resources_path"
 install -m 0755 "$cli_binary" "$resources_path/pix"
 
 if [ -n "${MACOS_CODE_SIGN_IDENTITY:-}" ]; then
-    # The CLI is a nested executable and must be signed before the outer app.
+    # Sparkle ships its updater and XPC helpers as nested code. Re-sign every
+    # nested component with the same Developer ID before signing the framework
+    # and the outer app, otherwise Gatekeeper can reject the hardened bundle
+    # for containing ad-hoc Sparkle signatures.
+    sparkle_framework="$app_path/Contents/Frameworks/Sparkle.framework"
+    for nested_code in \
+        "$sparkle_framework/Versions/B/Autoupdate" \
+        "$sparkle_framework/Versions/B/Updater.app" \
+        "$sparkle_framework/Versions/B/XPCServices/Installer.xpc"; do
+        if [ -e "$nested_code" ]; then
+            codesign --force --options runtime --timestamp \
+                --sign "$MACOS_CODE_SIGN_IDENTITY" "$nested_code"
+        fi
+    done
+    downloader_xpc="$sparkle_framework/Versions/B/XPCServices/Downloader.xpc"
+    if [ -e "$downloader_xpc" ]; then
+        # Sparkle >= 2.6 may ship Downloader.xpc with its own entitlement
+        # set. Preserve it while replacing the ad-hoc signature with the
+        # product's Developer ID signature.
+        codesign --force --options runtime --timestamp \
+            --preserve-metadata=entitlements \
+            --sign "$MACOS_CODE_SIGN_IDENTITY" "$downloader_xpc"
+    fi
+    codesign --force --options runtime --timestamp \
+        --sign "$MACOS_CODE_SIGN_IDENTITY" "$sparkle_framework"
+
+    # The CLI is another nested executable and must be signed before the
+    # outer app.
     codesign --force --options runtime --timestamp \
         --sign "$MACOS_CODE_SIGN_IDENTITY" "$resources_path/pix"
     codesign --force --options runtime --timestamp \

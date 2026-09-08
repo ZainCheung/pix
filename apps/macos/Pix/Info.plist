@@ -18,6 +18,14 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://pix.deepoke.com/appcast.xml</string>
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
+	<key>SUPublicEDKey</key>
+	<string>MqNO0XfYoYGFW/PJLQ+XHoO3z8DGcB1UpDEMOeb9j3I=</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>NSLocalNetworkUsageDescription</key>

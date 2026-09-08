@@ -33,6 +33,7 @@ run_case() {
     case_path=$1
     expected_relay=$2
     expected_deploy=$3
+    expected_macos=$4
 
     git -C "$fixture_repository" reset --hard -q "$base_sha"
     git -C "$fixture_repository" clean -fdq
@@ -54,10 +55,12 @@ run_case() {
 
     assert_output relay "$expected_relay"
     assert_output relay_deploy "$expected_deploy"
+    assert_output macos "$expected_macos"
 }
 
-run_case relay/README.md true false
-run_case relay/src/index.ts true true
-run_case 'docs/(use-pix)/REMOTE_ACCESS.md' false false
+run_case relay/README.md true false false
+run_case relay/src/index.ts true true false
+run_case website/public/install.sh false false true
+run_case 'docs/(use-pix)/REMOTE_ACCESS.md' false false false
 
 printf 'CI path classification tests passed.\n'

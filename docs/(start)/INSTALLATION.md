@@ -9,15 +9,18 @@ shortest path for first-time install.
 
 ## Install
 
-The first-party installer is the recommended path. It installs without root
-privileges:
+The first-party installer is the recommended path. It normally installs
+without root privileges:
 
 ```sh
 curl -fsSL https://pix.deepoke.com/install.sh | sh
 ```
 
 The installer puts `pix` in `~/.local/bin`. On Apple Silicon macOS it also
-installs `Pix.app` in `~/Applications`. If the installer asks, add
+installs `Pix.app` in `/Applications` when that bundle already exists, or in
+`~/Applications` otherwise. Set `PIX_APP_PATH=/absolute/path/Pix.app` to
+select a destination explicitly; the installer refuses to choose when both
+standard locations already contain Pix.app. If the installer asks, add
 `~/.local/bin` to `PATH`.
 
 The installer supports Apple Silicon macOS and Linux x86_64 or ARM64. Pix
@@ -41,6 +44,11 @@ brew install --cask ZainCheung/pix/pix
 
 The current published macOS build is Apple Silicon and requires macOS Sonoma
 or newer. The Homebrew `pix` command points to the CLI inside `Pix.app`.
+
+Release builds include Sparkle automatic updates. Pix checks for new versions
+in the background and offers **Check for Updates…** from the menu bar; install
+still requires confirmation. The installer keeps `~/.local/bin/pix` as a
+launcher for the embedded app CLI, so the command follows GUI updates too.
 
 ## Linux
 

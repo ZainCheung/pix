@@ -64,17 +64,16 @@ Build the public macOS menu-bar client from the
 
 ## Updating
 
-For a released installer or app installation, update in place with:
+For a released Linux CLI installation, update in place with:
 
 ```sh
 pix update
 ```
 
-The command downloads the matching latest release asset and replaces the
-running CLI. On macOS it also updates `~/Applications/Pix.app` when the app
-bundle is available. If a host service is running, restart it after the update
-so the service uses the new executable. A source build should be rebuilt with
-Cargo instead.
+The command downloads the matching latest Linux release asset and replaces the
+running CLI. macOS app installations update through Sparkle's **Check for
+Updates…** action so the signed GUI bundle and embedded CLI stay together. A
+source build should be rebuilt with Cargo instead.
 
 ## Background service
 
@@ -90,6 +89,8 @@ Stop and remove the service first:
 pix service uninstall
 ```
 
-Then remove the installed CLI and, on macOS, `~/Applications/Pix.app`. The
-service command does not delete host configuration or Pi data. Check the path
-shown by `pix status` before removing the Pix configuration directory.
+Then remove the installed CLI and, on macOS, the `Pix.app` bundle at the path
+reported by the installer (`/Applications/Pix.app` or `~/Applications/Pix.app`).
+If `PIX_APP_PATH` was used, remove that explicitly selected bundle instead.
+The service command does not delete host configuration or Pi data. Check the
+path shown by `pix status` before removing the Pix configuration directory.

@@ -11,6 +11,7 @@ import SwiftUI
 /// tracking and collapse a submenu underneath the cursor.
 struct HostMenuView: View {
     @Environment(HostModel.self) private var model
+    @Environment(UpdateController.self) private var updateController
     @Environment(\.openWindow) private var openWindow
     @State private var snapshot = HostMenuSnapshot.empty
 
@@ -53,6 +54,13 @@ struct HostMenuView: View {
             }
 
             Divider()
+
+            Button {
+                updateController.checkForUpdates()
+            } label: {
+                Label(String(localized: "Check for Updates…"), systemImage: "arrow.down.circle")
+            }
+            .disabled(!updateController.canCheckForUpdates)
 
             SettingsLink {
                 Label(String(localized: "Settings…"), systemImage: "gearshape")

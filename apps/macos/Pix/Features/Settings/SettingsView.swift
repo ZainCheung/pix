@@ -20,6 +20,7 @@ struct SettingsView: View {
 }
 private struct GeneralSettingsView: View {
     @Environment(HostModel.self) private var model
+    @Environment(UpdateController.self) private var updateController
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -67,6 +68,27 @@ private struct GeneralSettingsView: View {
                         set: { model.setLaunchAtLogin($0) }
                     )
                 )
+            }
+            Section(String(localized: "Updates")) {
+                Toggle(
+                    String(localized: "Automatically check for updates"),
+                    isOn: Binding(
+                        get: { updateController.automaticallyChecksForUpdates },
+                        set: { updateController.automaticallyChecksForUpdates = $0 }
+                    )
+                )
+                LabeledContent(
+                    String(localized: "Current version"),
+                    value: updateController.currentVersionDisplay
+                )
+                Button(String(localized: "Check for Updates…")) {
+                    updateController.checkForUpdates()
+                }
+                .disabled(!updateController.canCheckForUpdates)
+                Text(String(localized: "Updates are downloaded and installed only after you confirm in the Sparkle update window."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section(String(localized: "Diagnostics")) {
                 Button(String(localized: "Refresh Diagnostics")) {

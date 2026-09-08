@@ -70,7 +70,8 @@ xcodebuild test -project Pix.xcodeproj -scheme Pix \
 
 `Pix.xcodeproj` is committed, so normal build and test commands use it
 directly. If you modify `project.yml`, install XcodeGen and run
-`xcodegen generate` before building or testing to refresh the project.
+`xcodegen generate --no-env` before building or testing to refresh the project
+without expanding local paths into the generated project.
 
 CI disables code signing for this test. The app embeds the matching Rust CLI
 for a source checkout; see the [macOS README](https://github.com/ZainCheung/pix/blob/main/apps/macos/README.md)

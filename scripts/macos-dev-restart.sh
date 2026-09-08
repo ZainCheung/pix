@@ -15,7 +15,7 @@ esac
 if command -v xcodegen >/dev/null 2>&1; then
     (
         cd "$repository_root/apps/macos"
-        xcodegen generate
+        xcodegen generate --no-env
     )
 fi
 
