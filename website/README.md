@@ -30,6 +30,10 @@ file supplies its own publication date, release stage (`published` or
 The static `public/install.sh` is served at `/install.sh` by the website
 deployment. It resolves the latest GitHub Release at install time and falls
 back to the GitHub Releases page whenever a platform asset is unavailable.
+The `/appcast.xml` endpoint proxies the `appcast.xml` asset from the latest
+GitHub Release (and serves a valid empty feed before the first Sparkle release),
+so Pix can keep a stable update-feed URL without storing release archives on
+the website.
 
 ## Production deploys
 

@@ -106,8 +106,27 @@ else
     rm -rf "$HOME/Applications/Pix.app"
     cp -R "$app_path" "$HOME/Applications/Pix.app"
     [ -f "$app_path/Contents/Resources/pix" ] || fail "The macOS app did not contain the Pix CLI."
-    install -m 0755 "$app_path/Contents/Resources/pix" "$bin_dir/pix" 2>/dev/null || cp "$app_path/Contents/Resources/pix" "$bin_dir/pix"
-    chmod 0755 "$bin_dir/pix"
+    # Keep the command as a tiny launcher for the canonical CLI inside
+    # Pix.app. Sparkle replaces the whole app bundle in place, so a copied
+    # executable would otherwise remain stale after a GUI update.
+    shim="$tmp_dir/pix-shim"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'set -eu' \
+        'if [ -n "${PIX_APP_PATH:-}" ] && [ -x "${PIX_APP_PATH}/Contents/Resources/pix" ]; then' \
+        '    exec "${PIX_APP_PATH}/Contents/Resources/pix" "$@"' \
+        'fi' \
+        'for app_path in "$HOME/Applications/Pix.app" "/Applications/Pix.app"; do' \
+        '    if [ -x "$app_path/Contents/Resources/pix" ]; then' \
+        '        exec "$app_path/Contents/Resources/pix" "$@"' \
+        '    fi' \
+        'done' \
+        'printf "%s\n" "Pix.app is not installed. Run https://pix.deepoke.com/install.sh again." >&2' \
+        'exit 1' > "$shim"
+    install -m 0755 "$shim" "$bin_dir/pix" 2>/dev/null || {
+        cp "$shim" "$bin_dir/pix"
+        chmod 0755 "$bin_dir/pix"
+    }
 fi
 
 say "Installed Pix $version to $bin_dir/pix"

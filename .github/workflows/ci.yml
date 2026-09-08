@@ -152,6 +152,18 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Verify macOS Sparkle build version
+        working-directory: apps/macos
+        run: |
+          set -eu
+          beta_one="$(../../scripts/macos-build-version.sh 0.6.0-beta.1)"
+          beta_two="$(../../scripts/macos-build-version.sh 0.6.0-beta.2)"
+          stable="$(../../scripts/macos-build-version.sh 0.6.0)"
+          [ "$beta_one" = 60001 ]
+          [ "$beta_two" = 60002 ]
+          [ "$stable" = 60099 ]
+          [ "$beta_one" -lt "$beta_two" ]
+          [ "$beta_two" -lt "$stable" ]
       - name: Test macOS menu-bar app
         working-directory: apps/macos
         run: >-

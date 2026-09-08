@@ -18,6 +18,36 @@ cli_path="$app_path/Contents/Resources/pix"
     exit 1
 }
 
+sparkle_framework="$app_path/Contents/Frameworks/Sparkle.framework"
+[ -d "$sparkle_framework" ] || {
+    printf '%s\n' "Embedded Sparkle.framework is missing: $sparkle_framework" >&2
+    exit 1
+}
+
+info_plist="$app_path/Contents/Info.plist"
+[ -f "$info_plist" ] || {
+    printf '%s\n' "Application Info.plist is missing: $info_plist" >&2
+    exit 1
+}
+
+for key in SUFeedURL SUPublicEDKey; do
+    value=$(plutil -extract "$key" raw -o - "$info_plist" 2>/dev/null || true)
+    [ -n "$value" ] || {
+        printf '%s\n' "Application Info.plist is missing $key" >&2
+        exit 1
+    }
+done
+automatic_updates=$(plutil -extract SUAllowsAutomaticUpdates raw -o - "$info_plist" 2>/dev/null || true)
+[ "$automatic_updates" = "false" ] || {
+    printf '%s\n' "Application Info.plist must disable automatic installation" >&2
+    exit 1
+}
+automatic_checks=$(plutil -extract SUEnableAutomaticChecks raw -o - "$info_plist" 2>/dev/null || true)
+[ "$automatic_checks" = "true" ] || {
+    printf '%s\n' "Application Info.plist must enable automatic update checks" >&2
+    exit 1
+}
+
 if [ "${MACOS_SKIP_CODESIGN:-0}" != "1" ]; then
     codesign --verify --deep --strict --verbose=2 "$app_path"
     if [ "${MACOS_SKIP_GATEKEEPER:-0}" != "1" ] && command -v spctl >/dev/null 2>&1; then

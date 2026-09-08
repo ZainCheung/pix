@@ -69,6 +69,21 @@ The CLI stores its long-term host identity in macOS Keychain and keeps a
 mode-0600 recovery copy so a background service can continue when Keychain
 interaction is unavailable.
 
+## Automatic updates
+
+Release builds include Sparkle 2.9.4 in `Pix.app/Contents/Frameworks`. Pix
+checks `https://pix.deepoke.com/appcast.xml` automatically and exposes
+**Check for Updates…** in the menu bar and Settings → General. Sparkle's
+standard update window verifies the EdDSA signature, replaces the complete app
+bundle in its original location, and relaunches Pix; automatic installation is
+off by default. The embedded `pix` CLI therefore updates atomically with the
+menu-bar app.
+
+The public EdDSA key is in `Pix/Info.plist`. The matching private key must stay
+outside the repository and be configured as the GitHub Actions environment
+secret `SPARKLE_PRIVATE_KEY`; the release workflow refuses to publish an
+unsigned appcast.
+
 ## Develop
 
 For the normal edit/build/restart loop, run this from the repository root:
@@ -94,7 +109,7 @@ For a plain App build without service replacement, use Xcode's `Run` action or
 the commands below.
 
 ```bash
-xcodegen generate
+xcodegen generate --no-env
 xcodebuild -project Pix.xcodeproj -scheme Pix \
   -destination 'platform=macOS' build
 xcodebuild test -project Pix.xcodeproj -scheme Pix \

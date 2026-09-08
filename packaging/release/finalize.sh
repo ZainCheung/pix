@@ -59,6 +59,12 @@ metadata = json.loads(
     ).stdout
 )
 
+sparkle_package = {
+    "name": "Sparkle",
+    "version": "2.9.4",
+    "license": "MIT",
+    "repository": "https://github.com/sparkle-project/Sparkle",
+}
 packages = [
     {
         "name": package.get("name"),
@@ -68,6 +74,7 @@ packages = [
     }
     for package in metadata.get("packages", [])
 ]
+packages.append(sparkle_package)
 packages.sort(key=lambda item: (item["name"] or "", item["version"] or ""))
 
 spdx = {
@@ -99,8 +106,8 @@ license_path = output_dir / f"pix-{version}-licenses.txt"
 with license_path.open("w") as handle:
     handle.write(f"Pix {version} dependency license report\n")
     handle.write(
-        "Generated from Cargo metadata; review published crate license files "
-        "for full terms.\n\n"
+        "Generated from Cargo metadata plus pinned macOS dependencies; review "
+        "published license files for full terms.\n\n"
     )
     for package in packages:
         handle.write(
@@ -130,7 +137,7 @@ command -v sha256sum >/dev/null 2>&1 || {
     cd "$output_dir"
     rm -f SHA256SUMS
     artifacts=$(find . -maxdepth 1 -type f \
-        \( -name "pix-$version-*" -o -name "pix_${version}_*" \
+        \( -name "appcast.xml" -o -name "pix-$version-*" -o -name "pix_${version}_*" \
         -o -name "pix-wire-$version-*" \) -print |
         sed 's#^\./##' | sort)
     [ -n "$artifacts" ] || {

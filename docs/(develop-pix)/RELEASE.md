@@ -12,6 +12,12 @@ Cargo.toml: 0.1.0
 Git tag:    v0.1.0
 ```
 
+The macOS bundle uses `scripts/macos-build-version.sh` to derive a numeric
+`CFBundleVersion` from that SemVer. Stable releases reserve the final slot 99;
+for example, `0.6.0-beta.1`, `0.6.0-beta.2`, and `0.6.0` become `60001`,
+`60002`, and `60099`. This keeps Sparkle's machine comparison monotonic while
+leaving the user-facing `CFBundleShortVersionString` unchanged.
+
 The wire protocol version and Relay deployment revision are independent of the
 product version. A product release does not deploy the Relay.
 
@@ -37,9 +43,9 @@ approval it imports the Developer ID certificate into a temporary Keychain,
 signs the app and embedded CLI, notarizes with the Team API Key, staples the
 ticket, verifies Gatekeeper readiness, and removes all signing material. The
 workflow then generates the SBOM/license report and one `SHA256SUMS` manifest,
-creates an artifact provenance attestation, and publishes a draft only after
-all assets are ready. The release workflow refuses tags that are not contained
-in `origin/main`.
+creates a signed Sparkle appcast, attests every release asset, and publishes a
+draft only after all assets are ready. The release workflow refuses tags that
+are not contained in `origin/main`.
 
 The published files use stable names:
 
@@ -53,6 +59,7 @@ pix-<version>-1.aarch64.rpm
 pix-wire-<version>-apple.zip
 pix-<version>-macos-arm64.dmg
 pix-<version>-macos-arm64.zip
+appcast.xml
 pix-<version>-sbom.spdx.json
 pix-<version>-licenses.txt
 SHA256SUMS
@@ -66,6 +73,29 @@ Apple notarization. The ZIP retains the stapled app for script and Homebrew
 compatibility; CI validates the bundle after extraction. The Apple wire archive
 is a static XCFramework artifact and does not participate in Developer ID
 notarization.
+
+The macOS archive is also signed for Sparkle with the Pix EdDSA key. The
+published `appcast.xml` is uploaded as a release asset; the website serves the
+current asset at `https://pix.deepoke.com/appcast.xml`, while the enclosure URL
+continues to point at the GitHub Release ZIP. Sparkle is configured for
+automatic checks with user-confirmed installation, so `SUAutomaticallyUpdate`
+is intentionally not enabled.
+
+### Sparkle signing key
+
+Create one key pair with the pinned Sparkle distribution and keep the private
+half out of Git:
+
+```sh
+./bin/generate_keys --account pix
+./bin/generate_keys --account pix -x /secure/location/pix-sparkle-private-key
+```
+
+Store the exported value as the protected GitHub Actions secret
+`SPARKLE_PRIVATE_KEY` in the `apple-release` environment. The public half is
+committed as `SUPublicEDKey` in `apps/macos/Pix/Info.plist`. The
+`sparkle-appcast` job fails before publishing if the secret is missing or the
+generated feed does not contain a signed entry for the release ZIP.
 
 ## Homebrew Cask
 

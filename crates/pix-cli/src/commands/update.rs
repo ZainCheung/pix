@@ -186,10 +186,19 @@ fn download_and_install(release: &Release, executable: &Path, quiet: bool) -> Re
 
     let extracted = extract_cli(&archive, staging.path())?;
     let app_bundle = staging.path().join("unpacked").join("Pix.app");
-    if app_bundle.is_dir()
-        && let Some(home) = crate::commands::shared::home_directory()
-    {
-        install_app_bundle(&app_bundle, &home.join("Applications"))?;
+    if app_bundle.is_dir() {
+        // The release archive contains the canonical GUI app and its embedded
+        // CLI. When this command is invoked through the app's CLI (including
+        // the install.sh shim), replace that bundle in its original location
+        // and let the next launch pick up both components together.
+        if let Some(current_app) = app_bundle_for_executable(executable) {
+            install_app_bundle(&app_bundle, &current_app)?;
+            return Ok(());
+        }
+
+        if let Some(home) = crate::commands::shared::home_directory() {
+            install_app_bundle(&app_bundle, &home.join("Applications").join("Pix.app"))?;
+        }
     }
     replace_executable(&extracted, executable)
 }
@@ -249,10 +258,28 @@ fn walk_for_pix(directory: &Path) -> Result<PathBuf> {
     found.context("the release archive did not contain the Pix CLI")
 }
 
-fn install_app_bundle(bundle: &Path, applications: &Path) -> Result<()> {
-    std::fs::create_dir_all(applications)?;
-    let destination = applications.join("Pix.app");
-    if destination.is_dir() && std::fs::remove_dir_all(&destination).is_err() {
+fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
+    let resources = executable.parent()?;
+    if resources.file_name()? != "Resources" {
+        return None;
+    }
+    let contents = resources.parent()?;
+    if contents.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents.parent()?;
+    if bundle.extension()? != "app" || bundle.file_name()? != "Pix.app" {
+        return None;
+    }
+    Some(bundle.to_path_buf())
+}
+
+fn install_app_bundle(bundle: &Path, destination: &Path) -> Result<()> {
+    let parent = destination
+        .parent()
+        .context("the Pix app destination has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    if destination.is_dir() && std::fs::remove_dir_all(destination).is_err() {
         println!("Pix.app is in use; the app bundle was not replaced.");
         return Ok(());
     }
@@ -265,7 +292,7 @@ fn install_app_bundle(bundle: &Path, applications: &Path) -> Result<()> {
         .status()
         .context("copying the Pix app bundle")?;
     if status.success() {
-        println!("Updated Pix.app in ~/Applications.");
+        println!("Updated Pix.app at {}.", destination.display());
     }
     Ok(())
 }
@@ -328,7 +355,9 @@ fn run_command(program: &str, arguments: &[&str], what: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::asset_suffix;
+    use std::path::Path;
+
+    use super::{app_bundle_for_executable, asset_suffix};
 
     #[test]
     fn release_assets_match_the_installer_contract() {
@@ -340,5 +369,19 @@ mod tests {
             ("linux", "aarch64") => assert_eq!(suffix, "aarch64-unknown-linux-gnu.tar.gz"),
             _ => {}
         }
+    }
+
+    #[test]
+    fn embedded_cli_resolves_its_containing_app_bundle() {
+        assert_eq!(
+            app_bundle_for_executable(Path::new(
+                "/Users/test/Applications/Pix.app/Contents/Resources/pix"
+            )),
+            Some(Path::new("/Users/test/Applications/Pix.app").to_path_buf())
+        );
+        assert_eq!(
+            app_bundle_for_executable(Path::new("/Users/test/.local/bin/pix")),
+            None
+        );
     }
 }

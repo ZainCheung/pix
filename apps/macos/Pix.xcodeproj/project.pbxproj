@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		09AD247B6B3D963ABFE3EE01 /* RemotePairingWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 539F44CAD653A676ED57A0D6 /* RemotePairingWindow.swift */; };
+		266083D87466D0B73FC0E814 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 64327B11212983ACC2F5891E /* Sparkle */; };
 		41BD093D6D697C5DE3DE2597 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = CFE54B32065C3BB5A052FA6C /* Assets.xcassets */; };
 		5E9F60AA0C2B70F57600AF88 /* HostModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C266F2440693B4A72B52E81C /* HostModel.swift */; };
 		64D13222AE1D82EEF9F9BAC2 /* SetupWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347E9029B54B0DADB10A4C90 /* SetupWindow.swift */; };
@@ -16,6 +17,7 @@
 		B429572875E2CE995C3A8934 /* HostTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = DBE4AEBF08911680D2EF8A48 /* HostTypes.swift */; };
 		BBF81677F7F66875AC608060 /* HostMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 272FCE8BB5450CE6A22C2A97 /* HostMenuView.swift */; };
 		C9557AE69B2EA6BA7B09DC97 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BBE39F0D0C92EEA99C8B426 /* SettingsView.swift */; };
+		D8C8C5455D010E49F72122E6 /* UpdateController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8E6ED8B2D1BAFCE30222752A /* UpdateController.swift */; };
 		E2CBB9C29B1D11D0B4FD7EEB /* PixMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0384C80514D2C09EB80520E9 /* PixMacApp.swift */; };
 /* End PBXBuildFile section */
 
@@ -38,12 +40,24 @@
 		4FFE7256A50D7E91C2BC2C9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		539F44CAD653A676ED57A0D6 /* RemotePairingWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePairingWindow.swift; sourceTree = "<group>"; };
 		8BBE39F0D0C92EEA99C8B426 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		8E6ED8B2D1BAFCE30222752A /* UpdateController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateController.swift; sourceTree = "<group>"; };
 		C266F2440693B4A72B52E81C /* HostModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostModel.swift; sourceTree = "<group>"; };
 		C5695ECBD05269F936D7A6F0 /* Pix.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Pix.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		CFE54B32065C3BB5A052FA6C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DBE4AEBF08911680D2EF8A48 /* HostTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostTypes.swift; sourceTree = "<group>"; };
 		F68FA8482D3A2E602D4EDCE0 /* HostModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostModelTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		496B0E8536123F24A27020FC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				266083D87466D0B73FC0E814 /* Sparkle in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		06FA80575B5321DF73C4A354 /* Settings */ = {
@@ -100,6 +114,7 @@
 			isa = PBXGroup;
 			children = (
 				C266F2440693B4A72B52E81C /* HostModel.swift */,
+				8E6ED8B2D1BAFCE30222752A /* UpdateController.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -172,6 +187,7 @@
 			buildPhases = (
 				EE64490715A6FCE964349756 /* Sources */,
 				0A4F9690C25E328AADF2CEFE /* Resources */,
+				496B0E8536123F24A27020FC /* Frameworks */,
 				A179258D394221375D47D09B /* Embed matching Pix CLI for Debug runs */,
 			);
 			buildRules = (
@@ -180,6 +196,7 @@
 			);
 			name = Pix;
 			packageProductDependencies = (
+				64327B11212983ACC2F5891E /* Sparkle */,
 			);
 			productName = Pix;
 			productReference = C5695ECBD05269F936D7A6F0 /* Pix.app */;
@@ -211,6 +228,9 @@
 			);
 			mainGroup = A9000F517E090E752833D7BA;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FC037B758B73E9867F912947 /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 1124AAE4E20CFBB8E40AF600 /* Products */;
 			projectDirPath = "";
@@ -252,7 +272,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ \"${CONFIGURATION}\" != \"Debug\" ]; then\n  exit 0\nfi\nset -eu\nrepository_root=\"$(cd \"${SRCROOT}/../..\" && pwd)\"\ncargo_binary=\"$(command -v cargo || true)\"\nif [ -z \"${cargo_binary}\" ]; then\n  for candidate in \"/Users/zain/.cargo/bin/cargo\" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do\n    if [ -x \"${candidate}\" ]; then\n      cargo_binary=\"${candidate}\"\n      break\n    fi\n  done\nfi\ntest -n \"${cargo_binary}\"\n\"${cargo_binary}\" build --manifest-path \"${repository_root}/Cargo.toml\" -p pix-cli --locked\ncli_binary=\"${repository_root}/target/debug/pix\"\ntest -x \"${cli_binary}\"\nresources_path=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${resources_path}\"\ninstall -m 0755 \"${cli_binary}\" \"${resources_path}/pix\"\n";
+			shellScript = "if [ \"${CONFIGURATION}\" != \"Debug\" ]; then\n  exit 0\nfi\nset -eu\nrepository_root=\"$(cd \"${SRCROOT}/../..\" && pwd)\"\ncargo_binary=\"$(command -v cargo || true)\"\nif [ -z \"${cargo_binary}\" ]; then\n  for candidate in \"${HOME}/.cargo/bin/cargo\" /opt/homebrew/bin/cargo /usr/local/bin/cargo; do\n    if [ -x \"${candidate}\" ]; then\n      cargo_binary=\"${candidate}\"\n      break\n    fi\n  done\nfi\ntest -n \"${cargo_binary}\"\n\"${cargo_binary}\" build --manifest-path \"${repository_root}/Cargo.toml\" -p pix-cli --locked\ncli_binary=\"${repository_root}/target/debug/pix\"\ntest -x \"${cli_binary}\"\nresources_path=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nmkdir -p \"${resources_path}\"\ninstall -m 0755 \"${cli_binary}\" \"${resources_path}/pix\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -276,6 +296,7 @@
 				09AD247B6B3D963ABFE3EE01 /* RemotePairingWindow.swift in Sources */,
 				C9557AE69B2EA6BA7B09DC97 /* SettingsView.swift in Sources */,
 				64D13222AE1D82EEF9F9BAC2 /* SetupWindow.swift in Sources */,
+				D8C8C5455D010E49F72122E6 /* UpdateController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -342,6 +363,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 10399;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -354,6 +376,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -430,6 +453,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 10399;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -448,6 +472,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -508,6 +533,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FC037B758B73E9867F912947 /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = exactVersion;
+				version = 2.9.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		64327B11212983ACC2F5891E /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FC037B758B73E9867F912947 /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0B6CC3D589889845F7861D1B /* Project object */;
 }

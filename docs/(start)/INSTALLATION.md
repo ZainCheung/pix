@@ -42,6 +42,11 @@ brew install --cask ZainCheung/pix/pix
 The current published macOS build is Apple Silicon and requires macOS Sonoma
 or newer. The Homebrew `pix` command points to the CLI inside `Pix.app`.
 
+Release builds include Sparkle automatic updates. Pix checks for new versions
+in the background and offers **Check for Updates…** from the menu bar; install
+still requires confirmation. The installer keeps `~/.local/bin/pix` as a
+launcher for the embedded app CLI, so the command follows GUI updates too.
+
 ## Linux
 
 The installer selects the Linux x86_64 or ARM64 release for the machine it is
