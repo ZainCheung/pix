@@ -537,3 +537,24 @@ jobs:
           gh release edit "$TAG" \
             --repo "$GH_REPO" \
             --draft=false
+
+  dispatch-homebrew:
+    name: Dispatch Homebrew Cask update
+    needs: [validate, publish]
+    if: ${{ needs.publish.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch Homebrew Cask update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -eu
+          gh workflow run homebrew-cask.yml \
+            --repo "$GH_REPO" \
+            --ref main \
+            -f tag="$TAG"
