@@ -51,7 +51,7 @@ esac
     exit 64
 }
 
-repository_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+repository_root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 case "$RELEASE_DIR" in
     /*) ;;
     *) RELEASE_DIR="$repository_root/$RELEASE_DIR" ;;
@@ -94,16 +94,17 @@ cp "$archive_path" "$staging_dir/$archive_name"
 # its historical entries. A local appcast in the release directory takes
 # precedence, which makes retries deterministic and keeps the script usable
 # without network access.
-appcast_url=${APPCAST_URL-https://pix.deepoke.com/appcast.xml}
+appcast_url=${APPCAST_URL-https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml}
 if [ -f "$RELEASE_DIR/appcast.xml" ]; then
     cp "$RELEASE_DIR/appcast.xml" "$staging_dir/appcast.xml"
 elif [ -n "$appcast_url" ]; then
     if curl -fsSL --retry 2 --connect-timeout 8 \
         "$appcast_url" \
         -o "$staging_dir/appcast.xml" 2>/dev/null; then
-        # A pre-route website may answer the feed URL with its HTML 404 page.
-        # Treat any non-RSS response as an empty history instead of passing it
-        # to generate_appcast, which would fail with an opaque XML error.
+        # A release feed may be unavailable before its first appcast asset is
+        # published. Treat any non-RSS response as an empty history instead of
+        # passing it to generate_appcast, which would fail with an opaque XML
+        # error.
         if ! python3 - "$staging_dir/appcast.xml" <<'PY'
 import sys
 import xml.etree.ElementTree as ET

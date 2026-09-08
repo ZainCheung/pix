@@ -34,12 +34,11 @@ macOS it extracts and installs the signed app with `ditto`, uses an existing
 `/Applications/Pix.app` in preference to creating a user-level copy, and
 refuses to choose when both standard app locations exist; `PIX_APP_PATH` can
 select a destination explicitly.
-The `/appcast.xml` endpoint proxies the `appcast.xml` asset from the latest
-GitHub Release (and serves a valid empty feed only while that asset has not
-been published yet), so Pix can keep a stable update-feed URL without storing
-release archives on the website. Non-bootstrap invalid responses and upstream
-outages return HTTP errors so Sparkle reports a failed check instead of
-silently hiding an available update.
+The `/appcast.xml` endpoint is a temporary compatibility bridge for the v0.1.4
+Sparkle bootstrap build. It returns HTTP 302 with
+`Location: https://github.com/ZainCheung/pix/releases/latest/download/appcast.xml`;
+v0.1.5+ builds use that GitHub Releases URL directly. The website does not
+fetch, validate, or proxy the appcast body.
 
 ## Production deploys
 
