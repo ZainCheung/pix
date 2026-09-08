@@ -1082,11 +1082,27 @@ fn queue_updates_are_gated_live_and_cached_for_reconnecting_clients() {
             attachments: Vec::new(),
         },
     ));
-    let events = legacy.drain_events();
-    assert!(
-        events.is_empty(),
-        "queue events must be gated behind queue.v1: {events:?}"
-    );
+    let parsed_session_id = session_id.parse().expect("session ID");
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let cached_queue = loop {
+        let events = legacy.drain_events();
+        assert!(
+            !events
+                .iter()
+                .any(|envelope| matches!(envelope.event, ServerEvent::SessionQueue { .. })),
+            "queue events must be gated behind queue.v1: {events:?}"
+        );
+        if let Some(queue) = manager.queue(parsed_session_id) {
+            break queue;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "queue update was not cached before reconnect"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(cached_queue.steering, ["Focus on error handling"]);
+    assert_eq!(cached_queue.follow_up, ["Then summarize"]);
 
     // A reconnecting client that declares queue.v1 recovers the queue text
     // from the runtime cache without another Pi turn.
@@ -1124,13 +1140,33 @@ fn queue_updates_are_gated_live_and_cached_for_reconnecting_clients() {
             attachments: Vec::new(),
         },
     ));
-    let events = modern.drain_events();
-    assert!(
-        events
-            .iter()
-            .any(|envelope| matches!(envelope.event, ServerEvent::SessionQueue { .. })),
-        "expected a session queue event: {events:?}"
-    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let queue_event = loop {
+        let events = modern.drain_events();
+        if let Some(event) = events
+            .into_iter()
+            .find(|envelope| matches!(envelope.event, ServerEvent::SessionQueue { .. }))
+        {
+            break event;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "live session queue event was not observed"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    match queue_event.event {
+        ServerEvent::SessionQueue { queue, .. } => {
+            assert_eq!(queue.steering, ["Focus on error handling"]);
+            assert_eq!(queue.follow_up, ["Then summarize"]);
+        }
+        event => panic!("expected a session queue event, got {event:?}"),
+    }
+    let cached_queue = manager
+        .queue(parsed_session_id)
+        .expect("queue cache after live event");
+    assert_eq!(cached_queue.steering, ["Focus on error handling"]);
+    assert_eq!(cached_queue.follow_up, ["Then summarize"]);
     drop(script);
 }
 
