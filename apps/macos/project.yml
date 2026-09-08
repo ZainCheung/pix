@@ -14,8 +14,8 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     # Release builds override both values from Cargo.toml. Keeping valid
     # defaults here also makes Sparkle start correctly for an Xcode Run build.
-    MARKETING_VERSION: "0.1.3"
-    CURRENT_PROJECT_VERSION: "10399"
+    MARKETING_VERSION: "0.1.4"
+    CURRENT_PROJECT_VERSION: "10499"
 targets:
   Pix:
     type: application
