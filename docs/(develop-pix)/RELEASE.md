@@ -115,6 +115,13 @@ configuration, Keychain identity, authorized workspaces, or Pi session files.
 It declares `auto_updates true` so Homebrew does not treat a Sparkle-updated
 bundle as stale and downgrade it on the next Cask operation.
 
+The release workflow explicitly dispatches this Cask workflow on `main` after
+the GitHub Release is published. This is required because a release created
+with `GITHUB_TOKEN` does not emit a downstream `release` workflow event. The
+`release.published` trigger remains as a compatibility path for releases
+published outside the release workflow, and the per-tag concurrency group plus
+automation branch make repeated dispatches converge on one Cask pull request.
+
 The first-party Cask is generated only after the release asset passes the
 Developer ID/notarization gate. The current release workflow publishes arm64
 only; add an Intel or universal asset before broadening the Cask architecture
