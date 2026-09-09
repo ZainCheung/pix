@@ -43,7 +43,8 @@ Make sure `$HOME/.local/bin` is on `PATH` before running `pix`.
 
 ## Build from source
 
-Source builds need Rust 1.91 or newer and a supported Pi installation:
+Source builds need Rust 1.91 or newer and a Pi installation at or above Pix's
+minimum version with the required RPC startup options:
 
 ```sh
 git clone https://github.com/ZainCheung/pix.git

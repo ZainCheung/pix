@@ -184,12 +184,23 @@ fn write_pi_status(staging: &Path) -> Result<()> {
     let _ = writeln!(status, "environment: {source}");
     match PiProbe::new(None).with_environment(environment).inspect() {
         Ok(installation) => {
+            let compatibility = if installation.is_compatible() {
+                "compatible"
+            } else {
+                "update required"
+            };
             let _ = writeln!(
                 status,
-                "pi: {} (supported: {})",
-                installation.version, installation.supported
+                "pi: {} (compatibility: {compatibility})",
+                installation.version
             );
             status.push_str("pi_executable: [redacted]\n");
+        }
+        Err(pix_core::pi::PiError::MissingCapability(_)) => {
+            status.push_str("pi: unavailable (missing required RPC capability)\n");
+        }
+        Err(pix_core::pi::PiError::NotFound) => {
+            status.push_str("pi: unavailable (executable not found)\n");
         }
         Err(_) => status.push_str("pi: unavailable (probe failed)\n"),
     }

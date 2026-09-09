@@ -47,7 +47,10 @@ pub use pairing::{
     ApprovedDevice, DeviceRevocation, MAX_PENDING_PAIRING_OFFERS, PairingCoordinator, PairingOffer,
     PairingPending, PairingToken,
 };
-pub use pi::{PiInstallation, PiProbe};
+pub use pi::{
+    MINIMUM_PI_VERSION, PiCompatibilityError, PiError, PiInstallation, PiProbe,
+    REQUIRED_PI_RPC_FLAGS,
+};
 pub use pi_rpc::{PiCommand, PiEvent, PiResponse, RpcClient};
 pub use pix_wire::host_public_key_fingerprint;
 pub use relay_client::{

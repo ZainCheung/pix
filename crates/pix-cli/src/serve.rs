@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use pix_core::{
     ConfigStore, HostEnvironment, HostService, HostServiceEvent, HostState, PairingCoordinator,
-    RuntimeManager, RuntimeManagerOptions, SessionLockStore, workspace_fingerprint,
+    PiProbe, RuntimeManager, RuntimeManagerOptions, SessionLockStore, workspace_fingerprint,
 };
 use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
@@ -132,21 +132,35 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
         .with_override("PIX_CONFIG", pi_config_path.as_os_str().to_owned());
     let executable = configured_pi_executable(&config, &environment);
     let pi_executable = executable.display().to_string();
+    let pi_preflight = PiProbe::new(config.preferences.pi_executable.clone())
+        .with_environment(environment.clone())
+        .inspect_compatibility();
+    if let Err(error) = &pi_preflight {
+        log.append_text(
+            "runtime",
+            &format!("Pi compatibility preflight failed: {error}"),
+        );
+    }
     let runtime_manager = std::sync::Arc::new(
-        RuntimeManager::new(RuntimeManagerOptions {
-            executable,
-            lock_directory: config_directory.join("locks"),
-            max_active_sessions: config.preferences.max_active_sessions,
-            max_concurrent_turns: config.preferences.max_concurrent_turns,
-            idle_timeout: std::time::Duration::from_secs(config.preferences.idle_timeout_seconds),
-            request_timeout: std::time::Duration::from_secs(30),
-            // Keep Pi's normal extension discovery intact. The Pix-owned
-            // compatibility extension only projects idle hidden custom
-            // notifications out of model context; it does not disable or
-            // replace any user extension or active-turn context injection.
-            extra_arguments: vec!["--extension".to_owned(), context_guard_path],
-            environment: environment.clone(),
-        })
+        RuntimeManager::new_with_pi_preflight(
+            RuntimeManagerOptions {
+                executable,
+                lock_directory: config_directory.join("locks"),
+                max_active_sessions: config.preferences.max_active_sessions,
+                max_concurrent_turns: config.preferences.max_concurrent_turns,
+                idle_timeout: std::time::Duration::from_secs(
+                    config.preferences.idle_timeout_seconds,
+                ),
+                request_timeout: std::time::Duration::from_secs(30),
+                // Keep Pi's normal extension discovery intact. The Pix-owned
+                // compatibility extension only projects idle hidden custom
+                // notifications out of model context; it does not disable or
+                // replace any user extension or active-turn context injection.
+                extra_arguments: vec!["--extension".to_owned(), context_guard_path],
+                environment: environment.clone(),
+            },
+            pi_preflight,
+        )
         .context("starting Pi runtime manager")?,
     );
     // Recover durable ownership before HostService starts accepting session

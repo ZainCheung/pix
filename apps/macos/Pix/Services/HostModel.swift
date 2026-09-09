@@ -12,6 +12,8 @@ final class HostModel {
     /// CLI home screen's first-run state: setup guidance appears only then.
     private(set) var isConfigured = true
     private(set) var piVersion: String?
+    private(set) var piCompatible: Bool?
+    private(set) var piCompatibilityStatus: String?
     private(set) var piExecutablePath: String?
     private(set) var piExecutable: String?
     private(set) var workspaces: [WorkspaceItem] = []
@@ -97,15 +99,32 @@ final class HostModel {
             ])
             isConfigured = Self.isConfiguredStatus(from: output) ?? true
             piVersion = parseVersion(from: output)
+            piCompatible = Self.parsePiCompatibility(from: output)
+            piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: output)
             guard isConfigured else {
                 // First run: hold in setup state without touching the
                 // service or inventories; the setup guide drives the rest.
                 status = .needsSetup(String(localized: "Pix is not set up on this computer."))
                 return
             }
+            if piCompatibilityStatus == "missing_required_capability" {
+                throw HostModelError.commandFailed(
+                    "The installed Pi does not provide the RPC capabilities required by Pix."
+                )
+            }
+            if piCompatibilityStatus == "cannot_launch" {
+                throw HostModelError.commandFailed(
+                    "Pix could not verify Pi on this host. Check Pix diagnostics on the Mac."
+                )
+            }
             guard piVersion != nil else {
                 throw HostModelError.commandFailed(
                     "Pi was not found on this host; install Pi or set its path with `pix pi set`."
+                )
+            }
+            if piCompatible == false, let piVersion {
+                throw HostModelError.commandFailed(
+                    "Pi \(piVersion) is too old. Pix requires Pi 0.84.1 or newer."
                 )
             }
             launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
@@ -160,6 +179,8 @@ final class HostModel {
         _ = try await runPix(arguments: ["pi", "set", url.path])
         if let output = try? await runPix(arguments: ["status"]) {
             piVersion = parseVersion(from: output)
+            piCompatible = Self.parsePiCompatibility(from: output)
+            piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: output)
         }
     }
 
@@ -173,6 +194,8 @@ final class HostModel {
         ])
         isConfigured = Self.isConfiguredStatus(from: output) ?? isConfigured
         piVersion = parseVersion(from: output)
+        piCompatible = Self.parsePiCompatibility(from: output)
+        piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: output)
         piExecutablePath = Self.parsePiExecutable(from: output)
     }
 
@@ -983,6 +1006,14 @@ final class HostModel {
         return envelope.data.pi.executable ?? nil
     }
 
+    nonisolated static func parsePiCompatibility(from output: String) -> Bool? {
+        decodeCLIData(CLIStatusData.self, from: output)?.pi.supported
+    }
+
+    nonisolated static func parsePiCompatibilityStatus(from output: String) -> String? {
+        decodeCLIData(CLIStatusData.self, from: output)?.pi.compatibility
+    }
+
     /// True when the CLI reports an existing host configuration. Nil when
     /// the output is not a recognizable status envelope.
     nonisolated static func isConfiguredStatus(from output: String) -> Bool? {
@@ -1153,6 +1184,8 @@ private struct CLIStatusData: Decodable {
     struct Pi: Decodable {
         let version: String?
         let executable: String?
+        let supported: Bool?
+        let compatibility: String?
     }
 
     let configState: String?

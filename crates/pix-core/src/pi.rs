@@ -2,19 +2,38 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
 
-/// The Pi minor release line verified against Pix's RPC adapter.
-pub const SUPPORTED_PI_VERSION: &str = ">=0.84.1, <0.85.0";
+/// The oldest Pi release supported by Pix's RPC adapter.
+pub const MINIMUM_PI_VERSION: &str = "0.84.1";
+
+/// CLI options required to launch the Pi RPC adapter.
+pub const REQUIRED_PI_RPC_FLAGS: [&str; 4] = [
+    "--mode <mode>",
+    "--approve",
+    "--session <path|id>",
+    "--session-id <id>",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiInstallation {
     pub executable: PathBuf,
     pub version: Version,
+    /// Whether the minimum version and required RPC CLI capabilities passed.
     pub supported: bool,
+}
+
+impl PiInstallation {
+    /// Returns whether this installation satisfies Pix's minimum-only
+    /// compatibility policy. Newer Pi versions remain eligible when the RPC
+    /// capability probe succeeds.
+    #[must_use]
+    pub const fn is_compatible(&self) -> bool {
+        self.supported
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -79,12 +98,31 @@ impl PiProbe {
         })?;
 
         verify_rpc_flags(&executable, &self.environment)?;
-        let requirement = VersionReq::parse(SUPPORTED_PI_VERSION).map_err(PiError::SupportRange)?;
+        let minimum = Version::parse(MINIMUM_PI_VERSION).map_err(PiError::MinimumVersion)?;
         Ok(PiInstallation {
             executable,
-            supported: requirement.matches(&version),
+            supported: version >= minimum,
             version,
         })
+    }
+
+    /// Runs the full compatibility preflight used before a host starts a Pi
+    /// session. The returned error is deliberately path-free so it can be
+    /// mapped to a safe phone-facing message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiCompatibilityError`] when Pi cannot be found, launched, or
+    /// does not satisfy the minimum version/capability contract.
+    pub fn inspect_compatibility(&self) -> Result<PiInstallation, PiCompatibilityError> {
+        let installation = self.inspect().map_err(PiCompatibilityError::from)?;
+        if installation.is_compatible() {
+            Ok(installation)
+        } else {
+            Err(PiCompatibilityError::TooOld {
+                found: installation.version,
+            })
+        }
     }
 }
 
@@ -105,12 +143,7 @@ fn verify_rpc_flags(executable: &Path, environment: &HostEnvironment) -> Result<
         });
     }
     let help = String::from_utf8_lossy(&output.stdout);
-    for required_flag in [
-        "--mode <mode>",
-        "--approve",
-        "--session <path|id>",
-        "--session-id <id>",
-    ] {
+    for required_flag in REQUIRED_PI_RPC_FLAGS {
         if !help.contains(required_flag) {
             return Err(PiError::MissingCapability(required_flag));
         }
@@ -157,41 +190,71 @@ pub enum PiError {
         value: String,
         source: semver::Error,
     },
-    #[error("Pix was built with an invalid Pi support range: {0}")]
-    SupportRange(semver::Error),
+    #[error("Pix was built with an invalid minimum Pi version: {0}")]
+    MinimumVersion(semver::Error),
     #[error("Pi does not advertise required RPC capability {0}")]
     MissingCapability(&'static str),
 }
 
+/// Safe categories for a host-side Pi compatibility preflight. These values
+/// intentionally omit executable paths and command output before they reach a
+/// remote client or the persistent host diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum PiCompatibilityError {
+    #[error("Pi {found} is too old")]
+    TooOld { found: Version },
+    #[error("installed Pi is missing a required RPC capability")]
+    MissingRequiredCapability,
+    #[error("Pi executable was not found")]
+    NotFound,
+    #[error("Pi could not be launched")]
+    CannotLaunch,
+}
+
+impl From<PiError> for PiCompatibilityError {
+    fn from(error: PiError) -> Self {
+        match error {
+            PiError::NotFound | PiError::Resolve { .. } | PiError::NotExecutable(_) => {
+                Self::NotFound
+            }
+            PiError::MissingCapability(_) => Self::MissingRequiredCapability,
+            PiError::Launch { .. }
+            | PiError::CommandFailed { .. }
+            | PiError::Version { .. }
+            | PiError::MinimumVersion(_) => Self::CannotLaunch,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use semver::{Version, VersionReq};
+    use semver::Version;
 
-    use super::SUPPORTED_PI_VERSION;
+    use super::{MINIMUM_PI_VERSION, REQUIRED_PI_RPC_FLAGS};
 
     #[cfg(unix)]
-    fn write_fake_pi(directory: &std::path::Path) -> std::path::PathBuf {
+    fn write_fake_pi_version(
+        directory: &std::path::Path,
+        version: &str,
+        help: &str,
+    ) -> std::path::PathBuf {
         use std::fs;
         use std::os::unix::fs::PermissionsExt;
 
         let path = directory.join("pi");
-        fs::write(
-            &path,
-            concat!(
-                "#!/bin/sh\n",
-                "if [ \"$1\" = \"--version\" ]; then\n",
-                "  printf '0.84.1\\n'\n",
-                "elif [ \"$1\" = \"--help\" ]; then\n",
-                "  printf -- '--mode <mode> --approve --session <path|id> --session-id <id>\\n'\n",
-                "fi\n",
-                "exit 0\n",
-            ),
-        )
-        .expect("write fake Pi");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '{version}\\n'\nelif [ \"$1\" = \"--help\" ]; then\n  printf -- '{help}\\n'\nfi\nexit 0\n"
+        );
+        fs::write(&path, script).expect("write fake Pi");
         let mut permissions = fs::metadata(&path).expect("fake Pi metadata").permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(&path, permissions).expect("make fake Pi executable");
         path
+    }
+
+    #[cfg(unix)]
+    fn write_fake_pi(directory: &std::path::Path) -> std::path::PathBuf {
+        write_fake_pi_version(directory, "0.84.1", &REQUIRED_PI_RPC_FLAGS.join(" "))
     }
 
     #[cfg(unix)]
@@ -240,11 +303,58 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_range_is_explicit_and_narrow() {
-        let requirement = VersionReq::parse(SUPPORTED_PI_VERSION).expect("valid range");
-        assert!(requirement.matches(&Version::parse("0.84.1").expect("valid version")));
-        assert!(requirement.matches(&Version::parse("0.84.2").expect("valid version")));
-        assert!(!requirement.matches(&Version::parse("0.84.0").expect("valid version")));
-        assert!(!requirement.matches(&Version::parse("0.85.0").expect("valid version")));
+    fn compatibility_policy_is_minimum_only() {
+        let minimum = Version::parse(MINIMUM_PI_VERSION).expect("valid minimum");
+        for version in ["0.84.1", "0.84.4", "0.85.1", "0.99.0", "1.0.0"] {
+            assert!(Version::parse(version).expect("valid version") >= minimum);
+        }
+        assert!(Version::parse("0.84.0").expect("valid version") < minimum);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_accepts_future_versions_with_required_capabilities() {
+        for version in ["0.84.4", "0.85.1", "0.99.0", "1.0.0"] {
+            let directory = tempfile::tempdir().expect("temporary Pi directory");
+            let path =
+                write_fake_pi_version(directory.path(), version, &REQUIRED_PI_RPC_FLAGS.join(" "));
+            let installation = super::PiProbe::new(Some(path))
+                .inspect()
+                .expect("probe future Pi version");
+            assert!(installation.is_compatible(), "Pi {version}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn future_version_without_required_capabilities_is_incompatible() {
+        let directory = tempfile::tempdir().expect("temporary Pi directory");
+        let path = write_fake_pi_version(directory.path(), "0.99.0", "--mode <mode>");
+
+        let error = super::PiProbe::new(Some(path))
+            .inspect_compatibility()
+            .expect_err("missing RPC capability");
+        assert_eq!(
+            error,
+            super::PiCompatibilityError::MissingRequiredCapability
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn versions_below_minimum_are_rejected_by_compatibility_preflight() {
+        let directory = tempfile::tempdir().expect("temporary Pi directory");
+        let path =
+            write_fake_pi_version(directory.path(), "0.84.0", &REQUIRED_PI_RPC_FLAGS.join(" "));
+
+        let error = super::PiProbe::new(Some(path))
+            .inspect_compatibility()
+            .expect_err("old Pi version");
+        assert_eq!(
+            error,
+            super::PiCompatibilityError::TooOld {
+                found: Version::parse("0.84.0").expect("valid version"),
+            }
+        );
     }
 }

@@ -1800,6 +1800,16 @@ pub enum DispatchError {
 impl DispatchError {
     #[allow(clippy::too_many_lines)]
     fn public_event(&self) -> ServerEvent {
+        if let Self::Runtime(RuntimeManagerError::PiTooOld { found }) = self {
+            return ServerEvent::Error {
+                code: ErrorCode::UnsupportedVersion,
+                message: format!(
+                    "Pi {found} is too old. Pix requires Pi {} or newer.",
+                    crate::pi::MINIMUM_PI_VERSION
+                ),
+                retryable: false,
+            };
+        }
         let (code, message, retryable) = match self {
             Self::InvalidSessionId => (ErrorCode::InvalidRequest, "Invalid session ID", false),
             Self::SessionNotFound(_) | Self::Workspace(WorkspaceError::UnknownWorkspace(_)) => (
@@ -1901,6 +1911,21 @@ impl DispatchError {
             Self::Runtime(RuntimeManagerError::TuiUnavailable(_)) => (
                 ErrorCode::PiUnavailable,
                 "The local Pi TUI bridge is temporarily unreachable",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::PiMissingRequiredCapability) => (
+                ErrorCode::UnsupportedVersion,
+                "The installed Pi does not provide the RPC capabilities required by Pix",
+                false,
+            ),
+            Self::Runtime(RuntimeManagerError::PiNotFound) => (
+                ErrorCode::PiUnavailable,
+                "Pix could not find a Pi executable on this host",
+                true,
+            ),
+            Self::Runtime(RuntimeManagerError::PiCannotLaunch) => (
+                ErrorCode::PiUnavailable,
+                "Pix could not start Pi on this host. Check Pix diagnostics on the Mac",
                 true,
             ),
             Self::Runtime(
@@ -2101,5 +2126,60 @@ mod tui_snapshot_tests {
                 ..
             }
         )));
+    }
+}
+
+#[cfg(test)]
+mod compatibility_error_tests {
+    use semver::Version;
+
+    use super::{DispatchError, RuntimeManagerError};
+    use pix_wire::{ErrorCode, ServerEvent};
+
+    fn error_parts(error: &DispatchError) -> (ErrorCode, String, bool) {
+        match error.public_event() {
+            ServerEvent::Error {
+                code,
+                message,
+                retryable,
+            } => (code, message, retryable),
+            event => panic!("expected error event, got {event:?}"),
+        }
+    }
+
+    #[test]
+    fn old_pi_is_actionable_without_exposing_local_details() {
+        let error = DispatchError::Runtime(RuntimeManagerError::PiTooOld {
+            found: Version::parse("0.83.0").expect("valid version"),
+        });
+        let (code, message, retryable) = error_parts(&error);
+
+        assert_eq!(code, ErrorCode::UnsupportedVersion);
+        assert_eq!(
+            message,
+            "Pi 0.83.0 is too old. Pix requires Pi 0.84.1 or newer."
+        );
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn missing_capability_and_launch_failures_have_distinct_safe_categories() {
+        let missing = DispatchError::Runtime(RuntimeManagerError::PiMissingRequiredCapability);
+        let (missing_code, missing_message, missing_retryable) = error_parts(&missing);
+        assert_eq!(missing_code, ErrorCode::UnsupportedVersion);
+        assert_eq!(
+            missing_message,
+            "The installed Pi does not provide the RPC capabilities required by Pix"
+        );
+        assert!(!missing_retryable);
+
+        let launch = DispatchError::Runtime(RuntimeManagerError::PiCannotLaunch);
+        let (launch_code, launch_message, launch_retryable) = error_parts(&launch);
+        assert_eq!(launch_code, ErrorCode::PiUnavailable);
+        assert_eq!(
+            launch_message,
+            "Pix could not start Pi on this host. Check Pix diagnostics on the Mac"
+        );
+        assert!(launch_retryable);
     }
 }

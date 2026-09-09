@@ -100,11 +100,11 @@ pub(crate) fn pi_command(
                 .with_environment(environment)
                 .inspect()
                 .with_context(|| format!("probing Pi at {}", path.display()))?;
-            if !installation.supported {
+            if !installation.is_compatible() {
                 bail!(
-                    "Pi {} is outside the currently verified range {}",
+                    "Pi {} is too old. Pix requires Pi {} or newer.",
                     installation.version,
-                    pix_core::pi::SUPPORTED_PI_VERSION
+                    pix_core::pi::MINIMUM_PI_VERSION
                 );
             }
             let transaction = store.transaction()?;

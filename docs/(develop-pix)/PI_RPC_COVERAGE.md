@@ -3,9 +3,10 @@ title: Pi RPC coverage matrix
 description: See how Pi's RPC surface maps onto the versioned Pix wire protocol.
 ---
 
-How Pi's RPC surface (verified against the supported line listed in
-[Compatibility](/docs/compatibility)) maps onto the Pix wire protocol. Update
-this file whenever `SUPPORTED_PI_VERSION` or the bridge changes.
+How Pi's RPC surface (checked against the minimum and capability contract
+listed in [Compatibility](/docs/compatibility)) maps onto the Pix wire
+protocol. Update this file whenever `MINIMUM_PI_VERSION`, the required RPC
+flags, or the bridge changes.
 
 For the protocol layers and capability negotiation around this mapping, see
 [Wire protocol](/docs/wire-protocol). This page remains the exact operation

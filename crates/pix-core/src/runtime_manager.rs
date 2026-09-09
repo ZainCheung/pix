@@ -8,6 +8,7 @@ use pix_wire::{HostModelDefaults, SessionQueue, SessionState};
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
+use crate::pi::{PiCompatibilityError, PiInstallation};
 use crate::pi_rpc::{PiCommand, PiEvent, PiResponse, RpcError};
 use crate::runtime::{PiRuntime, PiRuntimeOptions, RuntimeError, SessionLaunch};
 use crate::session::{DiscoveredSession, SessionError, SessionSnapshot};
@@ -127,6 +128,7 @@ impl RuntimePhase {
 /// Owns all active Pi children and enforces host runtime limits.
 pub struct RuntimeManager {
     options: RuntimeManagerOptions,
+    pi_preflight: Option<PiCompatibilityError>,
     runtimes: Mutex<HashMap<SessionId, ManagedRuntime>>,
     tui_bridge: Arc<TuiBridgeRegistry>,
     turns: Mutex<HashSet<SessionId>>,
@@ -144,10 +146,28 @@ impl RuntimeManager {
         Ok(Self {
             tui_bridge: Arc::new(TuiBridgeRegistry::new(options.lock_directory.clone())),
             options,
+            pi_preflight: None,
             runtimes: Mutex::new(HashMap::new()),
             turns: Mutex::new(HashSet::new()),
             lifecycle: Mutex::new(()),
         })
+    }
+
+    /// Creates a manager with the result of a host-side Pi compatibility
+    /// preflight. A failed preflight is retained as a safe category and
+    /// returned when a client requests a new or resumed Pi session; the host
+    /// itself can therefore stay available for diagnostics and repair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeManagerError`] when runtime limits are invalid.
+    pub fn new_with_pi_preflight(
+        options: RuntimeManagerOptions,
+        preflight: Result<PiInstallation, PiCompatibilityError>,
+    ) -> Result<Self, RuntimeManagerError> {
+        let mut manager = Self::new(options)?;
+        manager.pi_preflight = preflight.err();
+        Ok(manager)
     }
 
     /// Configures the optional TUI bridge authorization view.  The normal
@@ -1058,6 +1078,9 @@ impl RuntimeManager {
 
     fn start(&self, workspace: &Path, launch: SessionLaunch) -> Result<(), RuntimeManagerError> {
         self.reject_tui_owner(launch.id())?;
+        if let Some(error) = &self.pi_preflight {
+            return Err(error.clone().into());
+        }
         self.make_capacity()?;
         let workspace = std::fs::canonicalize(workspace).map_err(|source| {
             RuntimeManagerError::Canonicalize {
@@ -1291,6 +1314,17 @@ pub enum RuntimeManagerError {
     NoAttachedClient(SessionId),
     #[error("Pi session still has an operation in flight: {0}")]
     Busy(SessionId),
+    #[error(
+        "Pi {found} is too old. Pix requires Pi {minimum} or newer.",
+        minimum = crate::pi::MINIMUM_PI_VERSION
+    )]
+    PiTooOld { found: semver::Version },
+    #[error("The installed Pi does not provide the RPC capabilities required by Pix")]
+    PiMissingRequiredCapability,
+    #[error("Pix could not find a Pi executable on this host")]
+    PiNotFound,
+    #[error("Pix could not start Pi on this host. Check Pix diagnostics on the Mac")]
+    PiCannotLaunch,
     #[error("failed to canonicalize {path}: {source}")]
     Canonicalize { path: PathBuf, source: io::Error },
     #[error("session file {path} is outside session directory {directory}")]
@@ -1303,4 +1337,64 @@ pub enum RuntimeManagerError {
     Session(#[from] SessionError),
     #[error(transparent)]
     TuiBridge(#[from] TuiBridgeError),
+}
+
+impl From<PiCompatibilityError> for RuntimeManagerError {
+    fn from(error: PiCompatibilityError) -> Self {
+        match error {
+            PiCompatibilityError::TooOld { found } => Self::PiTooOld { found },
+            PiCompatibilityError::MissingRequiredCapability => Self::PiMissingRequiredCapability,
+            PiCompatibilityError::NotFound => Self::PiNotFound,
+            PiCompatibilityError::CannotLaunch => Self::PiCannotLaunch,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use semver::Version;
+    use tempfile::tempdir;
+
+    use super::{RuntimeManager, RuntimeManagerError, RuntimeManagerOptions};
+    use crate::host_environment::HostEnvironment;
+    use crate::pi::PiCompatibilityError;
+
+    fn options(executable: PathBuf, lock_directory: PathBuf) -> RuntimeManagerOptions {
+        RuntimeManagerOptions {
+            executable,
+            lock_directory,
+            max_active_sessions: 1,
+            max_concurrent_turns: 1,
+            idle_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(2),
+            extra_arguments: Vec::new(),
+            environment: HostEnvironment::from_process(),
+        }
+    }
+
+    #[test]
+    fn compatibility_preflight_blocks_session_start_before_spawning_pi() {
+        let workspace = tempdir().expect("workspace");
+        let locks = tempdir().expect("locks");
+        let manager = RuntimeManager::new_with_pi_preflight(
+            options(PathBuf::from("/does/not/exist"), locks.path().to_path_buf()),
+            Err(PiCompatibilityError::TooOld {
+                found: Version::parse("0.83.0").expect("valid version"),
+            }),
+        )
+        .expect("runtime manager");
+
+        let error = manager
+            .create(workspace.path(), None)
+            .expect_err("old Pi must be rejected by preflight");
+        assert!(matches!(
+            error,
+            RuntimeManagerError::PiTooOld { found }
+                if found == Version::parse("0.83.0").expect("valid version")
+        ));
+        assert_eq!(manager.active_count(), 0);
+    }
 }
