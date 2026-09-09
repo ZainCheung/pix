@@ -347,6 +347,37 @@ func firstRunDetectionFollowsConfigState() {
     #expect(HostModel.isConfiguredStatus(from: "Pix status\n  config: missing") == nil)
 }
 
+@Test("Pi status keeps the minimum-only compatibility result")
+func piCompatibilityFollowsCLIStatus() {
+    let compatible = HostModel.parsePiCompatibility(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"source":"path","version":"0.85.1","supported":true},"devices":0,"workspaces":0}}
+        """
+    )
+    let updateRequired = HostModel.parsePiCompatibility(
+        from: """
+        {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"source":"path","version":"0.83.0","supported":false},"devices":0,"workspaces":0}}
+        """
+    )
+
+    #expect(compatible == true)
+    #expect(updateRequired == false)
+    #expect(
+        HostModel.parsePiCompatibilityStatus(
+            from: """
+            {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"version":"0.85.1","supported":true,"compatibility":"compatible"},"devices":0,"workspaces":0}}
+            """
+        ) == "compatible"
+    )
+    #expect(
+        HostModel.parsePiCompatibilityStatus(
+            from: """
+            {"schema_version":1,"ok":true,"command":"status","data":{"config_state":"ready","pi":{"compatibility":"missing_required_capability"},"devices":0,"workspaces":0}}
+            """
+        ) == "missing_required_capability"
+    )
+}
+
 @Test("guided setup recommends the product relay")
 func setupRecommendsProductRelay() {
     #expect(HostModel.defaultRelayURL == "wss://pix-relay.deepoke.com")

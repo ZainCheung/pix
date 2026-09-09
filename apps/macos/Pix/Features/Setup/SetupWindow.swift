@@ -35,7 +35,7 @@ struct SetupWindow: View {
 
         var detail: LocalizedStringKey {
             switch self {
-            case .pi: "Pix found the Pi CLI on this Mac and verified its version."
+            case .pi: "Pix checks the Pi CLI version and RPC startup options."
             case .remoteAccess: "The relay carries end-to-end encrypted traffic when your phone is away from this network."
             case .workspace: "Pix never browses your Mac; Pi only sees folders you authorize here."
             case .review: "You can change any of this later from the Pix menu."
@@ -140,7 +140,46 @@ struct SetupWindow: View {
 
     private var piPage: some View {
         page {
-            if let version = model.piVersion {
+            if model.piCompatibilityStatus == "missing_required_capability" {
+                statusCard(
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .orange,
+                    title: "Pi RPC capabilities are missing",
+                    caption: "Install a Pi release with Pix's required RPC startup options."
+                )
+                Button {
+                    choosePi()
+                } label: {
+                    Label(String(localized: "Choose a different Pi executable…"), systemImage: "folder")
+                }
+                .controlSize(.large)
+            } else if model.piCompatibilityStatus == "cannot_launch" {
+                statusCard(
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .orange,
+                    title: "Pix couldn't verify Pi",
+                    caption: "Check Pix diagnostics on the Mac, or choose another executable."
+                )
+                Button {
+                    choosePi()
+                } label: {
+                    Label(String(localized: "Choose a different Pi executable…"), systemImage: "folder")
+                }
+                .controlSize(.large)
+            } else if let version = model.piVersion, model.piCompatible == false {
+                statusCard(
+                    symbol: "exclamationmark.triangle.fill",
+                    tint: .orange,
+                    title: "Pi \(version) needs an update",
+                    caption: "Pix requires Pi 0.84.1 or newer."
+                )
+                Button {
+                    choosePi()
+                } label: {
+                    Label(String(localized: "Choose a different Pi executable…"), systemImage: "folder")
+                }
+                .controlSize(.large)
+            } else if let version = model.piVersion {
                 statusCard(
                     symbol: "checkmark.circle.fill",
                     tint: .green,
@@ -379,7 +418,11 @@ struct SetupWindow: View {
 
     private var canContinue: Bool {
         switch step {
-        case .pi: model.piVersion != nil
+        case .pi:
+            model.piVersion != nil
+                && model.piCompatible != false
+                && model.piCompatibilityStatus != "missing_required_capability"
+                && model.piCompatibilityStatus != "cannot_launch"
         case .remoteAccess: relayMode != .custom || Self.isValidRelayURL(customRelay)
         case .workspace, .review: workspaceURL != nil
         }

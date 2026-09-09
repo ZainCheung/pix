@@ -376,7 +376,7 @@ pub(crate) fn prepare_setup_environment(
             .with_environment(environment.clone())
             .inspect();
         match result {
-            Ok(installation) if installation.supported => {
+            Ok(installation) if installation.is_compatible() => {
                 remember_discovered_pi(config, &installation.executable);
                 ui.task_done(&format!("Pi {}", installation.version));
                 if options.verbose {
@@ -388,31 +388,52 @@ pub(crate) fn prepare_setup_environment(
                 return Ok(installation.version.to_string());
             }
             Ok(installation) => {
-                ui.task_failed(&format!("Pi {} is not supported", installation.version));
+                ui.task_failed(&format!("Pi {} is too old", installation.version));
                 if !ui.interactive() {
                     bail!(
-                        "Pi {} is outside the currently verified range {}",
+                        "Pi {} is too old. Pix requires Pi {} or newer.",
                         installation.version,
-                        pix_core::pi::SUPPORTED_PI_VERSION
+                        pix_core::pi::MINIMUM_PI_VERSION
                     );
                 }
                 ui.error(
-                    "This Pix build supports a different Pi version",
-                    Some(pix_core::pi::SUPPORTED_PI_VERSION),
+                    "This Pi version is too old",
+                    Some(&format!(
+                        "Pix requires Pi {} or newer",
+                        pix_core::pi::MINIMUM_PI_VERSION
+                    )),
                 );
             }
             Err(error) => {
-                ui.task_failed("Pi was not found");
+                let missing_capability =
+                    matches!(&error, pix_core::pi::PiError::MissingCapability(_));
+                let not_found = matches!(
+                    &error,
+                    pix_core::pi::PiError::NotFound
+                        | pix_core::pi::PiError::Resolve { .. }
+                        | pix_core::pi::PiError::NotExecutable(_)
+                );
+                ui.task_failed(if missing_capability {
+                    "Pi is missing a required RPC capability"
+                } else if not_found {
+                    "Pi was not found"
+                } else {
+                    "Pi could not be verified"
+                });
                 if !ui.interactive() {
                     return Err(anyhow::Error::new(error).context("checking Pi"));
                 }
-                let not_found = matches!(&error, pix_core::pi::PiError::NotFound);
                 if not_found {
                     ui.error(
                         "Pi was not found",
                         Some(
                             "Make sure `pi` is available in your PATH, or select an executable manually.",
                         ),
+                    );
+                } else if missing_capability {
+                    ui.error(
+                        "Pi does not provide the RPC capabilities Pix needs",
+                        Some("Install a newer Pi release or choose another executable."),
                     );
                 } else {
                     ui.error(

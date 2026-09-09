@@ -42,6 +42,8 @@ pub(crate) struct PiOverview {
     pub(crate) version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) compatibility: Option<PiCompatibilityStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,6 +86,16 @@ pub(crate) enum PiSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+pub(crate) enum PiCompatibilityStatus {
+    Compatible,
+    UpdateRequired,
+    MissingRequiredCapability,
+    NotFound,
+    CannotLaunch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ServiceState {
     Running,
     Stopped,
@@ -99,7 +111,13 @@ pub(crate) enum AccessMode {
     Unknown,
 }
 
-type PiProbeResult = Option<(String, String, bool)>;
+#[derive(Debug, Clone)]
+struct PiProbeResult {
+    executable: Option<String>,
+    version: Option<String>,
+    supported: Option<bool>,
+    compatibility: PiCompatibilityStatus,
+}
 
 /// Resolves the Pi pix would run right now. Shared by every config state so
 /// the first-run overview and setup guide see the same environment.
@@ -109,25 +127,49 @@ fn probe_pi(store: &ConfigStore) -> PiProbeResult {
         .ok()
         .and_then(|config| config.preferences.pi_executable.clone());
     let environment = pix_core::HostEnvironment::resolve_for("pi");
-    pix_core::PiProbe::new(configured)
+    match pix_core::PiProbe::new(configured.clone())
         .with_environment(environment)
         .inspect()
-        .ok()
-        .map(|installation| {
-            (
-                installation.executable.display().to_string(),
-                installation.version.to_string(),
-                installation.supported,
-            )
-        })
+    {
+        Ok(installation) => PiProbeResult {
+            executable: Some(installation.executable.display().to_string()),
+            version: Some(installation.version.to_string()),
+            supported: Some(installation.is_compatible()),
+            compatibility: if installation.is_compatible() {
+                PiCompatibilityStatus::Compatible
+            } else {
+                PiCompatibilityStatus::UpdateRequired
+            },
+        },
+        Err(error) => PiProbeResult {
+            executable: configured.map(|path| path.display().to_string()),
+            version: None,
+            supported: None,
+            compatibility: match error {
+                pix_core::pi::PiError::MissingCapability(_) => {
+                    PiCompatibilityStatus::MissingRequiredCapability
+                }
+                pix_core::pi::PiError::NotFound
+                | pix_core::pi::PiError::Resolve { .. }
+                | pix_core::pi::PiError::NotExecutable(_) => PiCompatibilityStatus::NotFound,
+                pix_core::pi::PiError::Launch { .. }
+                | pix_core::pi::PiError::CommandFailed { .. }
+                | pix_core::pi::PiError::Version { .. }
+                | pix_core::pi::PiError::MinimumVersion(_) => PiCompatibilityStatus::CannotLaunch,
+            },
+        },
+    }
 }
 
 fn merge_pi_probe(pi: &mut PiOverview, probe: &PiProbeResult) {
-    if let Some((executable, version, supported)) = probe {
+    if let Some(executable) = &probe.executable {
         pi.executable = Some(executable.clone());
-        pi.version = Some(version.clone());
-        pi.supported = Some(*supported);
     }
+    if let Some(version) = &probe.version {
+        pi.version = Some(version.clone());
+    }
+    pi.supported = probe.supported;
+    pi.compatibility = Some(probe.compatibility);
 }
 
 impl HostOverview {
@@ -168,26 +210,19 @@ impl HostOverview {
                         executable: None,
                         version: None,
                         supported: None,
+                        compatibility: None,
                     },
                     |path| PiOverview {
                         source: PiSource::Configured,
                         executable: Some(path.display().to_string()),
                         version: None,
                         supported: None,
+                        compatibility: None,
                     },
                 );
                 // Status absorbs the doctor probe: the overview reports the
                 // Pi pix actually runs, not just what the config points at.
-                let environment = pix_core::HostEnvironment::resolve_for("pi");
-                if let Ok(installation) =
-                    pix_core::PiProbe::new(config.preferences.pi_executable.clone())
-                        .with_environment(environment)
-                        .inspect()
-                {
-                    pi.executable = Some(installation.executable.display().to_string());
-                    pi.version = Some(installation.version.to_string());
-                    pi.supported = Some(installation.supported);
-                }
+                merge_pi_probe(&mut pi, &pi_probe);
                 let access = match &config.preferences.relay_url {
                     Some(url) if config.preferences.relay_enabled => AccessOverview {
                         mode: AccessMode::Relay,
@@ -233,6 +268,7 @@ impl HostOverview {
                             executable: None,
                             version: None,
                             supported: None,
+                            compatibility: None,
                         };
                         merge_pi_probe(&mut pi, &pi_probe);
                         pi
@@ -257,6 +293,7 @@ impl HostOverview {
                     executable: None,
                     version: None,
                     supported: None,
+                    compatibility: None,
                 },
                 service,
                 access: AccessOverview {
@@ -381,12 +418,49 @@ pub(crate) fn render_overview(
         (PiSource::Path, _) => "PATH discovery".to_owned(),
         _ => "unknown".to_owned(),
     };
-    let pi = match &overview.pi.version {
-        Some(version) if overview.pi.supported.unwrap_or(true) => format!("{pi} · {version}"),
-        Some(version) => format!("{pi} · {version} (unsupported)"),
-        None => pi,
+    let pi = match (&overview.pi.version, overview.pi.compatibility) {
+        (Some(version), Some(PiCompatibilityStatus::UpdateRequired)) => {
+            format!("{pi} · {version} · update required")
+        }
+        (Some(version), None) if overview.pi.supported == Some(false) => {
+            format!("{pi} · {version} · update required")
+        }
+        (Some(version), Some(PiCompatibilityStatus::Compatible) | None) => {
+            format!("{pi} · {version}")
+        }
+        (Some(version), Some(PiCompatibilityStatus::MissingRequiredCapability)) => {
+            format!("{pi} · {version} · RPC capability missing")
+        }
+        (Some(version), Some(PiCompatibilityStatus::NotFound)) => {
+            format!("{pi} · {version} · executable unavailable")
+        }
+        (Some(version), Some(PiCompatibilityStatus::CannotLaunch)) => {
+            format!("{pi} · {version} · could not start")
+        }
+        (None, Some(PiCompatibilityStatus::MissingRequiredCapability)) => {
+            format!("{pi} · RPC capability missing")
+        }
+        (None, Some(PiCompatibilityStatus::NotFound)) => format!("{pi} · not found"),
+        (None, Some(PiCompatibilityStatus::CannotLaunch)) => format!("{pi} · could not start"),
+        (None, _) => pi,
     };
     ui.status_row("pi", &pi, UiTone::Muted);
+    match overview.pi.compatibility {
+        Some(PiCompatibilityStatus::UpdateRequired) => ui.hint(&format!(
+            "Pix requires Pi {} or newer",
+            pix_core::pi::MINIMUM_PI_VERSION
+        )),
+        Some(PiCompatibilityStatus::MissingRequiredCapability) => {
+            ui.hint("Install a Pi release with Pix's required RPC startup options");
+        }
+        Some(PiCompatibilityStatus::NotFound) => {
+            ui.hint("Install Pi or set its executable with `pix pi set`");
+        }
+        Some(PiCompatibilityStatus::CannotLaunch) => {
+            ui.hint("Run `pix diagnostics export` on the Mac for launch details");
+        }
+        Some(PiCompatibilityStatus::Compatible) | None => {}
+    }
     match overview.service.state {
         ServiceState::Running => ui.status_row("service", "● running", UiTone::Success),
         ServiceState::Stopped => ui.status_row("service", "○ installed, stopped", UiTone::Warning),

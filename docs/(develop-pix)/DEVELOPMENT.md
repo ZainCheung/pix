@@ -19,7 +19,7 @@ Looking for help using Pix? Start with the [user documentation](/docs).
 - Xcode when changing the macOS app.
 
 From an installed Pix CLI, `pix status` checks the selected Pi executable and
-reports whether its version and startup options are supported. Use
+reports whether its version and startup options are compatible. Use
 `pix pi set /absolute/path/to/pi` when development should use a different
 executable.
 

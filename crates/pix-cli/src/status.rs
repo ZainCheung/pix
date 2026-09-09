@@ -822,6 +822,7 @@ pub(crate) fn status_command(store: &ConfigStore, output: CommandOutput) -> Resu
     legacy_status_command(store, &overview)
 }
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn legacy_status_command(store: &ConfigStore, overview: &HostOverview) -> Result<()> {
     println!("Pix status");
     println!("  config: {}", store.path().display());
@@ -847,9 +848,46 @@ pub(crate) fn legacy_status_command(store: &ConfigStore, overview: &HostOverview
             } else {
                 "PATH discovery"
             };
-            match &overview.pi.version {
-                Some(version) => println!("  pi: {pi_source} ({version})"),
-                None => println!("  pi: {pi_source}"),
+            match (&overview.pi.version, overview.pi.compatibility) {
+                (Some(version), Some(crate::home::PiCompatibilityStatus::UpdateRequired)) => {
+                    println!("  pi: {pi_source} ({version}; update required)");
+                    println!(
+                        "  pi requirement: Pix requires Pi {} or newer",
+                        pix_core::pi::MINIMUM_PI_VERSION
+                    );
+                }
+                (Some(version), None) if overview.pi.supported == Some(false) => {
+                    println!("  pi: {pi_source} ({version}; update required)");
+                    println!(
+                        "  pi requirement: Pix requires Pi {} or newer",
+                        pix_core::pi::MINIMUM_PI_VERSION
+                    );
+                }
+                (Some(version), Some(crate::home::PiCompatibilityStatus::Compatible) | None) => {
+                    println!("  pi: {pi_source} ({version})");
+                }
+                (
+                    Some(version),
+                    Some(crate::home::PiCompatibilityStatus::MissingRequiredCapability),
+                ) => {
+                    println!("  pi: {pi_source} ({version}; RPC capability missing)");
+                }
+                (Some(version), Some(crate::home::PiCompatibilityStatus::NotFound)) => {
+                    println!("  pi: {pi_source} ({version}; executable unavailable)");
+                }
+                (Some(version), Some(crate::home::PiCompatibilityStatus::CannotLaunch)) => {
+                    println!("  pi: {pi_source} ({version}; could not start)");
+                }
+                (None, Some(crate::home::PiCompatibilityStatus::MissingRequiredCapability)) => {
+                    println!("  pi: {pi_source} (RPC capability missing)");
+                }
+                (None, Some(crate::home::PiCompatibilityStatus::NotFound)) => {
+                    println!("  pi: {pi_source} (not found)");
+                }
+                (None, Some(crate::home::PiCompatibilityStatus::CannotLaunch)) => {
+                    println!("  pi: {pi_source} (could not start)");
+                }
+                (None, _) => println!("  pi: {pi_source}"),
             }
         }
         Err(pix_core::config::ConfigError::Read { source, .. })

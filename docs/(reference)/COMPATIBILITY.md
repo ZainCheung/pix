@@ -8,11 +8,15 @@ systems and released artifacts, see [Platform support](/docs/platform-support).
 
 ## Pi version and startup interface
 
-The current Pix host verifies this Pi range:
+The current Pix host requires this minimum Pi version:
 
 ```text
->=0.84.1, <0.85.0
+0.84.1
 ```
+
+Pi releases newer than the minimum are allowed when they continue to expose
+the required RPC startup interface. Pix does not reject a Pi solely because
+its version is newer than the versions already tested.
 
 During the probe Pix runs `pi --version` and checks that Pi advertises the RPC
 options the adapter uses:
@@ -24,9 +28,9 @@ options the adapter uses:
 --session-id <id>
 ```
 
-`pix status` reports the detected version and whether it is supported. If more
-than one Pi is installed, use `pix pi set /absolute/path/to/pi` and restart the
-host service.
+`pix status` reports the detected version and whether it is compatible. Versions
+below the minimum are shown as requiring an update. If more than one Pi is
+installed, use `pix pi set /absolute/path/to/pi` and restart the host service.
 
 ## Pix wire protocol
 
@@ -47,7 +51,8 @@ The optional `@zaincheung/pix` package uses Pi's extension API and the local
 bridge socket. Its package manifest declares a peer dependency on
 `@earendil-works/pi-coding-agent` and does not pin a separate Pi semver range.
 Install the package with Pi's package command, then reload or restart Pi. The
-host and extension must both be running on a supported Unix host.
+host and extension must both be running on a supported Unix host with a Pi
+release at or above the minimum and the required RPC startup options.
 
 When an exact compatibility check fails, start with `pix status`, inspect
 [Diagnostics](/docs/diagnostics), and then compare the implementation details
