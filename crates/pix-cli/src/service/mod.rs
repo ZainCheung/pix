@@ -23,6 +23,9 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 
+mod executable;
+pub(crate) use executable::{ExecutableCheck, ExecutableIdentityMonitor};
+
 #[derive(Debug, clap::Subcommand)]
 pub enum ServiceCommand {
     /// Install and enable the user service, starting it unless --no-start is set.
