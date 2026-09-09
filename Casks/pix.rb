@@ -1,6 +1,6 @@
 cask "pix" do
-  version "0.1.5"
-  sha256 "a9e66be69dab4e9b8fec03d3194d75da3afdbf5daf231a38f90a818957c5fb0e"
+  version "0.1.6"
+  sha256 "987bd3777130227d6e2ef57432b196315aba1619af5a12051ead3bac68b1d333"
 
   url "https://github.com/ZainCheung/pix/releases/download/v#{version}/pix-#{version}-macos-arm64.zip"
   name "Pix"
