@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use pix_core::ConfigStore;
+use pix_core::{ConfigStore, PiCompatibilityReport};
 
 const CONTROL_SCHEMA_VERSION: u32 = 1;
 
@@ -27,6 +27,43 @@ pub(crate) fn running_host_version(store: &ConfigStore) -> Result<String> {
     pix_version_from_capabilities(&data).map(ToOwned::to_owned)
 }
 
+/// Reads the compatibility snapshot captured by a running Host lifecycle.
+///
+/// `Ok(None)` is deliberately distinct from an RPC failure: a pre-versioned
+/// Host (or a Host that predates the report field) is still usable, but the
+/// caller must fall back to one local compatibility probe for an accurate
+/// status.  The report itself never crosses the public phone protocol.
+pub(crate) fn running_host_pi_report(store: &ConfigStore) -> Result<Option<PiCompatibilityReport>> {
+    let data = request_event(
+        store,
+        "capabilities",
+        "capabilities",
+        // A Host binds its local sockets before the compatibility preflight
+        // completes. Keep this request open long enough for that one probe so
+        // a concurrent `pix status` waits for the authoritative snapshot
+        // instead of starting a duplicate Pi process. Older Hosts answer
+        // immediately without the additive field and still take the fallback
+        // path below.
+        Duration::from_secs(30),
+    )?;
+    // A cached report is authoritative only for the matching Host binary.
+    // Version-mismatched processes are handled by the existing compatibility
+    // fallback so a stale snapshot cannot be mistaken for this CLI's Host.
+    if pix_version_from_capabilities(&data).ok() != Some(env!("CARGO_PKG_VERSION")) {
+        return Ok(None);
+    }
+    pi_report_from_capabilities(&data)
+}
+
+fn pi_report_from_capabilities(data: &serde_json::Value) -> Result<Option<PiCompatibilityReport>> {
+    let Some(report) = data.get("pi_compatibility").or_else(|| data.get("pi")) else {
+        return Ok(None);
+    };
+    serde_json::from_value(report.clone())
+        .context("Pix host returned an invalid Pi compatibility report")
+        .map(Some)
+}
+
 pub(crate) fn verify_control_compatibility(store: &ConfigStore) -> Result<()> {
     let running_version = running_host_version(store)?;
     let current_version = env!("CARGO_PKG_VERSION");
@@ -34,6 +71,21 @@ pub(crate) fn verify_control_compatibility(store: &ConfigStore) -> Result<()> {
         bail!("running Pix host is Pix {running_version}, but this CLI is Pix {current_version}");
     }
     Ok(())
+}
+
+/// Returns whether a running Host is definitively older than this CLI's
+/// versioned control surface. Transient connection failures (including a
+/// Host that has bound its socket but is still in startup preflight) are not
+/// evidence of an upgrade requirement and must not trigger a service restart.
+pub(crate) fn control_upgrade_required(store: &ConfigStore) -> bool {
+    match running_host_version(store) {
+        Ok(version) => version != env!("CARGO_PKG_VERSION"),
+        Err(error) => {
+            let message = error.to_string();
+            message.contains("predates versioned control responses")
+                || message.contains("missing pix_version")
+        }
+    }
 }
 
 fn pix_version_from_capabilities(data: &serde_json::Value) -> Result<&str> {
@@ -132,7 +184,7 @@ fn required_token<'a>(words: &mut impl Iterator<Item = &'a str>, label: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{pix_version_from_capabilities, rpc_request_for};
+    use super::{pi_report_from_capabilities, pix_version_from_capabilities, rpc_request_for};
 
     #[test]
     fn reads_host_version_from_capabilities() {
@@ -154,6 +206,40 @@ mod tests {
             "control_schema_version": 1,
         });
         assert!(pix_version_from_capabilities(&data).is_err());
+    }
+
+    #[test]
+    fn accepts_capabilities_without_a_pi_report_for_old_hosts() {
+        let data = serde_json::json!({
+            "type": "capabilities",
+            "control_schema_version": 1,
+            "pix_version": "0.6.0",
+        });
+        assert!(
+            pi_report_from_capabilities(&data)
+                .expect("parse capabilities")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parses_the_host_pi_compatibility_snapshot() {
+        let data = serde_json::json!({
+            "type": "capabilities",
+            "pi_compatibility": {
+                "executable": "/opt/homebrew/bin/pi",
+                "version": "0.85.1",
+                "compatibility": "compatible"
+            }
+        });
+        let report = pi_report_from_capabilities(&data)
+            .expect("parse report")
+            .expect("report present");
+        assert_eq!(report.version.as_deref(), Some("0.85.1"));
+        assert_eq!(
+            report.compatibility,
+            pix_core::PiCompatibilityStatus::Compatible
+        );
     }
 
     #[test]

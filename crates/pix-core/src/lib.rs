@@ -48,8 +48,8 @@ pub use pairing::{
     PairingPending, PairingToken,
 };
 pub use pi::{
-    MINIMUM_PI_VERSION, PiCompatibilityError, PiError, PiInstallation, PiProbe,
-    REQUIRED_PI_RPC_FLAGS,
+    MINIMUM_PI_VERSION, PiCompatibilityError, PiCompatibilityReport, PiCompatibilityStatus,
+    PiError, PiInstallation, PiProbe, REQUIRED_PI_RPC_FLAGS,
 };
 pub use pi_rpc::{PiCommand, PiEvent, PiResponse, RpcClient};
 pub use pix_wire::host_public_key_fingerprint;

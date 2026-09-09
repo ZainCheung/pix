@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use pix_core::{
     ConfigStore, HostEnvironment, HostService, HostServiceEvent, HostState, PairingCoordinator,
-    PiProbe, RuntimeManager, RuntimeManagerOptions, SessionLockStore, workspace_fingerprint,
+    PiCompatibilityReport, PiProbe, RuntimeManager, RuntimeManagerOptions, SessionLockStore,
+    workspace_fingerprint,
 };
 use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
@@ -149,6 +150,9 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     let pi_preflight = PiProbe::new(config.preferences.pi_executable.clone())
         .with_environment(environment.clone())
         .inspect_compatibility();
+    // Keep the safe result alongside RuntimeManager so every local control
+    // client can reuse this lifecycle snapshot without probing Pi again.
+    let pi_compatibility = PiCompatibilityReport::from_preflight(&pi_preflight);
     if let Err(error) = &pi_preflight {
         log.append_text(
             "runtime",
@@ -798,6 +802,7 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
                             "type": "capabilities",
                             "control_schema_version": 1,
                             "pix_version": env!("CARGO_PKG_VERSION"),
+                            "pi_compatibility": pi_compatibility.clone(),
                         }),
                         &log,
                     );

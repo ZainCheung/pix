@@ -23,15 +23,11 @@ pub(crate) fn configured_pi_executable(
     config: &pix_core::HostConfig,
     environment: &HostEnvironment,
 ) -> PathBuf {
-    config.preferences.pi_executable.clone().unwrap_or_else(|| {
-        PiProbe::new(None)
-            .with_environment(environment.clone())
-            .inspect()
-            .map_or_else(
-                |_| PathBuf::from("pi"),
-                |installation| installation.executable,
-            )
-    })
+    let configured = config.preferences.pi_executable.clone();
+    PiProbe::new(configured.clone())
+        .with_environment(environment.clone())
+        .resolve_executable()
+        .unwrap_or_else(|_| configured.unwrap_or_else(|| PathBuf::from("pi")))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -60,16 +56,23 @@ pub(crate) fn pi_command(
                 }
                 Err(error) => return Err(error.into()),
             };
-            let environment = HostEnvironment::resolve_for("pi");
+            // `pi show` is metadata-only. Resolve a configured absolute path
+            // directly so this command never needs a login-shell capture just
+            // to inspect a value already present in the config.
+            let environment = if config
+                .as_ref()
+                .is_some_and(|config| config.preferences.pi_executable.is_some())
+            {
+                HostEnvironment::from_process()
+            } else {
+                HostEnvironment::resolve_for("pi")
+            };
             let executable = config.as_ref().map_or_else(
                 || {
                     PiProbe::new(None)
                         .with_environment(environment.clone())
-                        .inspect()
-                        .map_or_else(
-                            |_| PathBuf::from("pi"),
-                            |installation| installation.executable,
-                        )
+                        .resolve_executable()
+                        .unwrap_or_else(|_| PathBuf::from("pi"))
                 },
                 |config| configured_pi_executable(config, &environment),
             );

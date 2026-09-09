@@ -79,10 +79,9 @@ struct HostMenuView: View {
         }
         .onChange(of: model.inventoryRevision) { _, newRevision in
             guard HostMenuSnapshot.shouldHydrate(forInventoryRevision: newRevision) else { return }
-            // HostModel advances this revision only after the initial CLI and
-            // service inventory reconciliation has completed. If the menu
-            // opened during startup, hydrate the stable menu snapshot now;
-            // later socket events remain isolated from pointer tracking.
+            // HostModel advances this revision as inventory arrives. If the
+            // menu opened during startup, hydrate the stable menu snapshot
+            // now; later socket events remain isolated from pointer tracking.
             snapshot = HostMenuSnapshot(model: model)
         }
     }
