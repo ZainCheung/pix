@@ -17,6 +17,7 @@ use qrcode::{QrCode, render::unicode};
 use serde::Serialize;
 use tempfile::{Builder as TempFileBuilder, NamedTempFile};
 
+use crate::service::{ExecutableCheck, ExecutableIdentityMonitor};
 use crate::setup_ui::{SetupUi, clamp_text};
 use crate::status::{
     HostControlCommand, HostControlResponder, HostServiceControl, HostServiceStatus,
@@ -83,6 +84,19 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     let log = HostLog::open(store.path());
     log.install_panic_hook();
     log.append_text("lifecycle", "serve starting");
+    let executable_monitor = if service_mode {
+        if let Some(monitor) = ExecutableIdentityMonitor::current() {
+            Some(monitor)
+        } else {
+            log.append_text(
+                "lifecycle",
+                "service executable identity unavailable; replacement monitoring disabled",
+            );
+            None
+        }
+    } else {
+        None
+    };
     {
         let log = log.clone();
         pix_core::install_diagnostic_sink(move |event, body| {
@@ -285,6 +299,7 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
 
     let mut should_stop = false;
     let mut commands_disconnected = false;
+    let mut stop_reason: Option<&'static str> = None;
     // QR payload is held until the pairing agent is actually waiting on the
     // relay. Emitting it at `pair-remote` time lets a phone scan a channel
     // the host has not joined yet; the handshake then hangs and the Mac
@@ -294,6 +309,17 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     loop {
         if last_runtime_maintenance.elapsed() >= Duration::from_secs(1) {
             last_runtime_maintenance = Instant::now();
+            if executable_monitor
+                .as_ref()
+                .is_some_and(|monitor| monitor.check() == ExecutableCheck::Replaced)
+            {
+                log.append_text(
+                    "lifecycle",
+                    "service executable replacement detected; restarting",
+                );
+                stop_reason = Some("serve stopping (executable replacement)");
+                break;
+            }
             match service.refresh_config() {
                 Ok(report) if report.cleanup_pending || report.connection_cleanup_failed => {
                     log.append_text("config", "authorization applied; cleanup will retry");
@@ -780,7 +806,9 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
     }
     log.append_text(
         "lifecycle",
-        if should_stop {
+        if let Some(reason) = stop_reason {
+            reason
+        } else if should_stop {
             "serve stopping (quit command)"
         } else if service_mode {
             "serve stopping (control command)"
