@@ -1,5 +1,6 @@
 use anyhow::Result;
-use pix_core::ConfigStore;
+pub(crate) use pix_core::PiCompatibilityStatus;
+use pix_core::{ConfigStore, PiCompatibilityReport};
 use serde::Serialize;
 
 use crate::commands::shared::terminal_label;
@@ -86,16 +87,6 @@ pub(crate) enum PiSource {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum PiCompatibilityStatus {
-    Compatible,
-    UpdateRequired,
-    MissingRequiredCapability,
-    NotFound,
-    CannotLaunch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(crate) enum ServiceState {
     Running,
     Stopped,
@@ -117,6 +108,18 @@ struct PiProbeResult {
     version: Option<String>,
     supported: Option<bool>,
     compatibility: PiCompatibilityStatus,
+}
+
+impl PiProbeResult {
+    fn from_report(report: PiCompatibilityReport) -> Self {
+        let supported = report.supported();
+        Self {
+            executable: report.executable.map(|path| path.display().to_string()),
+            version: report.version,
+            supported,
+            compatibility: report.compatibility,
+        }
+    }
 }
 
 /// Resolves the Pi pix would run right now. Shared by every config state so
@@ -175,8 +178,19 @@ fn merge_pi_probe(pi: &mut PiOverview, probe: &PiProbeResult) {
 impl HostOverview {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn collect(store: &ConfigStore) -> Self {
-        let pi_probe = probe_pi(store);
         let current_service = HostServiceStatus::current(store.path());
+        // A running Host is authoritative for the Pi it checked during its
+        // lifecycle. Reuse that local snapshot instead of launching Pi again;
+        // old Hosts that do not expose the additive report fall back to the
+        // existing one-shot probe below.
+        let pi_probe = current_service
+            .as_ref()
+            .and_then(|_| {
+                crate::service_client::running_host_pi_report(store)
+                    .ok()
+                    .flatten()
+            })
+            .map_or_else(|| probe_pi(store), PiProbeResult::from_report);
         let service_installed =
             current_service.is_some() || service::managed_service_installed(store).unwrap_or(false);
         let service = match current_service {

@@ -20,9 +20,9 @@ final class HostModel {
     private(set) var devices: [PairedDevice] = []
     private(set) var sessions: [ActiveSession] = []
     private(set) var workspaceSessions: [WorkspaceSession] = []
-    /// Increments after the initial CLI-backed workspace/device reconciliation
-    /// completes. Menu surfaces use this boundary instead of the host service's
-    /// early `ready` event, which can arrive before the CLI inventory finishes.
+    /// Advances whenever host inventory changes. Menu surfaces use this
+    /// boundary instead of rebuilding directly from socket callbacks, so
+    /// lifecycle readiness and inventory hydration remain independent.
     private(set) var inventoryRevision = 0
     private(set) var pairingRequests: [PairingRequest] = []
     private(set) var launchAtLoginEnabled = false
@@ -55,6 +55,7 @@ final class HostModel {
     private var restartAttempts = 0
     private var isRequestingRemotePairing = false
     private var lifecycleTask: Task<Void, Never>?
+    private var inventoryTask: Task<Void, Never>?
     private var refreshQueued = false
     /// The CLI is resolved once for the lifetime of the model so the doctor
     /// check, inventory commands, and platform-managed Host service all use
@@ -92,45 +93,23 @@ final class HostModel {
             }
         }
         do {
-            let output = try await runPix(arguments: [
-                "--config",
-                configPath.path,
-                "status",
-            ])
-            isConfigured = Self.isConfiguredStatus(from: output) ?? true
-            piVersion = parseVersion(from: output)
-            piCompatible = Self.parsePiCompatibility(from: output)
-            piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: output)
+            // Configuration presence is a cheap local fact. A normal launch
+            // must not run `pix status` before connecting, because an absent
+            // Host would make that command perform the expensive Pi
+            // compatibility probe that the Host is about to perform itself.
+            isConfigured = FileManager.default.fileExists(atPath: configPath.path)
             guard isConfigured else {
                 // First run: hold in setup state without touching the
                 // service or inventories; the setup guide drives the rest.
                 status = .needsSetup(String(localized: "Pix is not set up on this computer."))
                 return
             }
-            if piCompatibilityStatus == "missing_required_capability" {
-                throw HostModelError.commandFailed(
-                    "The installed Pi does not provide the RPC capabilities required by Pix."
-                )
-            }
-            if piCompatibilityStatus == "cannot_launch" {
-                throw HostModelError.commandFailed(
-                    "Pix could not verify Pi on this host. Check Pix diagnostics on the Mac."
-                )
-            }
-            guard piVersion != nil else {
-                throw HostModelError.commandFailed(
-                    "Pi was not found on this host; install Pi or set its path with `pix pi set`."
-                )
-            }
-            if piCompatible == false, let piVersion {
-                throw HostModelError.commandFailed(
-                    "Pi \(piVersion) is too old. Pix requires Pi 0.84.1 or newer."
-                )
-            }
             launchAtLoginEnabled = SMAppService.mainApp.status == .enabled
             try await startHostService()
-            await loadHostInventory()
-            status = .ready
+            // `startHostService` marks the model ready as soon as the event
+            // socket is attached. Historical sessions and other inventory are
+            // deliberately hydrated in the background after that boundary.
+            beginInventoryHydration()
         } catch {
             status = .needsSetup(error.localizedDescription)
             if isUpdatingRelay, !refreshQueued {
@@ -168,9 +147,14 @@ final class HostModel {
         isConfigured = true
         if installService {
             try await startHostService()
+        } else {
+            // A completed setup without the background service is valid, but
+            // it is not a connected Host lifecycle. Keep the status truthful
+            // so the menu does not claim readiness until the user starts the
+            // service explicitly.
+            status = .needsSetup(String(localized: "Pix host service is not running."))
         }
-        await loadHostInventory()
-        status = .ready
+        beginInventoryHydration()
     }
 
     /// Pins an explicit Pi executable (`pix pi set`) and refreshes the
@@ -197,6 +181,7 @@ final class HostModel {
         piCompatible = Self.parsePiCompatibility(from: output)
         piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: output)
         piExecutablePath = Self.parsePiExecutable(from: output)
+        piExecutable = piExecutablePath
     }
 
     func updatePairingRequests(_ requests: [PairingRequest]) {
@@ -466,6 +451,10 @@ final class HostModel {
             do {
                 let connection = try UnixSocketConnection(path: eventSocketPath)
                 serviceEvents = connection
+                // Connectivity is the lifecycle boundary. Inventory commands
+                // below are reconciliation hints and must not delay the
+                // menu-bar connection indicator.
+                status = .ready
                 connection.handle.readabilityHandler = { [weak self] handle in
                     let data = handle.availableData
                     Task { @MainActor [weak self] in
@@ -495,6 +484,8 @@ final class HostModel {
     }
 
     private func teardownService() {
+        inventoryTask?.cancel()
+        inventoryTask = nil
         serviceEvents?.handle.readabilityHandler = nil
         try? serviceEvents?.handle.close()
         serviceEvents = nil
@@ -631,12 +622,31 @@ final class HostModel {
     }
 
     private func loadHostInventory() async {
+        guard !Task.isCancelled else { return }
+        // Once the event socket is connected this status request is cheap: a
+        // current Host returns its cached compatibility snapshot through the
+        // local control RPC. An older Host may fall back to one probe here,
+        // but that work is intentionally outside the readiness boundary.
+        if serviceEvents != nil, let statusOutput = try? await runPix(arguments: [
+            "--config",
+            configPath.path,
+            "status",
+        ]) {
+            guard !Task.isCancelled else { return }
+            isConfigured = Self.isConfiguredStatus(from: statusOutput) ?? isConfigured
+            piVersion = parseVersion(from: statusOutput)
+            piCompatible = Self.parsePiCompatibility(from: statusOutput)
+            piCompatibilityStatus = Self.parsePiCompatibilityStatus(from: statusOutput)
+            piExecutablePath = Self.parsePiExecutable(from: statusOutput)
+            piExecutable = piExecutablePath
+        }
         if let workspaceOutput = try? await runPix(arguments: [
             "--config",
             configPath.path,
             "workspace",
             "list",
         ]) {
+            guard !Task.isCancelled else { return }
             workspaces = parseWorkspaces(from: workspaceOutput)
             workspaceSessions = await loadWorkspaceSessions(for: workspaces)
         }
@@ -646,15 +656,8 @@ final class HostModel {
             "device",
             "list",
         ]) {
+            guard !Task.isCancelled else { return }
             devices = parseDevices(from: deviceOutput)
-        }
-        if let piOutput = try? await runPix(arguments: [
-            "--config",
-            configPath.path,
-            "pi",
-            "show",
-        ]) {
-            piExecutable = parsePiExecutable(from: piOutput)
         }
         if let relayOutput = try? await runPix(arguments: [
             "--config",
@@ -662,14 +665,25 @@ final class HostModel {
             "relay",
             "show",
         ]) {
+            guard !Task.isCancelled else { return }
             relayConfiguration = Self.parseRelayConfiguration(from: relayOutput)
         }
+        guard !Task.isCancelled else { return }
         inventoryRevision += 1
+    }
+
+    private func beginInventoryHydration() {
+        inventoryTask?.cancel()
+        inventoryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.loadHostInventory()
+        }
     }
 
     private func loadWorkspaceSessions(for workspaces: [WorkspaceItem]) async -> [WorkspaceSession] {
         var result: [WorkspaceSession] = []
         for workspace in workspaces {
+            guard !Task.isCancelled else { return result }
             guard let output = try? await runPix(arguments: [
                 "--config",
                 configPath.path,

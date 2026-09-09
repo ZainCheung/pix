@@ -30,7 +30,7 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
     let host_running = crate::status::HostServiceStatus::current(store.path()).is_some();
     let manager_active = active(store)?;
     let control_upgrade_required =
-        host_running && crate::service_client::verify_control_compatibility(store).is_err();
+        host_running && crate::service_client::control_upgrade_required(store);
     if !no_start {
         if manager_active && (definition_changed || control_upgrade_required) {
             run_systemctl(&["restart", UNIT_NAME])?;

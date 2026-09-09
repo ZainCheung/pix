@@ -34,7 +34,7 @@ pub(crate) fn install(store: &ConfigStore, no_start: bool, announce: bool) -> Re
 
     let host_running = crate::status::HostServiceStatus::current(store.path()).is_some();
     let control_upgrade_required =
-        host_running && crate::service_client::verify_control_compatibility(store).is_err();
+        host_running && crate::service_client::control_upgrade_required(store);
     if launchctl_is_loaded()? {
         if !no_start && (definition_changed || control_upgrade_required) {
             // Ask the old host to flush and close its sockets before

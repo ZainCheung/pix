@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::host_environment::HostEnvironment;
@@ -24,6 +25,79 @@ pub struct PiInstallation {
     pub version: Version,
     /// Whether the minimum version and required RPC CLI capabilities passed.
     pub supported: bool,
+}
+
+/// The safe, host-local outcome of the Pi compatibility preflight.
+///
+/// This report is a snapshot of the Pi that the Host actually checked while
+/// starting its lifecycle.  It intentionally contains no command output or
+/// other diagnostics.  The local CLI control surface may expose the optional
+/// executable path, but this type is never part of the public phone protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PiCompatibilityStatus {
+    Compatible,
+    UpdateRequired,
+    MissingRequiredCapability,
+    NotFound,
+    CannotLaunch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PiCompatibilityReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executable: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub compatibility: PiCompatibilityStatus,
+}
+
+impl PiCompatibilityReport {
+    /// Creates a payload-safe snapshot from the one compatibility preflight
+    /// performed by a Host lifecycle.
+    #[must_use]
+    pub fn from_preflight(preflight: &Result<PiInstallation, PiCompatibilityError>) -> Self {
+        match preflight {
+            Ok(installation) => Self {
+                executable: Some(installation.executable.clone()),
+                version: Some(installation.version.to_string()),
+                compatibility: if installation.is_compatible() {
+                    PiCompatibilityStatus::Compatible
+                } else {
+                    PiCompatibilityStatus::UpdateRequired
+                },
+            },
+            Err(error) => Self {
+                executable: None,
+                version: match error {
+                    PiCompatibilityError::TooOld { found } => Some(found.to_string()),
+                    PiCompatibilityError::MissingRequiredCapability
+                    | PiCompatibilityError::NotFound
+                    | PiCompatibilityError::CannotLaunch => None,
+                },
+                compatibility: match error {
+                    PiCompatibilityError::TooOld { .. } => PiCompatibilityStatus::UpdateRequired,
+                    PiCompatibilityError::MissingRequiredCapability => {
+                        PiCompatibilityStatus::MissingRequiredCapability
+                    }
+                    PiCompatibilityError::NotFound => PiCompatibilityStatus::NotFound,
+                    PiCompatibilityError::CannotLaunch => PiCompatibilityStatus::CannotLaunch,
+                },
+            },
+        }
+    }
+
+    /// Returns the legacy boolean field used by the CLI status envelope.
+    #[must_use]
+    pub const fn supported(&self) -> Option<bool> {
+        match self.compatibility {
+            PiCompatibilityStatus::Compatible => Some(true),
+            PiCompatibilityStatus::UpdateRequired => Some(false),
+            PiCompatibilityStatus::MissingRequiredCapability
+            | PiCompatibilityStatus::NotFound
+            | PiCompatibilityStatus::CannotLaunch => None,
+        }
+    }
 }
 
 impl PiInstallation {
@@ -61,6 +135,28 @@ impl PiProbe {
         self
     }
 
+    /// Resolves the executable without starting Pi.
+    ///
+    /// This is the cheap discovery path used by metadata-only commands such
+    /// as `pix pi show`.  It deliberately performs no `--version` or `--help`
+    /// invocation; callers that need compatibility must use [`Self::inspect`]
+    /// or [`Self::inspect_compatibility`] explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiError`] when the configured path cannot be resolved or Pi
+    /// cannot be found on the selected environment's `PATH`.
+    pub fn resolve_executable(&self) -> Result<PathBuf, PiError> {
+        if let Some(path) = &self.explicit_path {
+            return resolve_executable(path);
+        }
+        let path = self
+            .environment
+            .find_executable("pi")
+            .ok_or(PiError::NotFound)?;
+        resolve_executable(&path)
+    }
+
     /// Locates Pi and verifies the version and required RPC command-line flags.
     ///
     /// # Errors
@@ -68,13 +164,7 @@ impl PiProbe {
     /// Returns [`PiError`] when Pi cannot be found, launched, parsed, or does
     /// not advertise the capabilities required by the adapter.
     pub fn inspect(&self) -> Result<PiInstallation, PiError> {
-        let executable = match &self.explicit_path {
-            Some(path) => resolve_executable(path)?,
-            None => self
-                .environment
-                .find_executable("pi")
-                .ok_or(PiError::NotFound)?,
-        };
+        let executable = self.resolve_executable()?;
         let version_output = self
             .environment
             .command(&executable)
@@ -157,16 +247,34 @@ fn resolve_executable(path: &Path) -> Result<PathBuf, PiError> {
     // dispatches on `argv[0]`; canonicalizing them would probe the wrong
     // program.
     if path.is_file() {
+        if !is_executable_file(path) {
+            return Err(PiError::NotExecutable(path.to_path_buf()));
+        }
         return Ok(path.to_path_buf());
     }
     let canonical = fs::canonicalize(path).map_err(|source| PiError::Resolve {
         path: path.to_path_buf(),
         source,
     })?;
-    if !canonical.is_file() {
+    if !is_executable_file(&canonical) {
         return Err(PiError::NotExecutable(canonical));
     }
     Ok(canonical)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 #[derive(Debug, Error)]
@@ -259,6 +367,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn resolving_executable_does_not_invoke_pi_capability_commands() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().expect("temporary Pi directory");
+        let counter = directory.path().join("invocations");
+        let path = directory.path().join("pi");
+        let script = format!(
+            "#!/bin/sh\ncase \"$1\" in\n  --version|--help) printf '%s\\n' \"$1\" >> '{}' ;;\nesac\n",
+            counter.display()
+        );
+        fs::write(&path, script).expect("write fake Pi");
+        let mut permissions = fs::metadata(&path).expect("fake Pi metadata").permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("make fake Pi executable");
+
+        let resolved = super::PiProbe::new(Some(path.clone()))
+            .resolve_executable()
+            .expect("resolve fake Pi");
+
+        assert_eq!(resolved, path);
+        assert!(
+            !counter.exists(),
+            "resolution invoked Pi capability commands"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn probe_discovers_pi_through_the_resolved_environment() {
         use std::ffi::OsString;
 
@@ -309,6 +446,31 @@ mod tests {
             assert!(Version::parse(version).expect("valid version") >= minimum);
         }
         assert!(Version::parse("0.84.0").expect("valid version") < minimum);
+    }
+
+    #[test]
+    fn compatibility_report_preserves_safe_preflight_categories() {
+        let old = super::PiCompatibilityReport::from_preflight(&Err(
+            super::PiCompatibilityError::TooOld {
+                found: Version::parse("0.83.0").expect("valid version"),
+            },
+        ));
+        assert_eq!(
+            old.compatibility,
+            super::PiCompatibilityStatus::UpdateRequired
+        );
+        assert_eq!(old.version.as_deref(), Some("0.83.0"));
+        assert_eq!(old.supported(), Some(false));
+
+        let missing = super::PiCompatibilityReport::from_preflight(&Err(
+            super::PiCompatibilityError::NotFound,
+        ));
+        assert_eq!(
+            missing.compatibility,
+            super::PiCompatibilityStatus::NotFound
+        );
+        assert!(missing.version.is_none());
+        assert!(missing.supported().is_none());
     }
 
     #[cfg(unix)]
