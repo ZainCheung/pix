@@ -19,21 +19,21 @@ mod service;
 mod service_client;
 mod setup_ui;
 mod status;
+mod tui;
 
 use crate::commands::device::device;
 use crate::commands::pi::pi_command;
 use crate::commands::relay::relay_command;
 use crate::commands::session::session;
-use crate::commands::setup::{SetupOptions, default_setup_options, setup};
+use crate::commands::setup::{SetupOptions, setup};
 use crate::commands::update::update;
 use crate::commands::workspace::workspace;
 use crate::diagnostics::diagnostics_command;
-use crate::home::{HomeAction, HostOverview};
+use crate::home::HostOverview;
 use crate::output::{CliUsageError, CommandOutput, OutputFormat};
 use crate::serve::serve;
 use crate::service::ServiceCommand;
 use crate::service::service_command;
-use crate::setup_ui::SetupUi;
 use crate::status::{show_logs, status_command};
 
 #[derive(Debug, Parser)]
@@ -315,13 +315,19 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
     };
     let store = ConfigStore::new(config_path);
 
-    let interactive = !cli.no_input
-        && !output.is_json()
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal();
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    let stdout_is_tty = std::io::stdout().is_terminal();
+    let interactive = !cli.no_input && !output.is_json() && stdin_is_tty && stdout_is_tty;
 
     let Some(command) = cli.command else {
-        if !interactive {
+        if !tui::should_launch_tui(
+            false,
+            cli.no_input,
+            cli.output,
+            tui::TtyState::from_is_tty(stdin_is_tty),
+            tui::TtyState::from_is_tty(stdout_is_tty),
+            std::env::var("TERM").ok().as_deref(),
+        ) {
             if output.is_json() {
                 return Err(usage_error(
                     "a command is required with JSON output; run `pix --help`",
@@ -333,20 +339,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             return Ok(());
         }
         let overview = HostOverview::collect(&store);
-        return match home::run(&overview, SetupUi::new(true, false))? {
-            HomeAction::Setup => setup(&store, &default_setup_options()),
-            HomeAction::Devices => device(&store, None, output, true),
-            HomeAction::Workspaces => workspace(&store, None, output, true),
-            HomeAction::Status => status_command(&store, output),
-            HomeAction::Settings => relay_command(&store, None, output, true),
-            HomeAction::Commands => {
-                let mut command = Cli::command();
-                command.print_long_help().context("printing Pix help")?;
-                println!();
-                Ok(())
-            }
-            HomeAction::Quit => Ok(()),
-        };
+        return tui::run(&overview);
     };
 
     match command {

@@ -9,20 +9,6 @@ use pix_core::{ConfigStore, HostEnvironment, PiProbe, WorkspaceRegistry};
 use crate::setup_ui::SetupUi;
 use crate::status::HostServiceStatus;
 
-pub(crate) fn default_setup_options() -> SetupOptions {
-    SetupOptions {
-        relay: None,
-        workspace: None,
-        workspace_name: None,
-        no_pair: false,
-        no_service: false,
-        yes: false,
-        non_interactive: false,
-        advanced: false,
-        verbose: false,
-    }
-}
-
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SetupOptions {

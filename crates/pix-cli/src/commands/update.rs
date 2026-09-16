@@ -146,37 +146,6 @@ fn latest_release() -> Result<Release> {
     })
 }
 
-/// Resolves the latest release tag with tight timeouts; any failure means
-/// "no hint". Used by the home screen's silent update check.
-pub(crate) fn latest_version() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        None
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let body = run_curl(
-            &[
-                "-fsSL",
-                "--connect-timeout",
-                "2",
-                "--max-time",
-                "3",
-                RELEASE_API,
-            ],
-            "checking the latest Pix release",
-        )
-        .ok()?;
-        let payload: serde_json::Value = serde_json::from_str(&body).ok()?;
-        let tag = payload
-            .get("tag_name")
-            .and_then(serde_json::Value::as_str)?
-            .to_owned();
-        Some(tag.strip_prefix('v').unwrap_or(&tag).to_owned())
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 fn asset_suffix() -> Result<String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {

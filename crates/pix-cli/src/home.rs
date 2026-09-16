@@ -1,23 +1,11 @@
-use anyhow::Result;
 pub(crate) use pix_core::PiCompatibilityStatus;
 use pix_core::{ConfigStore, PiCompatibilityReport};
 use serde::Serialize;
 
 use crate::commands::shared::terminal_label;
 use crate::service;
-use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
+use crate::setup_ui::{SetupUi, UiTone};
 use crate::status::HostServiceStatus;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HomeAction {
-    Setup,
-    Devices,
-    Workspaces,
-    Status,
-    Settings,
-    Commands,
-    Quit,
-}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct HostOverview {
@@ -322,82 +310,6 @@ impl HostOverview {
     }
 }
 
-pub(crate) fn run(overview: &HostOverview, ui: SetupUi) -> Result<HomeAction> {
-    let update_available = latest_version_hint();
-    render_overview(overview, ui, false, update_available.as_deref());
-    let (actions, default) = match overview.config_state {
-        ConfigState::Ready => (
-            vec![
-                (
-                    HomeAction::Devices,
-                    MenuItem::new("1. Devices", "Pair, approve, or revoke a phone"),
-                ),
-                (
-                    HomeAction::Workspaces,
-                    MenuItem::new("2. Workspaces", "Authorize or remove host folders"),
-                ),
-                (
-                    HomeAction::Settings,
-                    MenuItem::new("3. Settings", "Configure remote access"),
-                ),
-                (
-                    HomeAction::Status,
-                    MenuItem::new("4. Status", "Show detailed host state"),
-                ),
-            ],
-            0,
-        ),
-        ConfigState::Missing => (
-            vec![
-                (
-                    HomeAction::Setup,
-                    MenuItem::new("1. Setup", "Prepare this computer for remote Pi access"),
-                ),
-                (
-                    HomeAction::Devices,
-                    MenuItem::new("2. Devices", "Pair, approve, or revoke a phone"),
-                ),
-                (
-                    HomeAction::Workspaces,
-                    MenuItem::new("3. Workspaces", "Authorize or remove host folders"),
-                ),
-                (
-                    HomeAction::Settings,
-                    MenuItem::new("4. Settings", "Configure remote access"),
-                ),
-                (
-                    HomeAction::Status,
-                    MenuItem::new("5. Status", "Show detailed host state"),
-                ),
-            ],
-            0,
-        ),
-        ConfigState::Invalid => (
-            vec![
-                (
-                    HomeAction::Status,
-                    MenuItem::new("1. Status", "Inspect the invalid host configuration"),
-                ),
-                (
-                    HomeAction::Setup,
-                    MenuItem::new("2. Repair setup", "Review setup after diagnosing the error"),
-                ),
-                (
-                    HomeAction::Commands,
-                    MenuItem::new("3. Show commands", "Open the complete CLI reference"),
-                ),
-            ],
-            0,
-        ),
-    };
-    let items = actions.iter().map(|(_, item)| *item).collect::<Vec<_>>();
-    match ui.menu("Actions", &items, default)? {
-        MenuResult::Selected(index) => Ok(actions[index].0),
-        MenuResult::Help => Ok(HomeAction::Commands),
-        MenuResult::Quit => Ok(HomeAction::Quit),
-    }
-}
-
 #[allow(clippy::too_many_lines)]
 pub(crate) fn render_overview(
     overview: &HostOverview,
@@ -526,16 +438,6 @@ pub(crate) fn render_overview(
         }
     }
     println!();
-}
-
-/// A silent, fast-failing release check so the home screen can suggest an
-/// upgrade without ever delaying the product on a slow network.
-fn latest_version_hint() -> Option<String> {
-    if std::env::var_os("PIX_NO_UPDATE_CHECK").is_some() {
-        return None;
-    }
-    let latest = crate::commands::update::latest_version()?;
-    (latest != env!("CARGO_PKG_VERSION")).then_some(latest)
 }
 
 #[cfg(test)]

@@ -38,6 +38,7 @@ tempfile = "3.20"
 thiserror = "2.0"
 uuid = { version = "1.17", features = ["serde", "v4"] }
 qrcode = { version = "0.14.1", default-features = false }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 uniffi = "0.32.0"
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }
 security-framework = "3.7.0"
