@@ -8,6 +8,10 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
+#[cfg(test)]
+use ratatui::layout::Rect;
+#[cfg(test)]
+use ratatui::{TerminalOptions, Viewport};
 
 /// Owns every terminal mutation made by the Ratatui frontend.
 ///
@@ -105,7 +109,14 @@ impl<W: Write> TerminalGuard<W> {
     #[cfg(test)]
     fn for_test(writer: W) -> io::Result<Self> {
         Ok(Self {
-            terminal: Terminal::new(CrosstermBackend::new(writer))?,
+            // A fixed viewport avoids Crossterm's terminal-size query, so
+            // lifecycle tests remain deterministic on headless CI runners.
+            terminal: Terminal::with_options(
+                CrosstermBackend::new(writer),
+                TerminalOptions {
+                    viewport: Viewport::Fixed(Rect::new(0, 0, 80, 24)),
+                },
+            )?,
             restored: false,
             raw_mode_enabled: false,
             alternate_screen_entered: false,
