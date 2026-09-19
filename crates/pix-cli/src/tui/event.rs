@@ -25,7 +25,8 @@ pub(crate) fn is_quit(event: &Event) -> bool {
     }
 
     matches!(key.code, KeyCode::Esc | KeyCode::Char('q' | 'Q'))
-        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        || (matches!(key.code, KeyCode::Char('c' | 'C'))
+            && key.modifiers.contains(KeyModifiers::CONTROL))
 }
 
 #[cfg(test)]
@@ -41,6 +42,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL),
         ] {
             assert!(is_quit(&Event::Key(key)));
         }
