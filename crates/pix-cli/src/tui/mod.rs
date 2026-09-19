@@ -18,7 +18,11 @@ use crate::setup_ui::LOGO;
 pub(crate) use terminal::TerminalGuard;
 
 const MIN_WIDTH: u16 = 48;
-const MIN_HEIGHT: u16 = 16;
+const HOME_BANNER_HEIGHT: u16 = 8;
+const HOME_SUMMARY_HEIGHT: u16 = 6;
+const HOME_MENU_HEIGHT: u16 = 4;
+const FOOTER_HEIGHT: u16 = 1;
+const MIN_HEIGHT: u16 = HOME_BANNER_HEIGHT + HOME_SUMMARY_HEIGHT + HOME_MENU_HEIGHT + FOOTER_HEIGHT;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InteractionMode {
@@ -147,6 +151,7 @@ pub(crate) struct TerminalSize {
 pub(crate) struct App {
     pub(crate) route: Route,
     pub(crate) history: Vec<Route>,
+    selection_history: Vec<usize>,
     pub(crate) overlay: Option<Overlay>,
     pub(crate) toast: Option<Toast>,
     pub(crate) should_quit: bool,
@@ -165,6 +170,7 @@ impl App {
         Self {
             route: Route::Home,
             history: Vec::new(),
+            selection_history: Vec::new(),
             overlay: None,
             toast: None,
             should_quit: false,
@@ -194,6 +200,15 @@ impl App {
             return;
         };
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+
+        // Ctrl-C is a global action. Handle it before overlays so the help
+        // surface cannot swallow the quit contract it advertises.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            self.should_quit = true;
             return;
         }
 
@@ -271,6 +286,7 @@ impl App {
             return;
         }
         self.history.push(self.route);
+        self.selection_history.push(self.selected);
         self.route = route;
         self.selected = 0;
         self.toast = None;
@@ -279,7 +295,7 @@ impl App {
     fn go_back_or_quit(&mut self) {
         if let Some(route) = self.history.pop() {
             self.route = route;
-            self.selected = 0;
+            self.selected = self.selection_history.pop().unwrap_or(0);
             self.toast = None;
         } else {
             self.should_quit = true;
@@ -363,7 +379,9 @@ fn render_small_terminal(frame: &mut Frame<'_>, area: Rect) {
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from("Resize to at least 48×16; press q to go back or quit."),
+        Line::from(format!(
+            "Resize to at least {MIN_WIDTH}×{MIN_HEIGHT}; press q to go back or quit."
+        )),
     ];
     frame.render_widget(
         Paragraph::new(message)
@@ -378,8 +396,8 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, overview: &HostOver
     let [banner, summary, menu] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
-            Constraint::Length(6),
+            Constraint::Length(HOME_BANNER_HEIGHT),
+            Constraint::Length(HOME_SUMMARY_HEIGHT),
             Constraint::Min(1),
         ])
         .areas(area);
@@ -410,7 +428,7 @@ fn render_home(frame: &mut Frame<'_>, area: Rect, app: &App, overview: &HostOver
                 format!("  pix {}", env!("CARGO_PKG_VERSION")),
                 Style::default().fg(Color::DarkGray),
             )),
-            update_hint(overview),
+            version_mismatch_hint(overview),
         ])
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(logo_lines), banner);
@@ -607,24 +625,7 @@ fn render_toast(frame: &mut Frame<'_>, area: Rect, toast: &Toast) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, route: Route) {
-    let hints = if area.width < 72 {
-        match route {
-            Route::Home => "↑↓/jk Move   ↵ Open   ? Help   Q Quit",
-            Route::Devices | Route::Workspaces => "↑↓/jk Move   ↵ Open   Esc/q Back   ? Help",
-            Route::Settings => "↑↓/jk Move   ↵ Select   Esc/q Back   ? Help",
-            Route::Status => "Esc/q Back   ? Help",
-        }
-    } else {
-        match route {
-            Route::Home => "↑↓/jk Navigate   ↵ Open   1–4 Jump   ? Help   Q Quit",
-            Route::Devices => "↑↓/jk Navigate   ↵ Open   A Add   R Remove   Esc/q Back   ? Help",
-            Route::Workspaces => {
-                "↑↓/jk Navigate   ↵ Sessions   A Add   R Remove   Esc/q Back   ? Help"
-            }
-            Route::Settings => "↑↓/jk Navigate   ↵ Select   Esc/q Back   ? Help",
-            Route::Status => "Esc/q Back   ? Help",
-        }
-    };
+    let hints = footer_hints(area.width, route);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ", Style::default().fg(Color::DarkGray)),
@@ -632,6 +633,24 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, route: Route) {
         ])),
         area,
     );
+}
+
+fn footer_hints(width: u16, route: Route) -> &'static str {
+    if width < 72 {
+        match route {
+            Route::Home => "↑↓/jk Move   ↵ Open   ? Help   Q Quit",
+            Route::Devices | Route::Workspaces | Route::Settings | Route::Status => {
+                "Esc/q Back   ? Help"
+            }
+        }
+    } else {
+        match route {
+            Route::Home => "↑↓/jk Navigate   ↵ Open   1–4 Jump   ? Help   Q Quit",
+            Route::Devices | Route::Workspaces | Route::Settings | Route::Status => {
+                "Esc/q Back   ? Help"
+            }
+        }
+    }
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
@@ -670,10 +689,17 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn update_hint(overview: &HostOverview) -> Line<'static> {
+fn version_mismatch_message(host_version: &str) -> String {
+    format!(
+        "  CLI {} · Host {host_version} — restart the host service to use the current CLI version",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
+fn version_mismatch_hint(overview: &HostOverview) -> Line<'static> {
     match overview.service.pix_version.as_deref() {
         Some(version) if version != env!("CARGO_PKG_VERSION") => Line::from(Span::styled(
-            format!("  Host is Pix {version}; restart the service after updating"),
+            version_mismatch_message(version),
             Style::default().fg(Color::Yellow),
         )),
         _ => Line::from(""),
@@ -738,7 +764,8 @@ fn relay_style(overview: &HostOverview) -> Style {
 #[cfg(test)]
 mod tests {
     use super::{
-        App, InteractionMode, Route, TerminalSize, TtyState, interaction_mode, should_launch_tui,
+        App, InteractionMode, MIN_HEIGHT, Route, TerminalSize, TtyState, footer_hints,
+        interaction_mode, should_launch_tui, version_mismatch_message,
     };
     use crate::output::OutputFormat;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -858,6 +885,7 @@ mod tests {
 
         app.handle_event(&key(KeyCode::Esc));
         assert_eq!(app.route, Route::Home);
+        assert_eq!(app.selected, 1);
         assert!(app.history.is_empty());
         assert!(!app.should_quit);
     }
@@ -882,6 +910,40 @@ mod tests {
         app.handle_event(&key(KeyCode::Esc));
         assert!(app.overlay.is_none());
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn ctrl_c_quits_even_when_help_overlay_is_open() {
+        let mut app = App::new();
+        app.handle_event(&key(KeyCode::Char('?')));
+        app.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn minimum_terminal_height_leaves_room_for_the_home_menu() {
+        assert_eq!(MIN_HEIGHT, 19);
+    }
+
+    #[test]
+    fn placeholder_footers_only_advertise_implemented_actions() {
+        for route in [Route::Devices, Route::Workspaces, Route::Settings] {
+            assert_eq!(footer_hints(80, route), "Esc/q Back   ? Help");
+        }
+    }
+
+    #[test]
+    fn version_mismatch_message_is_neutral_about_update_direction() {
+        for host_version in ["0.1.6", "0.1.8"] {
+            let message = version_mismatch_message(host_version);
+            assert!(message.contains(&format!("CLI {}", env!("CARGO_PKG_VERSION"))));
+            assert!(message.contains(&format!("Host {host_version}")));
+            assert!(message.contains("restart the host service"));
+            assert!(!message.contains("after updating"));
+        }
     }
 
     #[test]
