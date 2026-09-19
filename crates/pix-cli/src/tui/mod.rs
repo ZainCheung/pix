@@ -265,6 +265,12 @@ impl PendingAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeferredNavigation {
+    Back,
+    Quit,
+}
+
 #[derive(Debug)]
 enum WorkerResult {
     Added {
@@ -326,7 +332,7 @@ pub(crate) struct App {
     pub(crate) overlay: Option<Overlay>,
     pub(crate) toast: Option<Toast>,
     pub(crate) should_quit: bool,
-    quit_requested: bool,
+    deferred_navigation: Option<DeferredNavigation>,
     pub(crate) selected: usize,
     pub(crate) terminal_size: TerminalSize,
     pub(crate) workspaces: Vec<WorkspaceItem>,
@@ -354,7 +360,7 @@ impl App {
             overlay: None,
             toast: None,
             should_quit: false,
-            quit_requested: false,
+            deferred_navigation: None,
             selected: 0,
             terminal_size: TerminalSize::default(),
             workspaces: Vec::new(),
@@ -431,10 +437,29 @@ impl App {
 
     fn request_quit(&mut self) {
         if self.mutation_in_flight {
-            self.quit_requested = true;
+            self.deferred_navigation = Some(DeferredNavigation::Quit);
             self.overlay = None;
         } else {
             self.should_quit = true;
+        }
+    }
+
+    fn request_back(&mut self) {
+        if self.mutation_in_flight {
+            if self.deferred_navigation != Some(DeferredNavigation::Quit) {
+                self.deferred_navigation = Some(DeferredNavigation::Back);
+            }
+            self.overlay = None;
+        } else {
+            self.go_back_or_quit();
+        }
+    }
+
+    fn finish_deferred_navigation(&mut self) {
+        match self.deferred_navigation.take() {
+            Some(DeferredNavigation::Back) => self.go_back_or_quit(),
+            Some(DeferredNavigation::Quit) => self.should_quit = true,
+            None => {}
         }
     }
 
@@ -467,12 +492,13 @@ impl App {
         // applied. Keep navigation/quit responsive, but do not enqueue a
         // second mutation against a stale list while one is in flight.
         if self.busy.is_some() {
-            if event::is_quit(event) {
-                if self.mutation_in_flight {
-                    self.request_quit();
-                } else if self.overlay.take().is_none() {
-                    self.go_back_or_quit();
+            if self.mutation_in_flight {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.request_back(),
+                    _ => {}
                 }
+            } else if event::is_quit(event) && self.overlay.take().is_none() {
+                self.go_back_or_quit();
             }
             return;
         }
@@ -814,9 +840,7 @@ impl App {
                 );
             }
         }
-        if self.quit_requested {
-            self.should_quit = true;
-        }
+        self.finish_deferred_navigation();
     }
 }
 
@@ -914,9 +938,7 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
                     let _ = active.join();
                     app.busy = None;
                     app.mutation_in_flight = false;
-                    if app.quit_requested {
-                        app.should_quit = true;
-                    }
+                    app.finish_deferred_navigation();
                     if !app.should_quit {
                         app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
                     }
@@ -1242,7 +1264,9 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
         );
         return;
     }
-    let capacity = usize::from(list_area.height).max(1);
+    // Each session uses two lines so title and metadata remain readable at
+    // the supported 48-column minimum instead of clipping the right side.
+    let capacity = (usize::from(list_area.height) / 2).max(1);
     let (start, end) = visible_range(app.selected, app.sessions.len(), capacity);
     let items = app.sessions[start..end]
         .iter()
@@ -1251,20 +1275,21 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
             let title = commands::shared::terminal_label(title);
             let title = truncate_end(
                 &title,
-                usize::from(list_area.width).saturating_sub(42).max(16),
+                usize::from(list_area.width).saturating_sub(2).max(1),
             );
             let count = format!(
                 "{} message{}",
                 session.message_count,
                 if session.message_count == 1 { "" } else { "s" }
             );
-            ListItem::new(Line::from(vec![
-                Span::styled(title, Style::default().fg(Color::White)),
-                Span::styled(
-                    format!("  {}  {count}", session.modified_at),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]))
+            let metadata = format!(
+                "    {} · {count}",
+                compact_session_modified_at(&session.modified_at)
+            );
+            ListItem::new(vec![
+                Line::from(Span::styled(title, Style::default().fg(Color::White))),
+                Line::from(Span::styled(metadata, Style::default().fg(Color::DarkGray))),
+            ])
         })
         .collect::<Vec<_>>();
     let mut state = ListState::default();
@@ -1278,6 +1303,14 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
         list_area,
         &mut state,
     );
+}
+
+fn compact_session_modified_at(value: &str) -> String {
+    let Some((date, time)) = value.split_once('T') else {
+        return value.to_owned();
+    };
+    let time = time.get(..5).unwrap_or(time);
+    format!("{date} {time}")
 }
 
 fn visible_range(selected: usize, length: usize, capacity: usize) -> (usize, usize) {
@@ -1534,11 +1567,13 @@ fn render_add_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &AddOverlay) {
 fn input_line(input: &TextInput, max_chars: usize) -> Span<'static> {
     let chars = input.value.chars().collect::<Vec<_>>();
     let cursor = input.value[..input.cursor].chars().count();
-    let max_chars = max_chars.max(3);
-    let mut start = cursor.saturating_sub(max_chars / 2);
-    let mut end = (start + max_chars).min(chars.len());
-    if end.saturating_sub(start) < max_chars {
-        start = end.saturating_sub(max_chars);
+    // Reserve cells for the optional prefix/suffix ellipses and the visual
+    // cursor so the decorated span still fits in the modal input row.
+    let text_budget = max_chars.saturating_sub(3).max(1);
+    let mut start = cursor.saturating_sub(text_budget / 2);
+    let mut end = (start + text_budget).min(chars.len());
+    if end.saturating_sub(start) < text_budget {
+        start = end.saturating_sub(text_budget);
     }
     if cursor < start {
         start = cursor;
@@ -1610,7 +1645,7 @@ fn render_remove_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RemoveOver
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
     if let Some(busy) = &app.busy {
-        let busy = if app.quit_requested {
+        let busy = if app.deferred_navigation == Some(DeferredNavigation::Quit) {
             "Finishing workspace operation…"
         } else {
             busy
@@ -1812,10 +1847,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AddOverlay, App, InteractionMode, MIN_HEIGHT, Overlay, Route, SessionItem, TerminalSize,
-        TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints, help_shortcuts, input_line,
-        interaction_mode, placeholder_message, render, should_launch_tui, truncate_end,
-        truncate_path, version_mismatch_message, visible_range,
+        AddOverlay, App, DeferredNavigation, InteractionMode, MIN_HEIGHT, Overlay, Route,
+        SessionItem, TerminalSize, TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints,
+        help_shortcuts, input_line, interaction_mode, placeholder_message, render,
+        should_launch_tui, truncate_end, truncate_path, version_mismatch_message, visible_range,
     };
     use crate::home::{AccessOverview, PiOverview, PiSource, ServiceOverview};
     use crate::output::OutputFormat;
@@ -2027,15 +2062,16 @@ mod tests {
     }
 
     #[test]
-    fn mutation_quit_waits_for_the_worker_result() {
+    fn mutation_q_requests_back_after_the_worker_result() {
         let mut app = App::new();
         app.route = Route::Workspaces;
+        app.history.push(Route::Home);
         app.busy = Some("Removing workspace…".to_owned());
         app.mutation_in_flight = true;
 
         app.handle_event(&key(KeyCode::Char('q')));
 
-        assert!(app.quit_requested);
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Back));
         assert!(!app.should_quit);
         assert!(app.overlay.is_none());
 
@@ -2047,7 +2083,8 @@ mod tests {
             &mut overview,
         );
 
-        assert!(app.should_quit);
+        assert_eq!(app.route, Route::Home);
+        assert!(!app.should_quit);
         assert!(!app.mutation_in_flight);
         assert!(app.busy.is_none());
     }
@@ -2063,8 +2100,35 @@ mod tests {
             KeyModifiers::CONTROL,
         )));
 
-        assert!(app.quit_requested);
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Quit));
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn mutation_escape_defers_back_until_the_worker_result() {
+        let mut app = App::new();
+        app.route = Route::Workspaces;
+        app.history.push(Route::Home);
+        app.selection_history.push(1);
+        app.busy = Some("Removing workspace…".to_owned());
+        app.mutation_in_flight = true;
+
+        app.handle_event(&key(KeyCode::Esc));
+
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Back));
+        assert!(!app.should_quit);
+
+        let store = ConfigStore::new("/tmp/pix-tui-test-config.json");
+        let mut overview = test_overview(0);
+        app.apply_worker_result(
+            WorkerResult::RemoveFailed("test failure".to_owned()),
+            &store,
+            &mut overview,
+        );
+
+        assert_eq!(app.route, Route::Home);
+        assert!(!app.should_quit);
+        assert!(app.deferred_navigation.is_none());
     }
 
     #[test]
@@ -2270,9 +2334,37 @@ mod tests {
         let text = buffer_text(terminal.backend());
         assert!(text.contains("Sessions"));
         assert!(text.contains("Fix the menu"));
+        assert!(text.contains("2026-09-19 00:00"));
         assert!(text.contains("3 messages"));
         assert!(!text.contains("Pi sessions"));
         assert!(!text.contains('┌'));
+    }
+
+    #[test]
+    fn narrow_sessions_keep_title_time_and_message_count_visible() {
+        let mut app = App::new();
+        app.route = Route::WorkspaceSessions;
+        app.workspaces.push(WorkspaceItem {
+            id: uuid::Uuid::new_v4(),
+            name: "my-workspace".to_owned(),
+            path: PathBuf::from("/tmp/my-workspace"),
+        });
+        app.active_workspace_id = app.workspaces.first().map(|workspace| workspace.id);
+        app.sessions.push(SessionItem {
+            id: "session-1".to_owned(),
+            title: Some("Fix the menu".to_owned()),
+            modified_at: "2026-09-19T00:00:00Z".to_owned(),
+            message_count: 3,
+        });
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow sessions frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Fix the menu"));
+        assert!(text.contains("2026-09-19 00:00"));
+        assert!(text.contains("3 messages"));
     }
 
     #[test]
