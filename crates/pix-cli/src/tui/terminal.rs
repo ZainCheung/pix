@@ -1,10 +1,10 @@
 use std::io::{self, Stdout, Write};
 
 use anyhow::{Context, Result};
-use crossterm::cursor::Show;
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    is_raw_mode_enabled,
 };
 use ratatui::Terminal;
 use ratatui::backend::{Backend, CrosstermBackend};
@@ -18,43 +18,48 @@ use ratatui::{TerminalOptions, Viewport};
 /// The guard is intentionally generic over its writer so lifecycle cleanup
 /// can be exercised with an in-memory writer in unit tests. Production entry
 /// uses `Stdout` and a single Crossterm backend.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct TerminalGuard<W: Write = Stdout> {
     terminal: Terminal<CrosstermBackend<W>>,
     restored: bool,
-    raw_mode_enabled: bool,
+    raw_mode_owned: bool,
     alternate_screen_entered: bool,
+    cursor_hidden: bool,
 }
 
 impl TerminalGuard<Stdout> {
     pub(crate) fn enter() -> Result<Self> {
-        enable_raw_mode().context("enabling terminal raw mode")?;
+        let raw_mode_owned = !is_raw_mode_enabled().context("checking terminal raw mode")?;
+        if raw_mode_owned {
+            enable_raw_mode().context("enabling terminal raw mode")?;
+        }
 
         let terminal = match Terminal::new(CrosstermBackend::new(io::stdout())) {
             Ok(terminal) => terminal,
             Err(error) => {
-                let _ = restore_stdout();
+                let _ = restore_owned_raw_mode(raw_mode_owned);
                 return Err(error).context("initializing Ratatui terminal");
             }
         };
         let mut guard = Self {
             terminal,
             restored: false,
-            raw_mode_enabled: true,
+            raw_mode_owned,
             alternate_screen_entered: false,
+            cursor_hidden: false,
         };
 
-        // Mark the screen as entered before issuing the command sequence so a
-        // partial write (for example, EnterAlternateScreen succeeds but Hide
-        // fails) still receives a best-effort LeaveAlternateScreen.
-        guard.alternate_screen_entered = true;
-        if let Err(error) = execute!(
-            guard.terminal.backend_mut(),
-            EnterAlternateScreen,
-            crossterm::cursor::Hide
-        ) {
+        if let Err(error) = execute!(guard.terminal.backend_mut(), EnterAlternateScreen) {
             let _ = guard.restore();
             return Err(error).context("entering terminal alternate screen");
         }
+        guard.alternate_screen_entered = true;
+
+        if let Err(error) = execute!(guard.terminal.backend_mut(), crossterm::cursor::Hide) {
+            let _ = guard.restore();
+            return Err(error).context("hiding terminal cursor");
+        }
+        guard.cursor_hidden = true;
 
         // `Terminal::clear` preserves the cursor by querying it with an
         // escape sequence. Some minimal PTYs do not answer that query, while
@@ -84,25 +89,35 @@ impl<W: Write> TerminalGuard<W> {
 
         let mut first_error = None;
         if self.alternate_screen_entered {
-            record_first_error(
-                &mut first_error,
-                execute!(self.terminal.backend_mut(), LeaveAlternateScreen),
-            );
-            self.alternate_screen_entered = false;
+            match execute!(self.terminal.backend_mut(), LeaveAlternateScreen) {
+                Ok(()) => self.alternate_screen_entered = false,
+                Err(error) => record_first_error(&mut first_error, Err(error)),
+            }
         }
 
-        record_first_error(&mut first_error, self.terminal.show_cursor());
+        if self.cursor_hidden {
+            match self.terminal.show_cursor() {
+                Ok(()) => self.cursor_hidden = false,
+                Err(error) => record_first_error(&mut first_error, Err(error)),
+            }
+        }
+
         record_first_error(
             &mut first_error,
             Backend::flush(self.terminal.backend_mut()),
         );
 
-        if self.raw_mode_enabled {
-            record_first_error(&mut first_error, disable_raw_mode());
-            self.raw_mode_enabled = false;
+        if self.raw_mode_owned {
+            match disable_raw_mode() {
+                Ok(()) => self.raw_mode_owned = false,
+                Err(error) => record_first_error(&mut first_error, Err(error)),
+            }
         }
 
-        self.restored = true;
+        self.restored = !self.raw_mode_owned
+            && !self.alternate_screen_entered
+            && !self.cursor_hidden
+            && first_error.is_none();
         first_error.map_or(Ok(()), Err)
     }
 
@@ -118,8 +133,9 @@ impl<W: Write> TerminalGuard<W> {
                 },
             )?,
             restored: false,
-            raw_mode_enabled: false,
+            raw_mode_owned: false,
             alternate_screen_entered: false,
+            cursor_hidden: false,
         })
     }
 }
@@ -136,18 +152,12 @@ impl<W: Write> Drop for TerminalGuard<W> {
     }
 }
 
-fn restore_stdout() -> io::Result<()> {
-    let mut stdout = io::stdout();
-    let mut first_error = None;
-
-    record_first_error(
-        &mut first_error,
-        execute!(stdout, LeaveAlternateScreen, Show),
-    );
-    record_first_error(&mut first_error, stdout.flush());
-    record_first_error(&mut first_error, disable_raw_mode());
-
-    first_error.map_or(Ok(()), Err)
+fn restore_owned_raw_mode(raw_mode_owned: bool) -> io::Result<()> {
+    if raw_mode_owned {
+        disable_raw_mode()
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -179,10 +189,12 @@ mod tests {
     fn partial_entry_cleanup_is_best_effort() {
         let mut guard = TerminalGuard::for_test(Vec::<u8>::new()).expect("test terminal");
         guard.alternate_screen_entered = true;
+        guard.cursor_hidden = true;
         guard.restore().expect("restore partial terminal");
         assert!(guard.restored);
         assert!(!guard.alternate_screen_entered);
-        assert!(!guard.raw_mode_enabled);
+        assert!(!guard.cursor_hidden);
+        assert!(!guard.raw_mode_owned);
     }
 
     #[test]
@@ -195,8 +207,51 @@ mod tests {
     fn cleanup_marks_guard_restored_when_writes_fail() {
         let mut guard = TerminalGuard::for_test(FailingWriter).expect("test terminal");
         guard.alternate_screen_entered = true;
+        guard.cursor_hidden = true;
         assert!(guard.restore().is_err());
+        assert!(!guard.restored);
+        assert!(guard.alternate_screen_entered);
+        assert!(guard.cursor_hidden);
+    }
+
+    #[test]
+    fn cleanup_retries_pending_terminal_state() {
+        let mut guard =
+            TerminalGuard::for_test(FailOnceWriter { failed: false }).expect("test terminal");
+        guard.alternate_screen_entered = true;
+
+        assert!(guard.restore().is_err());
+        assert!(!guard.restored);
+        assert!(guard.alternate_screen_entered);
+
+        guard.restore().expect("retry restore");
         assert!(guard.restored);
         assert!(!guard.alternate_screen_entered);
+    }
+
+    #[test]
+    fn preexisting_raw_mode_is_not_owned_by_the_guard() {
+        let mut guard = TerminalGuard::for_test(Vec::<u8>::new()).expect("test terminal");
+        guard.raw_mode_owned = false;
+        guard.restore().expect("restore preexisting raw mode");
+        assert!(!guard.raw_mode_owned);
+    }
+
+    struct FailOnceWriter {
+        failed: bool,
+    }
+
+    impl Write for FailOnceWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if !self.failed {
+                self.failed = true;
+                return Err(io::Error::other("test transient terminal write failure"));
+            }
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
