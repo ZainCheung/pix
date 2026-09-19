@@ -40,11 +40,11 @@ pub(crate) fn add_workspace(
 /// Adds one authorized workspace without producing human-facing output.
 ///
 /// The persistent TUI uses this operation so mutations remain inside its
-/// alternate screen.  Keeping the read/modify/write and service refresh in
-/// one helper also preserves the same transaction and authorization semantics
-/// as the explicit `pix workspace add` command. The caller owns the service
-/// refresh so a durable mutation can still be reported as successful when an
-/// already-running service is temporarily unavailable.
+/// alternate screen. Keeping the read/modify/write in one helper preserves the
+/// same transaction and authorization semantics as the explicit
+/// `pix workspace add` command. The caller owns the service refresh so a
+/// durable mutation can still be reported as successful when an already-running
+/// service is temporarily unavailable.
 pub(crate) fn authorize_workspace(
     store: &ConfigStore,
     path: &std::path::Path,
@@ -110,20 +110,7 @@ pub(crate) fn workspace(
     };
     match command {
         WorkspaceCommand::Add { path, name } => {
-            prepare_running_service_mutation(store)?;
-            let transaction = store.transaction()?;
-            let mut config = transaction
-                .load_or_create(default_host_name())
-                .context("loading Pix configuration")?;
-            let mut registry = WorkspaceRegistry::new(&mut config);
-            let added = registry
-                .add(&path, name)
-                .with_context(|| format!("authorizing workspace {}", path.display()))?
-                .clone();
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
+            let added = authorize_workspace(store, &path, name)?;
             let service_refresh = refresh_running_service(store)?;
             if output.is_json() {
                 return output.success(
@@ -251,21 +238,7 @@ pub(crate) fn workspace(
                     return Ok(());
                 }
             }
-            prepare_running_service_mutation(store)?;
-            let transaction = store.transaction()?;
-            let mut config = transaction
-                .load()
-                .context("loading current Pix configuration")?;
-            let index = config
-                .workspaces
-                .iter()
-                .position(|workspace| workspace.id == id)
-                .ok_or_else(|| anyhow::anyhow!("unknown workspace: {id}"))?;
-            let removed = config.workspaces.remove(index);
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
+            let removed = revoke_workspace(store, id)?;
             let service_refresh = refresh_running_service(store)?;
             if output.is_json() {
                 return output.success(

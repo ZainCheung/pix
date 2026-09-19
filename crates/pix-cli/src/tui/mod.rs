@@ -2,6 +2,7 @@ mod event;
 mod terminal;
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -17,6 +18,7 @@ use crate::commands;
 use crate::home::{AccessMode, ConfigState, HostOverview, ServiceState};
 use crate::output::OutputFormat;
 use crate::setup_ui::LOGO;
+use pix_core::config::WorkspaceRecord;
 use pix_core::{ConfigStore, PiSessionStore, WorkspaceRegistry};
 
 pub(crate) use terminal::TerminalGuard;
@@ -252,6 +254,35 @@ enum PendingAction {
     OpenSessions(Uuid),
 }
 
+impl PendingAction {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Add(_) => "Adding workspace…",
+            Self::Remove(_) => "Removing workspace…",
+            Self::OpenSessions(_) => "Loading sessions…",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum WorkerResult {
+    Added {
+        workspace: WorkspaceRecord,
+        service_error: Option<String>,
+    },
+    AddFailed(String),
+    Removed {
+        workspace: WorkspaceRecord,
+        service_error: Option<String>,
+    },
+    RemoveFailed(String),
+    Sessions {
+        workspace: WorkspaceItem,
+        sessions: Vec<SessionItem>,
+    },
+    SessionsFailed(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TerminalSize {
     pub(crate) width: u16,
@@ -369,15 +400,6 @@ impl App {
         }
     }
 
-    fn pending_label(&self) -> Option<&'static str> {
-        match self.pending_action.as_ref() {
-            Some(PendingAction::Add(_)) => Some("Adding workspace…"),
-            Some(PendingAction::Remove(_)) => Some("Removing workspace…"),
-            Some(PendingAction::OpenSessions(_)) => Some("Loading sessions…"),
-            None => None,
-        }
-    }
-
     pub(crate) fn handle_event(&mut self, event: &Event) {
         if let Event::Resize(width, height) = event {
             self.set_terminal_size(TerminalSize {
@@ -400,6 +422,16 @@ impl App {
             && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
             self.should_quit = true;
+            return;
+        }
+
+        // Background mutations own the pending action until their result is
+        // applied. Keep navigation/quit responsive, but do not enqueue a
+        // second mutation against a stale list while one is in flight.
+        if self.busy.is_some() {
+            if event::is_quit(event) && self.overlay.take().is_none() {
+                self.go_back_or_quit();
+            }
             return;
         }
 
@@ -632,110 +664,153 @@ impl App {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn process_pending(&mut self, store: &ConfigStore, overview: &mut HostOverview) {
-        let Some(action) = self.pending_action.take() else {
-            return;
-        };
+    fn apply_worker_result(
+        &mut self,
+        result: WorkerResult,
+        store: &ConfigStore,
+        overview: &mut HostOverview,
+    ) {
         self.busy = None;
-        match action {
-            PendingAction::Add(path) => {
-                let path = commands::shared::expand_home(path);
-                match commands::workspace::authorize_workspace(store, &path, None) {
-                    Ok(added) => {
-                        let id = added.id;
-                        let service_error = commands::shared::refresh_running_service(store).err();
-                        let service_failed = service_error.is_some();
-                        if let Err(error) = self.refresh_workspaces(store) {
-                            self.set_toast(
-                                format!("Added workspace, reload failed: {error}"),
-                                ToastTone::Error,
-                            );
-                        } else {
-                            self.selected_workspace_id = Some(id);
-                            self.select_index(
-                                self.workspaces
-                                    .iter()
-                                    .position(|workspace| workspace.id == id)
-                                    .unwrap_or(0),
-                            );
-                            let message = service_error.map_or_else(
-                                || format!("Added workspace · {}", added.name),
-                                |error| format!("Added workspace · host refresh failed: {error}"),
-                            );
-                            self.set_toast(
-                                message,
-                                if service_failed {
-                                    ToastTone::Error
-                                } else {
-                                    ToastTone::Success
-                                },
-                            );
-                        }
-                        overview.workspaces = self.workspaces.len();
-                        self.overlay = None;
-                    }
-                    Err(error) => {
-                        self.set_toast(
-                            format!("Could not add workspace: {error}"),
-                            ToastTone::Error,
-                        );
-                    }
-                }
-            }
-            PendingAction::Remove(id) => match commands::workspace::revoke_workspace(store, id) {
-                Ok(removed) => {
-                    let old_index = self.selected;
-                    let service_error = commands::shared::refresh_running_service(store).err();
-                    let service_failed = service_error.is_some();
-                    if let Err(error) = self.refresh_workspaces(store) {
-                        self.set_toast(
-                            format!("Removed workspace, reload failed: {error}"),
-                            ToastTone::Error,
-                        );
-                    } else {
-                        self.selected = old_index.min(self.workspaces.len().saturating_sub(1));
-                        self.selected_workspace_id =
-                            self.workspaces.get(self.selected).map(|item| item.id);
-                        let message = service_error.map_or_else(
-                            || format!("Removed workspace · {}", removed.name),
-                            |error| format!("Removed workspace · host refresh failed: {error}"),
-                        );
-                        self.set_toast(
-                            message,
-                            if service_failed {
-                                ToastTone::Error
-                            } else {
-                                ToastTone::Success
-                            },
-                        );
-                    }
-                    overview.workspaces = self.workspaces.len();
-                    self.overlay = None;
-                }
-                Err(error) => {
+        match result {
+            WorkerResult::Added {
+                workspace,
+                service_error,
+            } => {
+                let id = workspace.id;
+                if let Err(error) = self.refresh_workspaces(store) {
                     self.set_toast(
-                        format!("Could not remove workspace: {error}"),
+                        format!("Added workspace, reload failed: {error}"),
                         ToastTone::Error,
                     );
-                    self.overlay = None;
+                } else {
+                    self.selected_workspace_id = Some(id);
+                    self.select_index(
+                        self.workspaces
+                            .iter()
+                            .position(|item| item.id == id)
+                            .unwrap_or(0),
+                    );
+                    let service_failed = service_error.is_some();
+                    let message = service_error.map_or_else(
+                        || format!("Added workspace · {}", workspace.name),
+                        |error| format!("Added workspace · host refresh failed: {error}"),
+                    );
+                    self.set_toast(
+                        message,
+                        if service_failed {
+                            ToastTone::Error
+                        } else {
+                            ToastTone::Success
+                        },
+                    );
                 }
-            },
-            PendingAction::OpenSessions(id) => match load_sessions(store, id) {
-                Ok((workspace, sessions)) => {
-                    self.active_workspace_id = Some(workspace.id);
-                    self.sessions = sessions;
-                    self.selected = 0;
+                overview.workspaces = self.workspaces.len();
+                self.overlay = None;
+            }
+            WorkerResult::AddFailed(error) => {
+                self.set_toast(
+                    format!("Could not add workspace: {error}"),
+                    ToastTone::Error,
+                );
+            }
+            WorkerResult::Removed {
+                workspace,
+                service_error,
+            } => {
+                let old_index = self.selected;
+                if let Err(error) = self.refresh_workspaces(store) {
+                    self.set_toast(
+                        format!("Removed workspace, reload failed: {error}"),
+                        ToastTone::Error,
+                    );
+                } else {
+                    self.selected = old_index.min(self.workspaces.len().saturating_sub(1));
+                    self.selected_workspace_id =
+                        self.workspaces.get(self.selected).map(|item| item.id);
+                    let service_failed = service_error.is_some();
+                    let message = service_error.map_or_else(
+                        || format!("Removed workspace · {}", workspace.name),
+                        |error| format!("Removed workspace · host refresh failed: {error}"),
+                    );
+                    self.set_toast(
+                        message,
+                        if service_failed {
+                            ToastTone::Error
+                        } else {
+                            ToastTone::Success
+                        },
+                    );
+                }
+                overview.workspaces = self.workspaces.len();
+                self.overlay = None;
+            }
+            WorkerResult::RemoveFailed(error) => {
+                self.set_toast(
+                    format!("Could not remove workspace: {error}"),
+                    ToastTone::Error,
+                );
+                self.overlay = None;
+            }
+            WorkerResult::Sessions {
+                workspace,
+                sessions,
+            } => {
+                self.active_workspace_id = Some(workspace.id);
+                self.sessions = sessions;
+                // `open` stores the current workspace selection before it
+                // resets the sessions cursor. Keep this assignment in
+                // `open`, not before it, so Esc returns to the same row.
+                if self.route == Route::Workspaces {
                     self.open(Route::WorkspaceSessions);
                 }
-                Err(error) => {
-                    self.set_toast(
-                        format!("Could not load sessions: {error}"),
-                        ToastTone::Error,
-                    );
-                }
-            },
+            }
+            WorkerResult::SessionsFailed(error) => {
+                self.set_toast(
+                    format!("Could not load sessions: {error}"),
+                    ToastTone::Error,
+                );
+            }
         }
     }
+}
+
+fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Receiver<WorkerResult> {
+    let (sender, receiver) = mpsc::channel();
+    let store = store.clone();
+    std::thread::spawn(move || {
+        let result = match action {
+            PendingAction::Add(path) => {
+                let path = commands::shared::expand_home(path);
+                match commands::workspace::authorize_workspace(&store, &path, None) {
+                    Ok(workspace) => WorkerResult::Added {
+                        service_error: commands::shared::refresh_running_service(&store)
+                            .err()
+                            .map(|error| error.to_string()),
+                        workspace,
+                    },
+                    Err(error) => WorkerResult::AddFailed(error.to_string()),
+                }
+            }
+            PendingAction::Remove(id) => match commands::workspace::revoke_workspace(&store, id) {
+                Ok(workspace) => WorkerResult::Removed {
+                    service_error: commands::shared::refresh_running_service(&store)
+                        .err()
+                        .map(|error| error.to_string()),
+                    workspace,
+                },
+                Err(error) => WorkerResult::RemoveFailed(error.to_string()),
+            },
+            PendingAction::OpenSessions(id) => match load_sessions(&store, id) {
+                Ok((workspace, sessions)) => WorkerResult::Sessions {
+                    workspace,
+                    sessions,
+                },
+                Err(error) => WorkerResult::SessionsFailed(error.to_string()),
+            },
+        };
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 /// Runs the persistent application shell. Every route renders from one state
@@ -755,6 +830,7 @@ pub(crate) fn run(overview: &HostOverview, store: &ConfigStore) -> Result<()> {
 fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverview) -> Result<()> {
     let mut app = App::new();
     let mut overview = overview.clone();
+    let mut worker = None;
     if let Err(error) = app.refresh_workspaces(store) {
         app.set_toast(
             format!("Could not load workspaces: {error}"),
@@ -763,10 +839,26 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
     }
     loop {
         app.clear_expired_toast();
-        if app.busy.is_none() {
-            app.busy = app.pending_label().map(str::to_owned);
+        if worker.is_none()
+            && let Some(action) = app.pending_action.take()
+        {
+            app.busy = Some(action.label().to_owned());
+            worker = Some(spawn_worker(store, action));
         }
-        let rendered_busy = app.busy.is_some() && app.pending_action.is_some();
+        if let Some(receiver) = worker.as_ref() {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    worker = None;
+                    app.apply_worker_result(result, store, &mut overview);
+                }
+                Err(TryRecvError::Disconnected) => {
+                    worker = None;
+                    app.busy = None;
+                    app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
         guard.terminal_mut().draw(|frame| {
             app.set_terminal_size(TerminalSize {
                 width: frame.area().width,
@@ -778,14 +870,7 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
         if app.should_quit {
             break;
         }
-        // Draw one busy frame before a local mutation or service refresh can
-        // take a slow path. The operation is still kept in this single event
-        // loop, so terminal ownership and cleanup remain deterministic.
-        if rendered_busy {
-            app.process_pending(store, &mut overview);
-            continue;
-        }
-        if let Some(event) = event::poll(Duration::from_millis(250))? {
+        if let Some(event) = event::poll(Duration::from_millis(50))? {
             app.handle_event(&event);
         }
     }
@@ -819,7 +904,7 @@ fn render(frame: &mut Frame<'_>, app: &App, overview: &HostOverview) {
         route => render_child(frame, body, route, overview),
     }
     render_feedback(frame, feedback, app);
-    render_footer(frame, footer, app.route);
+    render_footer(frame, footer, app);
 
     if let Some(overlay) = &app.overlay {
         render_overlay(frame, area, app, overlay);
@@ -1280,7 +1365,7 @@ fn placeholder_message(route: Route) -> [&'static str; 2] {
 
 fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, overlay: &Overlay) {
     match overlay {
-        Overlay::Help => render_help(frame, area, app.route),
+        Overlay::Help => render_help(frame, area, app.route, app.workspaces.len()),
         Overlay::Add(add) => render_add_overlay(frame, area, add),
         Overlay::Remove(remove) => render_remove_overlay(frame, area, remove),
     }
@@ -1320,8 +1405,7 @@ fn render_add_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &AddOverlay) {
             Line::from(""),
             Line::from(vec![
                 Span::styled("› ", Style::default().fg(Color::Cyan)),
-                Span::raw(&input.value),
-                Span::styled("▌", Style::default().fg(Color::Cyan)),
+                input_line(input, usize::from(popup.width).saturating_sub(6)),
             ]),
             Line::from(""),
             Line::from(Span::styled(
@@ -1385,6 +1469,34 @@ fn render_add_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &AddOverlay) {
         popup,
         &mut state,
     );
+}
+
+/// Renders an editable path with the visual cursor at the same byte boundary
+/// used by the input state. The compact horizontal window keeps the cursor
+/// visible while editing paths longer than the modal.
+fn input_line(input: &TextInput, max_chars: usize) -> Span<'static> {
+    let chars = input.value.chars().collect::<Vec<_>>();
+    let cursor = input.value[..input.cursor].chars().count();
+    let max_chars = max_chars.max(3);
+    let mut start = cursor.saturating_sub(max_chars / 2);
+    let mut end = (start + max_chars).min(chars.len());
+    if end.saturating_sub(start) < max_chars {
+        start = end.saturating_sub(max_chars);
+    }
+    if cursor < start {
+        start = cursor;
+    }
+    if cursor > end {
+        end = cursor.min(chars.len());
+    }
+    let prefix = if start > 0 { "…" } else { "" };
+    let suffix = if end < chars.len() { "…" } else { "" };
+    let before = chars[start..cursor.min(end)].iter().collect::<String>();
+    let after = chars[cursor.min(end)..end].iter().collect::<String>();
+    Span::styled(
+        format!("{prefix}{before}▌{after}{suffix}"),
+        Style::default().fg(Color::White),
+    )
 }
 
 fn render_remove_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RemoveOverlay) {
@@ -1460,8 +1572,8 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect, route: Route) {
-    let hints = footer_hints(area.width, route);
+fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let hints = footer_hints(area.width, app.route, app.workspaces.len());
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ", Style::default().fg(Color::DarkGray)),
@@ -1471,10 +1583,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, route: Route) {
     );
 }
 
-fn footer_hints(width: u16, route: Route) -> &'static str {
+fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static str {
     if width < 72 {
         match route {
             Route::Home => "↑↓/jk Move   ↵ Open   ? Help   Q Quit",
+            Route::Workspaces if workspace_count == 0 => "A Add   ↵ Add   Esc Back   ? Help",
             Route::Workspaces => {
                 "↑↓/jk Navigate   ↵ Sessions   A Add   R Remove   Esc Back   ? Help"
             }
@@ -1484,6 +1597,7 @@ fn footer_hints(width: u16, route: Route) -> &'static str {
     } else {
         match route {
             Route::Home => "↑↓/jk Navigate   ↵ Open   1–4 Jump   ? Help   Q Quit",
+            Route::Workspaces if workspace_count == 0 => "A Add   ↵ Add   Esc Back   ? Help",
             Route::Workspaces => {
                 "↑↓/jk Navigate   ↵ Sessions   A Add   R Remove   Esc Back   ? Help"
             }
@@ -1493,7 +1607,7 @@ fn footer_hints(width: u16, route: Route) -> &'static str {
     }
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route) {
+fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route, workspace_count: usize) {
     let width = 60.min(area.width.saturating_sub(2));
     let height = 12.min(area.height.saturating_sub(2));
     if width == 0 || height == 0 {
@@ -1514,7 +1628,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route) {
         )),
         Line::from(""),
     ];
-    let shortcuts = help_shortcuts(route);
+    let shortcuts = help_shortcuts(route, workspace_count);
     help_lines.extend(shortcuts.iter().copied().map(Line::from));
     if !shortcuts.is_empty() {
         help_lines.push(Line::from(""));
@@ -1535,9 +1649,10 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route) {
     );
 }
 
-fn help_shortcuts(route: Route) -> &'static [&'static str] {
+fn help_shortcuts(route: Route, workspace_count: usize) -> &'static [&'static str] {
     match route {
         Route::Home => &["↑↓ or j/k   navigate", "Enter       open"],
+        Route::Workspaces if workspace_count == 0 => &["A or Enter  add workspace"],
         Route::Workspaces => &[
             "↑↓ or j/k   navigate workspaces",
             "Enter       show sessions",
@@ -1627,9 +1742,9 @@ mod tests {
 
     use super::{
         AddOverlay, App, InteractionMode, MIN_HEIGHT, Overlay, Route, SessionItem, TerminalSize,
-        TtyState, WorkspaceItem, footer_hints, help_shortcuts, interaction_mode,
-        placeholder_message, render, should_launch_tui, truncate_end, truncate_path,
-        version_mismatch_message, visible_range,
+        TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints, help_shortcuts, input_line,
+        interaction_mode, placeholder_message, render, should_launch_tui, truncate_end,
+        truncate_path, version_mismatch_message, visible_range,
     };
     use crate::home::{AccessOverview, PiOverview, PiSource, ServiceOverview};
     use crate::output::OutputFormat;
@@ -1800,9 +1915,10 @@ mod tests {
     #[test]
     fn placeholder_footers_only_advertise_implemented_actions() {
         for route in [Route::Devices, Route::Settings] {
-            assert_eq!(footer_hints(80, route), "Esc/q Back   ? Help");
+            assert_eq!(footer_hints(80, route, 1), "Esc/q Back   ? Help");
         }
-        assert!(footer_hints(80, Route::Workspaces).contains("A Add"));
+        assert!(footer_hints(80, Route::Workspaces, 1).contains("A Add"));
+        assert!(!footer_hints(80, Route::Workspaces, 0).contains("Sessions"));
     }
 
     #[test]
@@ -1826,13 +1942,63 @@ mod tests {
     #[test]
     fn help_only_shows_selection_actions_on_home() {
         assert_eq!(
-            help_shortcuts(Route::Home),
+            help_shortcuts(Route::Home, 1),
             &["↑↓ or j/k   navigate", "Enter       open"]
         );
         for route in [Route::Devices, Route::Settings, Route::Status] {
-            assert!(help_shortcuts(route).is_empty());
+            assert!(help_shortcuts(route, 1).is_empty());
         }
-        assert!(!help_shortcuts(Route::Workspaces).is_empty());
+        assert!(!help_shortcuts(Route::Workspaces, 1).is_empty());
+        assert_eq!(
+            help_shortcuts(Route::Workspaces, 0),
+            &["A or Enter  add workspace"]
+        );
+    }
+
+    #[test]
+    fn session_navigation_restores_the_original_workspace_selection() {
+        let first = WorkspaceItem {
+            id: uuid::Uuid::new_v4(),
+            name: "first".to_owned(),
+            path: PathBuf::from("/tmp/first"),
+        };
+        let second = WorkspaceItem {
+            id: uuid::Uuid::new_v4(),
+            name: "second".to_owned(),
+            path: PathBuf::from("/tmp/second"),
+        };
+        let second_id = second.id;
+        let mut app = App::new();
+        app.route = Route::Workspaces;
+        app.workspaces = vec![first, second.clone()];
+        app.select_index(1);
+
+        let store = ConfigStore::new("/tmp/pix-tui-test-config.json");
+        let mut overview = test_overview(2);
+        app.apply_worker_result(
+            WorkerResult::Sessions {
+                workspace: second,
+                sessions: Vec::new(),
+            },
+            &store,
+            &mut overview,
+        );
+
+        assert_eq!(app.route, Route::WorkspaceSessions);
+        assert_eq!(app.selected, 0);
+        app.handle_event(&key(KeyCode::Esc));
+        assert_eq!(app.route, Route::Workspaces);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.selected_workspace_id, Some(second_id));
+    }
+
+    #[test]
+    fn path_input_cursor_is_rendered_at_the_editing_position() {
+        let input = TextInput {
+            value: "/tmp/workspace".to_owned(),
+            cursor: "/tmp/".len(),
+        };
+        assert_eq!(input_line(&input, 40).content, "/tmp/▌workspace");
     }
 
     #[test]
