@@ -342,7 +342,7 @@ fn render(frame: &mut Frame<'_>, app: &App, overview: &HostOverview) {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         render_small_terminal(frame, area);
         if app.overlay.is_some() {
-            render_help(frame, area);
+            render_help(frame, area, app.route);
         }
         return;
     }
@@ -367,7 +367,7 @@ fn render(frame: &mut Frame<'_>, app: &App, overview: &HostOverview) {
     render_footer(frame, footer, app.route);
 
     if app.overlay.is_some() {
-        render_help(frame, area);
+        render_help(frame, area, app.route);
     }
 }
 
@@ -543,30 +543,15 @@ fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &Host
     ]);
 
     let content = match route {
-        Route::Devices if overview.devices == 0 => vec![
-            header,
-            Line::from(""),
-            Line::from(Span::styled(
-                "No paired devices yet.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from("Pairing actions will appear here when device management lands."),
-        ],
-        Route::Workspaces if overview.workspaces == 0 => vec![
-            header,
-            Line::from(""),
-            Line::from(Span::styled(
-                "No authorized workspaces yet.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from("Workspace actions will appear here in the next migration."),
-        ],
-        Route::Devices | Route::Workspaces => vec![
-            header,
-            Line::from(""),
-            Line::from("Use Enter for the selected item. Add and removal actions are reserved"),
-            Line::from("for the device/workspace feature migrations."),
-        ],
+        Route::Devices | Route::Workspaces => {
+            let [message, detail] = placeholder_message(route);
+            vec![
+                header,
+                Line::from(""),
+                Line::from(message),
+                Line::from(detail),
+            ]
+        }
         Route::Settings => vec![
             header,
             Line::from(""),
@@ -611,6 +596,22 @@ fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &Host
     frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), area);
 }
 
+fn placeholder_message(route: Route) -> [&'static str; 2] {
+    match route {
+        Route::Devices => [
+            "Device management will be available here after",
+            "the Devices TUI migration.",
+        ],
+        Route::Workspaces => [
+            "Workspace management will be available here after",
+            "the Workspaces TUI migration.",
+        ],
+        Route::Home | Route::Settings | Route::Status => {
+            unreachable!("only device and workspace routes have placeholder messages")
+        }
+    }
+}
+
 fn render_toast(frame: &mut Frame<'_>, area: Rect, toast: &Toast) {
     let style = match toast.tone {
         ToastTone::Info => Style::default().fg(Color::Cyan),
@@ -653,7 +654,7 @@ fn footer_hints(width: u16, route: Route) -> &'static str {
     }
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
+fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route) {
     let width = 60.min(area.width.saturating_sub(2));
     let height = 12.min(area.height.saturating_sub(2));
     if width == 0 || height == 0 {
@@ -665,28 +666,41 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         width,
         height,
     };
+    let mut help_lines = vec![
+        Line::from(Span::styled(
+            "Pix navigation",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+    let shortcuts = help_shortcuts(route);
+    help_lines.extend(shortcuts.iter().copied().map(Line::from));
+    if !shortcuts.is_empty() {
+        help_lines.push(Line::from(""));
+    }
+    help_lines.extend([
+        Line::from("Esc / q     go back; quit from Home"),
+        Line::from("?           close this help"),
+        Line::from("Ctrl-C      quit Pix"),
+        Line::from(""),
+        Line::from("Resize the terminal to redraw the current frame."),
+    ]);
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(
-                "Pix navigation",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from("↑↓ or j/k   move the current selection"),
-            Line::from("Enter       open or select"),
-            Line::from("Esc / q     go back; quit from Home"),
-            Line::from("?           close this help"),
-            Line::from("Ctrl-C      quit Pix"),
-            Line::from(""),
-            Line::from("Resize the terminal to redraw the current frame."),
-        ])
-        .block(Block::default().borders(Borders::ALL).title(" Help "))
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(help_lines)
+            .block(Block::default().borders(Borders::ALL).title(" Help "))
+            .wrap(Wrap { trim: true }),
         popup,
     );
+}
+
+fn help_shortcuts(route: Route) -> &'static [&'static str] {
+    match route {
+        Route::Home => &["↑↓ or j/k   navigate", "Enter       open"],
+        Route::Devices | Route::Workspaces | Route::Settings | Route::Status => &[],
+    }
 }
 
 fn version_mismatch_message(host_version: &str) -> String {
@@ -765,7 +779,8 @@ fn relay_style(overview: &HostOverview) -> Style {
 mod tests {
     use super::{
         App, InteractionMode, MIN_HEIGHT, Route, TerminalSize, TtyState, footer_hints,
-        interaction_mode, should_launch_tui, version_mismatch_message,
+        help_shortcuts, interaction_mode, placeholder_message, should_launch_tui,
+        version_mismatch_message,
     };
     use crate::output::OutputFormat;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -932,6 +947,40 @@ mod tests {
     fn placeholder_footers_only_advertise_implemented_actions() {
         for route in [Route::Devices, Route::Workspaces, Route::Settings] {
             assert_eq!(footer_hints(80, route), "Esc/q Back   ? Help");
+        }
+    }
+
+    #[test]
+    fn placeholder_pages_do_not_advertise_selection_actions() {
+        assert_eq!(
+            placeholder_message(Route::Devices),
+            [
+                "Device management will be available here after",
+                "the Devices TUI migration."
+            ]
+        );
+        assert_eq!(
+            placeholder_message(Route::Workspaces),
+            [
+                "Workspace management will be available here after",
+                "the Workspaces TUI migration."
+            ]
+        );
+    }
+
+    #[test]
+    fn help_only_shows_selection_actions_on_home() {
+        assert_eq!(
+            help_shortcuts(Route::Home),
+            &["↑↓ or j/k   navigate", "Enter       open"]
+        );
+        for route in [
+            Route::Devices,
+            Route::Workspaces,
+            Route::Settings,
+            Route::Status,
+        ] {
+            assert!(help_shortcuts(route).is_empty());
         }
     }
 
