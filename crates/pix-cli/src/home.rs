@@ -7,7 +7,7 @@ use crate::service;
 use crate::setup_ui::{SetupUi, UiTone};
 use crate::status::HostServiceStatus;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct HostOverview {
     pub(crate) config_path: String,
     pub(crate) config_state: ConfigState,
@@ -22,7 +22,7 @@ pub(crate) struct HostOverview {
     pub(crate) workspaces: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct PiOverview {
     pub(crate) source: PiSource,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -35,7 +35,7 @@ pub(crate) struct PiOverview {
     pub(crate) compatibility: Option<PiCompatibilityStatus>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct ServiceOverview {
     pub(crate) state: ServiceState,
     pub(crate) installed: bool,
@@ -49,7 +49,7 @@ pub(crate) struct ServiceOverview {
     pub(crate) pix_version: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub(crate) struct AccessOverview {
     pub(crate) mode: AccessMode,
     pub(crate) relay_enabled: bool,

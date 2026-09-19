@@ -339,7 +339,7 @@ fn run(cli: Cli, output: CommandOutput) -> Result<()> {
             return Ok(());
         }
         let overview = HostOverview::collect(&store);
-        return tui::run(&overview);
+        return tui::run(&overview, &store);
     };
 
     match command {
