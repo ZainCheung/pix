@@ -3,6 +3,7 @@ mod terminal;
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -283,6 +284,30 @@ enum WorkerResult {
     SessionsFailed(String),
 }
 
+struct Worker {
+    receiver: Receiver<WorkerResult>,
+    handle: Option<JoinHandle<()>>,
+    mutation: bool,
+}
+
+impl Worker {
+    fn join(mut self) -> bool {
+        self.handle
+            .take()
+            .is_some_and(|handle| handle.join().is_err())
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if self.mutation
+            && let Some(handle) = self.handle.take()
+        {
+            let _ = handle.join();
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct TerminalSize {
     pub(crate) width: u16,
@@ -301,6 +326,7 @@ pub(crate) struct App {
     pub(crate) overlay: Option<Overlay>,
     pub(crate) toast: Option<Toast>,
     pub(crate) should_quit: bool,
+    quit_requested: bool,
     pub(crate) selected: usize,
     pub(crate) terminal_size: TerminalSize,
     pub(crate) workspaces: Vec<WorkspaceItem>,
@@ -310,6 +336,7 @@ pub(crate) struct App {
     toast_until: Option<Instant>,
     pending_action: Option<PendingAction>,
     busy: Option<String>,
+    mutation_in_flight: bool,
 }
 
 impl Default for App {
@@ -327,6 +354,7 @@ impl App {
             overlay: None,
             toast: None,
             should_quit: false,
+            quit_requested: false,
             selected: 0,
             terminal_size: TerminalSize::default(),
             workspaces: Vec::new(),
@@ -336,6 +364,7 @@ impl App {
             toast_until: None,
             pending_action: None,
             busy: None,
+            mutation_in_flight: false,
         }
     }
 
@@ -400,6 +429,15 @@ impl App {
         }
     }
 
+    fn request_quit(&mut self) {
+        if self.mutation_in_flight {
+            self.quit_requested = true;
+            self.overlay = None;
+        } else {
+            self.should_quit = true;
+        }
+    }
+
     pub(crate) fn handle_event(&mut self, event: &Event) {
         if let Event::Resize(width, height) = event {
             self.set_terminal_size(TerminalSize {
@@ -421,7 +459,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
-            self.should_quit = true;
+            self.request_quit();
             return;
         }
 
@@ -429,8 +467,12 @@ impl App {
         // applied. Keep navigation/quit responsive, but do not enqueue a
         // second mutation against a stale list while one is in flight.
         if self.busy.is_some() {
-            if event::is_quit(event) && self.overlay.take().is_none() {
-                self.go_back_or_quit();
+            if event::is_quit(event) {
+                if self.mutation_in_flight {
+                    self.request_quit();
+                } else if self.overlay.take().is_none() {
+                    self.go_back_or_quit();
+                }
             }
             return;
         }
@@ -671,6 +713,7 @@ impl App {
         overview: &mut HostOverview,
     ) {
         self.busy = None;
+        self.mutation_in_flight = false;
         match result {
             WorkerResult::Added {
                 workspace,
@@ -771,13 +814,17 @@ impl App {
                 );
             }
         }
+        if self.quit_requested {
+            self.should_quit = true;
+        }
     }
 }
 
-fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Receiver<WorkerResult> {
+fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
     let (sender, receiver) = mpsc::channel();
     let store = store.clone();
-    std::thread::spawn(move || {
+    let mutation = matches!(&action, PendingAction::Add(_) | PendingAction::Remove(_));
+    let handle = std::thread::spawn(move || {
         let result = match action {
             PendingAction::Add(path) => {
                 let path = commands::shared::expand_home(path);
@@ -810,7 +857,11 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Receiver<WorkerRe
         };
         let _ = sender.send(result);
     });
-    receiver
+    Worker {
+        receiver,
+        handle: Some(handle),
+        mutation,
+    }
 }
 
 /// Runs the persistent application shell. Every route renders from one state
@@ -830,7 +881,7 @@ pub(crate) fn run(overview: &HostOverview, store: &ConfigStore) -> Result<()> {
 fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverview) -> Result<()> {
     let mut app = App::new();
     let mut overview = overview.clone();
-    let mut worker = None;
+    let mut worker: Option<Worker> = None;
     if let Err(error) = app.refresh_workspaces(store) {
         app.set_toast(
             format!("Could not load workspaces: {error}"),
@@ -843,18 +894,32 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
             && let Some(action) = app.pending_action.take()
         {
             app.busy = Some(action.label().to_owned());
-            worker = Some(spawn_worker(store, action));
+            let active = spawn_worker(store, action);
+            app.mutation_in_flight = active.mutation;
+            worker = Some(active);
         }
-        if let Some(receiver) = worker.as_ref() {
-            match receiver.try_recv() {
+        let worker_result = worker.as_ref().map(|active| active.receiver.try_recv());
+        if let Some(result) = worker_result {
+            match result {
                 Ok(result) => {
-                    worker = None;
+                    let active = worker.take().expect("worker exists while receiving result");
+                    let worker_panicked = active.join();
                     app.apply_worker_result(result, store, &mut overview);
+                    if worker_panicked && !app.should_quit {
+                        app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                    }
                 }
                 Err(TryRecvError::Disconnected) => {
-                    worker = None;
+                    let active = worker.take().expect("worker exists while disconnected");
+                    let _ = active.join();
                     app.busy = None;
-                    app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                    app.mutation_in_flight = false;
+                    if app.quit_requested {
+                        app.should_quit = true;
+                    }
+                    if !app.should_quit {
+                        app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                    }
                 }
                 Err(TryRecvError::Empty) => {}
             }
@@ -868,6 +933,14 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
         })?;
 
         if app.should_quit {
+            // A mutation never reaches this branch while it is in flight:
+            // request_quit() defers should_quit until its result is applied.
+            // Pure session reads may be abandoned when Ctrl-C is pressed.
+            if let Some(active) = worker.take()
+                && active.mutation
+            {
+                let _ = active.join();
+            }
             break;
         }
         if let Some(event) = event::poll(Duration::from_millis(50))? {
@@ -1097,14 +1170,13 @@ fn render_workspaces(frame: &mut Frame<'_>, area: Rect, app: &App) {
                 )),
                 Line::from("Press A to add a workspace."),
             ])
-            .block(Block::default().borders(Borders::ALL).title(" Workspaces "))
             .wrap(Wrap { trim: true }),
             list_area,
         );
         return;
     }
 
-    let capacity = usize::from(list_area.height.saturating_sub(2)).max(1);
+    let capacity = usize::from(list_area.height).max(1);
     let (start, end) = visible_range(app.selected, app.workspaces.len(), capacity);
     let items = app.workspaces[start..end]
         .iter()
@@ -1130,18 +1202,11 @@ fn render_workspaces(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.selected.saturating_sub(start)));
     frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Authorized folders "),
-            )
-            .highlight_symbol("❯ ")
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        List::new(items).highlight_symbol("❯ ").highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         list_area,
         &mut state,
     );
@@ -1172,13 +1237,12 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
     if app.sessions.is_empty() {
         frame.render_widget(
             Paragraph::new("No Pi sessions stored in this workspace yet.")
-                .block(Block::default().borders(Borders::ALL).title(" Sessions "))
                 .wrap(Wrap { trim: true }),
             list_area,
         );
         return;
     }
-    let capacity = usize::from(list_area.height.saturating_sub(2)).max(1);
+    let capacity = usize::from(list_area.height).max(1);
     let (start, end) = visible_range(app.selected, app.sessions.len(), capacity);
     let items = app.sessions[start..end]
         .iter()
@@ -1206,18 +1270,11 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(Some(app.selected.saturating_sub(start)));
     frame.render_stateful_widget(
-        List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Pi sessions "),
-            )
-            .highlight_symbol("❯ ")
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
+        List::new(items).highlight_symbol("❯ ").highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         list_area,
         &mut state,
     );
@@ -1553,6 +1610,11 @@ fn render_remove_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RemoveOver
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
     if let Some(busy) = &app.busy {
+        let busy = if app.quit_requested {
+            "Finishing workspace operation…"
+        } else {
+            busy
+        };
         lines.push(Line::from(vec![
             Span::styled("  ⠋ ", Style::default().fg(Color::Cyan)),
             Span::styled(busy, Style::default().fg(Color::Cyan)),
@@ -1587,10 +1649,8 @@ fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static st
     if width < 72 {
         match route {
             Route::Home => "↑↓/jk Move   ↵ Open   ? Help   Q Quit",
-            Route::Workspaces if workspace_count == 0 => "A Add   ↵ Add   Esc Back   ? Help",
-            Route::Workspaces => {
-                "↑↓/jk Navigate   ↵ Sessions   A Add   R Remove   Esc Back   ? Help"
-            }
+            Route::Workspaces if workspace_count == 0 => "A Add  ↵ Add  Esc  ?",
+            Route::Workspaces => "↑↓ Move  ↵ Sessions  A Add  R Remove  Esc  ?",
             Route::WorkspaceSessions => "↑↓/jk Navigate   Esc Back   ? Help",
             Route::Devices | Route::Settings | Route::Status => "Esc/q Back   ? Help",
         }
@@ -1609,16 +1669,9 @@ fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static st
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route, workspace_count: usize) {
     let width = 60.min(area.width.saturating_sub(2));
-    let height = 12.min(area.height.saturating_sub(2));
-    if width == 0 || height == 0 {
+    if width == 0 {
         return;
     }
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
     let mut help_lines = vec![
         Line::from(Span::styled(
             "Pix navigation",
@@ -1640,6 +1693,24 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route, workspace_count:
         Line::from(""),
         Line::from("Resize the terminal to redraw the current frame."),
     ]);
+    let inner_width = usize::from(width.saturating_sub(2)).max(1);
+    let content_height = help_lines
+        .iter()
+        .map(|line| line.width().div_ceil(inner_width).max(1))
+        .sum::<usize>();
+    let requested_height = content_height.saturating_add(2);
+    let height = u16::try_from(requested_height)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(2));
+    if height == 0 {
+        return;
+    }
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
     frame.render_widget(Clear, popup);
     frame.render_widget(
         Paragraph::new(help_lines)
@@ -1956,6 +2027,47 @@ mod tests {
     }
 
     #[test]
+    fn mutation_quit_waits_for_the_worker_result() {
+        let mut app = App::new();
+        app.route = Route::Workspaces;
+        app.busy = Some("Removing workspace…".to_owned());
+        app.mutation_in_flight = true;
+
+        app.handle_event(&key(KeyCode::Char('q')));
+
+        assert!(app.quit_requested);
+        assert!(!app.should_quit);
+        assert!(app.overlay.is_none());
+
+        let store = ConfigStore::new("/tmp/pix-tui-test-config.json");
+        let mut overview = test_overview(0);
+        app.apply_worker_result(
+            WorkerResult::RemoveFailed("test failure".to_owned()),
+            &store,
+            &mut overview,
+        );
+
+        assert!(app.should_quit);
+        assert!(!app.mutation_in_flight);
+        assert!(app.busy.is_none());
+    }
+
+    #[test]
+    fn ctrl_c_requests_graceful_quit_during_a_mutation() {
+        let mut app = App::new();
+        app.busy = Some("Adding workspace…".to_owned());
+        app.mutation_in_flight = true;
+
+        app.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+
+        assert!(app.quit_requested);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
     fn session_navigation_restores_the_original_workspace_selection() {
         let first = WorkspaceItem {
             id: uuid::Uuid::new_v4(),
@@ -2141,6 +2253,8 @@ mod tests {
         let text = buffer_text(terminal.backend());
         assert!(text.contains("Workspaces"));
         assert!(text.contains("my-workspace"));
+        assert!(!text.contains("Authorized folders"));
+        assert!(!text.contains('┌'));
 
         app.route = Route::WorkspaceSessions;
         app.active_workspace_id = app.workspaces.first().map(|workspace| workspace.id);
@@ -2157,6 +2271,47 @@ mod tests {
         assert!(text.contains("Sessions"));
         assert!(text.contains("Fix the menu"));
         assert!(text.contains("3 messages"));
+        assert!(!text.contains("Pi sessions"));
+        assert!(!text.contains('┌'));
+    }
+
+    #[test]
+    fn narrow_workspace_footer_keeps_escape_action_visible() {
+        let mut app = App::new();
+        app.route = Route::Workspaces;
+        app.workspaces.push(WorkspaceItem {
+            id: uuid::Uuid::new_v4(),
+            name: "workspace".to_owned(),
+            path: PathBuf::from("/tmp/workspace"),
+        });
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow workspace frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Esc"));
+        assert!(text.contains("R Remove"));
+    }
+
+    #[test]
+    fn workspace_help_expands_to_show_all_guidance() {
+        let mut app = App::new();
+        app.route = Route::Workspaces;
+        app.overlay = Some(Overlay::Help);
+        app.workspaces.push(WorkspaceItem {
+            id: uuid::Uuid::new_v4(),
+            name: "workspace".to_owned(),
+            path: PathBuf::from("/tmp/workspace"),
+        });
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("help frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Resize the terminal"));
+        assert!(text.contains("current frame."));
     }
 
     #[test]
