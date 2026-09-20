@@ -2,11 +2,8 @@
 //! request ID or confirmation code, revocation, and the interactive device
 //! menu.
 
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use pix_core::ConfigStore;
-use serde::{Deserialize, Serialize};
 
 use crate::output::CommandOutput;
 use crate::setup_ui::{ListRow, PickerAction, SetupUi};
@@ -114,13 +111,7 @@ pub(crate) fn emit_devices(
     emit_event(&ServeEvent::DeviceList { devices }, output, log, control);
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PendingPairing {
-    id: uuid::Uuid,
-    device_name: String,
-    confirmation_code: String,
-    expires_at: u64,
-}
+pub(crate) use crate::app_ops::device::PendingPairing;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn device(
@@ -163,10 +154,9 @@ pub(crate) fn device(
             )
         }
         DeviceCommand::List => {
-            let config = store.load().context("loading Pix configuration")?;
+            let devices = crate::app_ops::device::list_devices(store)?;
             if output.is_json() {
-                let devices = config
-                    .devices
+                let devices = devices
                     .iter()
                     .map(|device| {
                         serde_json::json!({
@@ -178,11 +168,11 @@ pub(crate) fn device(
                     .collect::<Vec<_>>();
                 return output.success("device.list", &serde_json::json!({"devices": devices}));
             }
-            if config.devices.is_empty() {
+            if devices.is_empty() {
                 println!("No paired devices.");
                 return Ok(());
             }
-            for device in config.devices {
+            for device in devices {
                 println!("{}  {}", device.id, terminal_label(&device.name));
                 println!("  paired {}", device.paired_at.to_rfc3339());
             }
@@ -249,69 +239,31 @@ pub(crate) fn device(
                     return Ok(());
                 }
             }
-            let mut service_cleanup = None;
-            if host_service_control_live(store)? {
-                let event = service_client::request_event(
-                    store,
-                    &format!("revoke {id}"),
-                    "device_revoked",
-                    Duration::from_secs(5),
-                )?;
-                if event.get("device_id").and_then(serde_json::Value::as_str) != Some(id.as_str()) {
-                    bail!("Pix host returned a mismatched device revocation event");
-                }
-                service_cleanup = Some(serde_json::json!({
-                    "closed_connections": event.get("closed_connections").cloned().unwrap_or(serde_json::json!(0)),
-                    "connection_cleanup_failed": event.get("connection_cleanup_failed").cloned().unwrap_or(serde_json::json!(false)),
-                }));
-            } else {
-                let transaction = store.transaction()?;
-                if host_service_control_live(store)? {
-                    drop(transaction);
-                    let event = service_client::request_event(
-                        store,
-                        &format!("revoke {id}"),
-                        "device_revoked",
-                        Duration::from_secs(5),
-                    )?;
-                    if event.get("device_id").and_then(serde_json::Value::as_str)
-                        != Some(id.as_str())
-                    {
-                        bail!("Pix host returned a mismatched device revocation response");
-                    }
-                    service_cleanup = Some(serde_json::json!({
-                        "closed_connections": event.get("closed_connections").cloned().unwrap_or(serde_json::json!(0)),
-                        "connection_cleanup_failed": event.get("connection_cleanup_failed").cloned().unwrap_or(serde_json::json!(false)),
-                    }));
-                } else {
-                    let mut current = transaction
-                        .load()
-                        .context("loading current Pix configuration")?;
-                    let index = current
-                        .devices
-                        .iter()
-                        .position(|device| device.id == id)
-                        .ok_or_else(|| anyhow::anyhow!("unknown device: {id}"))?;
-                    current.devices.remove(index);
-                    transaction
-                        .save(&current)
-                        .context("saving Pix configuration")?;
-                }
-            }
+            let revoked = crate::app_ops::device::revoke(store, &id)?;
+            let service_cleanup = revoked.service_cleanup.map(|cleanup| {
+                serde_json::json!({
+                    "closed_connections": cleanup.closed_connections,
+                    "connection_cleanup_failed": cleanup.connection_cleanup_failed,
+                })
+            });
             if output.is_json() {
                 return output.success(
                     "device.revoke",
                     &serde_json::json!({
                         "device": {
-                            "id": removed.id,
-                            "name": removed.name,
-                            "paired_at": removed.paired_at,
+                            "id": revoked.device.id,
+                            "name": revoked.device.name,
+                            "paired_at": revoked.device.paired_at,
                         },
                         "service_cleanup": service_cleanup,
                     }),
                 );
             }
-            println!("Revoked {} ({})", terminal_label(&removed.name), removed.id);
+            println!(
+                "Revoked {} ({})",
+                terminal_label(&revoked.device.name),
+                revoked.device.id
+            );
             if service_cleanup.as_ref().is_some_and(|cleanup| {
                 cleanup["connection_cleanup_failed"] == serde_json::json!(true)
             }) {
@@ -323,19 +275,7 @@ pub(crate) fn device(
 }
 
 pub(crate) fn pending_pairings(store: &ConfigStore) -> Result<Vec<PendingPairing>> {
-    let event = service_client::request_event(
-        store,
-        "pending-list",
-        "pairing_request_list",
-        Duration::from_secs(5),
-    )?;
-    serde_json::from_value(
-        event
-            .get("requests")
-            .cloned()
-            .context("Pix host omitted pending pairing requests")?,
-    )
-    .context("decoding pending pairing requests")
+    crate::app_ops::device::list_pending(store)
 }
 
 pub(crate) fn headless_pair_offer(
@@ -358,26 +298,36 @@ pub(crate) fn headless_pair_offer(
         return Ok(());
     }
 
-    let event = service_client::request_event(
-        store,
-        "pair-remote",
-        "remote_pairing_ready",
-        Duration::from_secs(10),
-    )?;
+    let offer = crate::app_ops::device::remote_pairing_offer(store)?;
+    let qr_payload = offer
+        .qr_payload
+        .as_ref()
+        .map_or(serde_json::Value::Null, |secret| {
+            serde_json::Value::String(secret.expose().to_owned())
+        });
+    let join_code = offer
+        .join_code
+        .as_ref()
+        .map_or(serde_json::Value::Null, |secret| {
+            serde_json::Value::String(secret.expose().to_owned())
+        });
+    let expires_at = offer
+        .expires_at
+        .map_or(serde_json::Value::Null, |value| serde_json::json!(value));
     let data = serde_json::json!({
         "transport": "relay",
         "state": "waiting_for_device",
-        "qr_payload": event.get("qr_payload").cloned().unwrap_or(serde_json::Value::Null),
-        "join_code": event.get("join_code").cloned().unwrap_or(serde_json::Value::Null),
-        "expires_at": event.get("expires_at").cloned().unwrap_or(serde_json::Value::Null),
+        "qr_payload": qr_payload,
+        "join_code": join_code,
+        "expires_at": expires_at,
         "next": "Present the offer to the user, then run `pix --output json device pending` and approve the matching code.",
     });
     if output.is_json() {
         return output.success("device.pair", &data);
     }
     println!("Remote pairing offer ready.");
-    if let Some(code) = event.get("join_code").and_then(serde_json::Value::as_str) {
-        println!("  code: {code}");
+    if let Some(code) = offer.join_code.as_ref() {
+        println!("  code: {}", code.expose());
     }
     println!("  The encoded pairing secret is available only with `--output json`.");
     println!("Run `pix device pending` to review the confirmation code.");
@@ -401,23 +351,15 @@ pub(crate) fn handle_pairing_request(
     let request_id = request_id
         .or_else(|| request.as_ref().map(|request| request.id))
         .context("pairing request ID is required")?;
-    let event = service_client::request_event(
-        store,
-        &format!("{action} {request_id}"),
-        "pairing_request_handled",
-        Duration::from_secs(5),
-    )?;
-    let expected_action = if action == "approve" {
-        "approved"
+    let operation = if action == "approve" {
+        crate::app_ops::device::approve(store, request_id)?
     } else {
-        "rejected"
+        crate::app_ops::device::deny(store, request_id)?
     };
-    if event.get("request_id").and_then(serde_json::Value::as_str)
-        != Some(request_id.to_string().as_str())
-        || event.get("action").and_then(serde_json::Value::as_str) != Some(expected_action)
-    {
-        bail!("Pix host returned a mismatched pairing completion event");
-    }
+    let expected_action = match operation.action {
+        crate::app_ops::device::PairingAction::Approved => "approved",
+        crate::app_ops::device::PairingAction::Rejected => "rejected",
+    };
     if output.is_json() {
         return output.success(
             &format!("device.{action}"),
@@ -665,10 +607,9 @@ pub(crate) fn select_device_id(
 use crate::DeviceCommand;
 use crate::commands::setup::{SetupPairingOptions, run_setup_pairing};
 use crate::commands::shared::{
-    default_host_name, format_confirmation_code, host_service_control_live,
-    load_or_ephemeral_config, short_id, terminal_label,
+    default_host_name, format_confirmation_code, load_or_ephemeral_config, short_id, terminal_label,
 };
 use crate::serve::DeviceEvent;
 use crate::serve::{HostLog, ServeEvent, ServeOutput, emit_command_error, emit_event};
+use crate::service;
 use crate::usage_error;
-use crate::{service, service_client};

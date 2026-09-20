@@ -2,7 +2,9 @@ mod event;
 mod terminal;
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use uuid::Uuid;
 
+use crate::app_ops::device as device_ops;
 use crate::commands;
 use crate::home::{AccessMode, ConfigState, HostOverview, ServiceState};
 use crate::output::OutputFormat;
@@ -135,6 +138,8 @@ pub(crate) enum Overlay {
     Help,
     Add(AddOverlay),
     Remove(RemoveOverlay),
+    RevokeDevice(RevokeDeviceOverlay),
+    Pair(PairingOverlay),
 }
 
 fn load_sessions(
@@ -249,10 +254,103 @@ pub(crate) struct RemoveOverlay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RevokeDeviceOverlay {
+    pub(crate) device_id: String,
+    pub(crate) device_name: String,
+    /// The destructive action is intentionally not the default.
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PairingPhase {
+    Starting,
+    Waiting { remote: bool },
+    Request(PendingRequestItem),
+    Approving,
+    Denying,
+    Success { device_name: String },
+    Denied,
+    Cancelled,
+    Expired,
+    TimedOut,
+    Error(device_ops::PairingFailure),
+}
+
+/// Pairing UI state contains secret material only behind `PairingSecret`'s
+/// redacted Debug implementation.  The fields are rendered solely by the
+/// dedicated pairing overlay.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PairingOverlay {
+    pub(crate) phase: PairingPhase,
+    pub(crate) offer: Option<device_ops::PairingOffer>,
+    pub(crate) request: Option<PendingRequestItem>,
+}
+
+impl std::fmt::Debug for PairingOverlay {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PairingOverlay")
+            .field("phase", &self.phase)
+            .field("offer", &self.offer)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceItem {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) paired_at: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct PendingRequestItem {
+    pub(crate) id: Uuid,
+    pub(crate) device_name: String,
+    pub(crate) confirmation_code: String,
+    pub(crate) expires_at: u64,
+}
+
+impl std::fmt::Debug for PendingRequestItem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingRequestItem")
+            .field("id", &self.id)
+            .field("device_name", &self.device_name)
+            .field("confirmation_code", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+impl From<device_ops::PendingPairing> for PendingRequestItem {
+    fn from(request: device_ops::PendingPairing) -> Self {
+        Self {
+            id: request.id,
+            device_name: request.device_name,
+            confirmation_code: request.confirmation_code,
+            expires_at: request.expires_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeviceRowId {
+    Pending(Uuid),
+    Paired(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum PendingAction {
     Add(PathBuf),
     Remove(Uuid),
     OpenSessions(Uuid),
+    RefreshDevices,
+    Approve(Uuid),
+    Deny(Uuid),
+    RevokeDevice(String),
+    Pair { remote: bool },
 }
 
 impl PendingAction {
@@ -261,6 +359,11 @@ impl PendingAction {
             Self::Add(_) => "Adding workspace…",
             Self::Remove(_) => "Removing workspace…",
             Self::OpenSessions(_) => "Loading sessions…",
+            Self::RefreshDevices => "Loading devices…",
+            Self::Approve(_) => "Approving pairing…",
+            Self::Deny(_) => "Denying pairing…",
+            Self::RevokeDevice(_) => "Revoking device…",
+            Self::Pair { .. } => "Pairing…",
         }
     }
 }
@@ -288,12 +391,35 @@ enum WorkerResult {
         sessions: Vec<SessionItem>,
     },
     SessionsFailed(String),
+    Devices {
+        devices: Vec<DeviceItem>,
+        pending: Vec<PendingRequestItem>,
+        pending_error: bool,
+    },
+    DeviceOperationFailed {
+        action: &'static str,
+    },
+    DeviceOperationSucceeded {
+        action: &'static str,
+        devices: Vec<DeviceItem>,
+        pending: Vec<PendingRequestItem>,
+        pending_error: bool,
+    },
+    Pairing(device_ops::PairingOutcome),
+}
+
+#[derive(Debug)]
+enum WorkerEvent {
+    Result(WorkerResult),
+    PairingProgress(device_ops::PairingProgress),
 }
 
 struct Worker {
-    receiver: Receiver<WorkerResult>,
+    receiver: Receiver<WorkerEvent>,
     handle: Option<JoinHandle<()>>,
     mutation: bool,
+    cancel: Option<Arc<AtomicBool>>,
+    pairing_commands: Option<Sender<device_ops::PairingCommand>>,
 }
 
 impl Worker {
@@ -301,6 +427,18 @@ impl Worker {
         self.handle
             .take()
             .is_some_and(|handle| handle.join().is_err())
+    }
+
+    fn cancel(&self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Release);
+        }
+    }
+
+    fn send_pairing_command(&self, command: device_ops::PairingCommand) {
+        if let Some(sender) = &self.pairing_commands {
+            let _ = sender.send(command);
+        }
     }
 }
 
@@ -324,6 +462,7 @@ pub(crate) struct TerminalSize {
 ///
 /// Screens only render from this state. They do not own a nested event loop,
 /// raw mode, or terminal cleanup, which keeps route changes inside one frame.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct App {
     pub(crate) route: Route,
@@ -337,12 +476,19 @@ pub(crate) struct App {
     pub(crate) terminal_size: TerminalSize,
     pub(crate) workspaces: Vec<WorkspaceItem>,
     pub(crate) sessions: Vec<SessionItem>,
+    pub(crate) paired_devices: Vec<DeviceItem>,
+    pub(crate) pending_requests: Vec<PendingRequestItem>,
+    pub(crate) selected_device_id: Option<String>,
+    pub(crate) selected_request_id: Option<Uuid>,
     pub(crate) active_workspace_id: Option<Uuid>,
     pub(crate) selected_workspace_id: Option<Uuid>,
     toast_until: Option<Instant>,
     pending_action: Option<PendingAction>,
     busy: Option<String>,
     mutation_in_flight: bool,
+    device_refresh_requested: bool,
+    pending_pairing_command: Option<device_ops::PairingCommand>,
+    cancel_requested: bool,
 }
 
 impl Default for App {
@@ -365,12 +511,19 @@ impl App {
             terminal_size: TerminalSize::default(),
             workspaces: Vec::new(),
             sessions: Vec::new(),
+            paired_devices: Vec::new(),
+            pending_requests: Vec::new(),
+            selected_device_id: None,
+            selected_request_id: None,
             active_workspace_id: None,
             selected_workspace_id: None,
             toast_until: None,
             pending_action: None,
             busy: None,
             mutation_in_flight: false,
+            device_refresh_requested: false,
+            pending_pairing_command: None,
+            cancel_requested: false,
         }
     }
 
@@ -417,6 +570,94 @@ impl App {
         self.workspaces.get(self.selected)
     }
 
+    fn apply_devices(&mut self, devices: Vec<DeviceItem>, pending: Vec<PendingRequestItem>) {
+        let selected_row = self.selected_device_row();
+        self.paired_devices = devices;
+        self.pending_requests = pending;
+        let rows = self.device_rows();
+        let next_index = selected_row
+            .and_then(|row| rows.iter().position(|candidate| *candidate == row))
+            .unwrap_or_else(|| self.selected.min(rows.len().saturating_sub(1)));
+        self.select_index(next_index);
+    }
+
+    fn device_rows(&self) -> Vec<DeviceRowId> {
+        self.pending_requests
+            .iter()
+            .map(|request| DeviceRowId::Pending(request.id))
+            .chain(
+                self.paired_devices
+                    .iter()
+                    .map(|device| DeviceRowId::Paired(device.id.clone())),
+            )
+            .collect()
+    }
+
+    fn selected_device_row(&self) -> Option<DeviceRowId> {
+        self.selected_request_id
+            .map(DeviceRowId::Pending)
+            .or_else(|| self.selected_device_id.clone().map(DeviceRowId::Paired))
+            .or_else(|| self.device_rows().get(self.selected).cloned())
+    }
+
+    fn selected_pending_request(&self) -> Option<&PendingRequestItem> {
+        let DeviceRowId::Pending(id) = self.selected_device_row()? else {
+            return None;
+        };
+        self.pending_requests
+            .iter()
+            .find(|request| request.id == id)
+    }
+
+    fn selected_device(&self) -> Option<&DeviceItem> {
+        let DeviceRowId::Paired(id) = self.selected_device_row()? else {
+            return None;
+        };
+        self.paired_devices.iter().find(|device| device.id == id)
+    }
+
+    fn pairing_overlay(&self) -> Option<&PairingOverlay> {
+        match self.overlay.as_ref() {
+            Some(Overlay::Pair(pairing)) => Some(pairing),
+            _ => None,
+        }
+    }
+
+    fn pairing_overlay_mut(&mut self) -> Option<&mut PairingOverlay> {
+        match self.overlay.as_mut() {
+            Some(Overlay::Pair(pairing)) => Some(pairing),
+            _ => None,
+        }
+    }
+
+    fn begin_pairing(&mut self) {
+        self.overlay = Some(Overlay::Pair(PairingOverlay {
+            phase: PairingPhase::Starting,
+            offer: None,
+            request: None,
+        }));
+        self.pending_action = Some(PendingAction::Pair { remote: false });
+    }
+
+    fn request_pairing_command(&mut self, command: device_ops::PairingCommand) {
+        self.pending_pairing_command = Some(command);
+    }
+
+    fn cancel_pairing(&mut self, navigation: DeferredNavigation) {
+        if self.pairing_overlay().is_none() {
+            return;
+        }
+        self.deferred_navigation = Some(navigation);
+        let can_cancel = self.pairing_overlay().is_some_and(|pairing| {
+            !matches!(
+                pairing.phase,
+                PairingPhase::Approving | PairingPhase::Denying
+            )
+        });
+        self.cancel_requested |= can_cancel;
+        self.overlay = None;
+    }
+
     fn set_toast(&mut self, message: impl Into<String>, tone: ToastTone) {
         self.toast = Some(Toast {
             message: message.into(),
@@ -437,6 +678,10 @@ impl App {
 
     fn request_quit(&mut self) {
         if self.mutation_in_flight {
+            if self.pairing_overlay().is_some() {
+                self.cancel_pairing(DeferredNavigation::Quit);
+                return;
+            }
             self.deferred_navigation = Some(DeferredNavigation::Quit);
             self.overlay = None;
         } else {
@@ -446,6 +691,10 @@ impl App {
 
     fn request_back(&mut self) {
         if self.mutation_in_flight {
+            if self.pairing_overlay().is_some() {
+                self.cancel_pairing(DeferredNavigation::Back);
+                return;
+            }
             if self.deferred_navigation != Some(DeferredNavigation::Quit) {
                 self.deferred_navigation = Some(DeferredNavigation::Back);
             }
@@ -457,12 +706,19 @@ impl App {
 
     fn finish_deferred_navigation(&mut self) {
         match self.deferred_navigation.take() {
-            Some(DeferredNavigation::Back) => self.go_back_or_quit(),
-            Some(DeferredNavigation::Quit) => self.should_quit = true,
+            Some(DeferredNavigation::Back) => {
+                self.overlay = None;
+                self.go_back_or_quit();
+            }
+            Some(DeferredNavigation::Quit) => {
+                self.overlay = None;
+                self.should_quit = true;
+            }
             None => {}
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn handle_event(&mut self, event: &Event) {
         if let Event::Resize(width, height) = event {
             self.set_terminal_size(TerminalSize {
@@ -493,9 +749,42 @@ impl App {
         // second mutation against a stale list while one is in flight.
         if self.busy.is_some() {
             if self.mutation_in_flight {
-                match key.code {
-                    KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.request_back(),
-                    _ => {}
+                if self.pairing_overlay().is_some() {
+                    match key.code {
+                        KeyCode::Char('a' | 'A') => {
+                            if let Some(request) = self
+                                .pairing_overlay()
+                                .and_then(|pairing| pairing.request.as_ref())
+                            {
+                                self.request_pairing_command(device_ops::PairingCommand::Approve(
+                                    request.id,
+                                ));
+                                if let Some(pairing) = self.pairing_overlay_mut() {
+                                    pairing.phase = PairingPhase::Approving;
+                                }
+                            }
+                        }
+                        KeyCode::Char('d' | 'D') => {
+                            if let Some(request) = self
+                                .pairing_overlay()
+                                .and_then(|pairing| pairing.request.as_ref())
+                            {
+                                self.request_pairing_command(device_ops::PairingCommand::Deny(
+                                    request.id,
+                                ));
+                                if let Some(pairing) = self.pairing_overlay_mut() {
+                                    pairing.phase = PairingPhase::Denying;
+                                }
+                            }
+                        }
+                        KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.request_back(),
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q' | 'Q') => self.request_back(),
+                        _ => {}
+                    }
                 }
             } else if event::is_quit(event) && self.overlay.take().is_none() {
                 self.go_back_or_quit();
@@ -530,6 +819,26 @@ impl App {
                     }));
                 }
             }
+            KeyCode::Char('p' | 'P') if self.route == Route::Devices => self.begin_pairing(),
+            KeyCode::Char('a' | 'A') if self.route == Route::Devices => {
+                if let Some(request) = self.selected_pending_request() {
+                    self.pending_action = Some(PendingAction::Approve(request.id));
+                }
+            }
+            KeyCode::Char('d' | 'D') if self.route == Route::Devices => {
+                if let Some(request) = self.selected_pending_request() {
+                    self.pending_action = Some(PendingAction::Deny(request.id));
+                }
+            }
+            KeyCode::Char('r' | 'R') if self.route == Route::Devices => {
+                if let Some(device) = self.selected_device().cloned() {
+                    self.overlay = Some(Overlay::RevokeDevice(RevokeDeviceOverlay {
+                        device_id: device.id,
+                        device_name: device.name,
+                        selected: 1,
+                    }));
+                }
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home => self.select_index(0),
@@ -554,7 +863,8 @@ impl App {
             Route::Home => 3,
             Route::Workspaces => self.workspaces.len().saturating_sub(1),
             Route::WorkspaceSessions => self.sessions.len().saturating_sub(1),
-            Route::Devices | Route::Settings | Route::Status => 0,
+            Route::Devices => self.device_rows().len().saturating_sub(1),
+            Route::Settings | Route::Status => 0,
         }
     }
 
@@ -570,8 +880,20 @@ impl App {
 
     fn select_index(&mut self, index: usize) {
         self.selected = index.min(self.max_selection());
-        if self.route == Route::Workspaces {
-            self.selected_workspace_id = self.workspaces.get(self.selected).map(|item| item.id);
+        match self.route {
+            Route::Workspaces => {
+                self.selected_workspace_id = self.workspaces.get(self.selected).map(|item| item.id);
+            }
+            Route::Devices => {
+                self.selected_request_id = None;
+                self.selected_device_id = None;
+                match self.device_rows().get(self.selected) {
+                    Some(DeviceRowId::Pending(id)) => self.selected_request_id = Some(*id),
+                    Some(DeviceRowId::Paired(id)) => self.selected_device_id = Some(id.clone()),
+                    None => {}
+                }
+            }
+            _ => {}
         }
     }
 
@@ -590,7 +912,19 @@ impl App {
                 }
             }
             Route::WorkspaceSessions => {}
-            Route::Devices | Route::Settings | Route::Status => {
+            Route::Devices => {
+                if self.selected_pending_request().is_some() {
+                    self.set_toast(
+                        "Use A to approve or D to deny the selected request",
+                        ToastTone::Info,
+                    );
+                } else if self.selected_device().is_some() {
+                    self.set_toast("Use R to revoke the selected device", ToastTone::Info);
+                } else {
+                    self.begin_pairing();
+                }
+            }
+            Route::Settings | Route::Status => {
                 self.set_toast(
                     format!(
                         "{} actions are coming in a follow-up issue",
@@ -610,6 +944,11 @@ impl App {
         self.selection_history.push(self.selected);
         self.route = route;
         self.selected = 0;
+        self.selected_request_id = None;
+        self.selected_device_id = None;
+        if route == Route::Devices {
+            self.device_refresh_requested = true;
+        }
         self.toast = None;
         self.toast_until = None;
     }
@@ -647,6 +986,35 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Enter => self.overlay = None,
                 _ => {}
             },
+            Some(Overlay::RevokeDevice(overlay)) => match code {
+                KeyCode::Up | KeyCode::Left => {
+                    overlay.selected = overlay.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Right => overlay.selected = (overlay.selected + 1).min(1),
+                KeyCode::Home => overlay.selected = 0,
+                KeyCode::End => overlay.selected = 1,
+                KeyCode::Enter if overlay.selected == 0 => {
+                    action = Some(PendingAction::RevokeDevice(overlay.device_id.clone()));
+                }
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Enter => self.overlay = None,
+                _ => {}
+            },
+            Some(Overlay::Pair(pairing)) => {
+                if matches!(
+                    pairing.phase,
+                    PairingPhase::Success { .. }
+                        | PairingPhase::Denied
+                        | PairingPhase::Cancelled
+                        | PairingPhase::Expired
+                        | PairingPhase::TimedOut
+                        | PairingPhase::Error(_)
+                ) && matches!(
+                    code,
+                    KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Enter
+                ) {
+                    self.overlay = None;
+                }
+            }
             Some(Overlay::Add(overlay)) => {
                 if let Some(input) = overlay.input.as_mut() {
                     match code {
@@ -839,52 +1207,419 @@ impl App {
                     ToastTone::Error,
                 );
             }
+            WorkerResult::Devices {
+                devices,
+                pending,
+                pending_error,
+            } => {
+                self.apply_devices(devices, pending);
+                self.device_refresh_requested = false;
+                overview.devices = self.paired_devices.len();
+                if pending_error && self.route == Route::Devices {
+                    self.set_toast("Pending pairing requests are unavailable", ToastTone::Info);
+                }
+            }
+            WorkerResult::DeviceOperationFailed { action } => {
+                self.device_refresh_requested = action != "refresh";
+                if action != "refresh" {
+                    self.overlay = None;
+                }
+                self.set_toast(
+                    match action {
+                        "approve" => "Could not approve pairing request",
+                        "deny" => "Could not deny pairing request",
+                        "revoke" => "Could not revoke device",
+                        "refresh" => "Could not load devices",
+                        _ => "Device operation failed",
+                    },
+                    ToastTone::Error,
+                );
+            }
+            WorkerResult::DeviceOperationSucceeded {
+                action,
+                devices,
+                pending,
+                pending_error,
+            } => {
+                self.apply_devices(devices, pending);
+                self.device_refresh_requested = false;
+                self.overlay = None;
+                overview.devices = self.paired_devices.len();
+                let message = match action {
+                    "approve" => "Pairing request approved",
+                    "deny" => "Pairing request denied",
+                    "revoke" => "Device revoked",
+                    _ => "Device operation complete",
+                };
+                self.set_toast(message, ToastTone::Success);
+                if pending_error && self.route == Route::Devices {
+                    self.set_toast("Pending pairing requests are unavailable", ToastTone::Info);
+                }
+            }
+            WorkerResult::Pairing(outcome) => {
+                self.device_refresh_requested = true;
+                match outcome {
+                    device_ops::PairingOutcome::Success { device_name } => {
+                        self.overlay = Some(Overlay::Pair(PairingOverlay {
+                            phase: PairingPhase::Success { device_name },
+                            offer: None,
+                            request: None,
+                        }));
+                        self.set_toast("Device paired", ToastTone::Success);
+                    }
+                    device_ops::PairingOutcome::Denied => {
+                        if let Some(pairing) = self.pairing_overlay_mut() {
+                            pairing.phase = PairingPhase::Denied;
+                            pairing.offer = None;
+                            pairing.request = None;
+                        }
+                        self.set_toast("Pairing denied", ToastTone::Info);
+                    }
+                    device_ops::PairingOutcome::Cancelled => {
+                        if let Some(pairing) = self.pairing_overlay_mut() {
+                            pairing.phase = PairingPhase::Cancelled;
+                            pairing.offer = None;
+                            pairing.request = None;
+                        }
+                    }
+                    device_ops::PairingOutcome::TimedOut => {
+                        if let Some(pairing) = self.pairing_overlay_mut() {
+                            pairing.phase = PairingPhase::TimedOut;
+                            pairing.offer = None;
+                            pairing.request = None;
+                        }
+                        self.set_toast("Pairing timed out", ToastTone::Error);
+                    }
+                    device_ops::PairingOutcome::Expired => {
+                        if let Some(pairing) = self.pairing_overlay_mut() {
+                            pairing.phase = PairingPhase::Expired;
+                            pairing.offer = None;
+                            pairing.request = None;
+                        }
+                        self.set_toast("Pairing offer expired", ToastTone::Error);
+                    }
+                    device_ops::PairingOutcome::Error(error) => {
+                        if let Some(pairing) = self.pairing_overlay_mut() {
+                            pairing.phase = PairingPhase::Error(error);
+                            pairing.offer = None;
+                            pairing.request = None;
+                        }
+                        self.set_toast(error.message(), ToastTone::Error);
+                    }
+                }
+            }
         }
         self.finish_deferred_navigation();
     }
+
+    fn apply_worker_event(
+        &mut self,
+        event: WorkerEvent,
+        store: &ConfigStore,
+        overview: &mut HostOverview,
+    ) {
+        match event {
+            WorkerEvent::Result(result) => self.apply_worker_result(result, store, overview),
+            WorkerEvent::PairingProgress(progress) => match progress {
+                device_ops::PairingProgress::Waiting { offer } => {
+                    if let Some(pairing) = self.pairing_overlay_mut() {
+                        pairing.phase = PairingPhase::Waiting {
+                            remote: offer.remote,
+                        };
+                        pairing.offer = Some(offer);
+                    }
+                }
+                device_ops::PairingProgress::OfferReady(offer) => {
+                    if let Some(pairing) = self.pairing_overlay_mut() {
+                        pairing.phase = PairingPhase::Waiting { remote: true };
+                        pairing.offer = Some(offer);
+                    }
+                }
+                device_ops::PairingProgress::Request(request) => {
+                    let request = PendingRequestItem::from(request);
+                    if !self
+                        .pending_requests
+                        .iter()
+                        .any(|candidate| candidate.id == request.id)
+                    {
+                        self.pending_requests.push(request.clone());
+                    }
+                    self.selected_request_id = Some(request.id);
+                    self.selected_device_id = None;
+                    if let Some(pairing) = self.pairing_overlay_mut() {
+                        pairing.phase = PairingPhase::Request(request.clone());
+                        pairing.offer = None;
+                        pairing.request = Some(request);
+                    }
+                }
+                device_ops::PairingProgress::Approving => {
+                    if let Some(pairing) = self.pairing_overlay_mut() {
+                        pairing.phase = PairingPhase::Approving;
+                    }
+                }
+                device_ops::PairingProgress::Denying => {
+                    if let Some(pairing) = self.pairing_overlay_mut() {
+                        pairing.phase = PairingPhase::Denying;
+                    }
+                }
+            },
+        }
+    }
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
     let (sender, receiver) = mpsc::channel();
     let store = store.clone();
-    let mutation = matches!(&action, PendingAction::Add(_) | PendingAction::Remove(_));
+    let mutation = matches!(
+        &action,
+        PendingAction::Add(_)
+            | PendingAction::Remove(_)
+            | PendingAction::Approve(_)
+            | PendingAction::Deny(_)
+            | PendingAction::RevokeDevice(_)
+            | PendingAction::Pair { .. }
+    );
+    let (cancel, pairing_commands, pairing_command_rx) =
+        if matches!(&action, PendingAction::Pair { .. }) {
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (command_sender, command_receiver) = mpsc::channel();
+            (Some(cancel), Some(command_sender), Some(command_receiver))
+        } else {
+            (None, None, None)
+        };
+    let worker_cancel = cancel.clone();
     let handle = std::thread::spawn(move || {
         let result = match action {
             PendingAction::Add(path) => {
                 let path = commands::shared::expand_home(path);
                 match commands::workspace::authorize_workspace(&store, &path, None) {
-                    Ok(workspace) => WorkerResult::Added {
+                    Ok(workspace) => WorkerEvent::Result(WorkerResult::Added {
                         service_error: commands::shared::refresh_running_service(&store)
                             .err()
                             .map(|error| error.to_string()),
                         workspace,
-                    },
-                    Err(error) => WorkerResult::AddFailed(error.to_string()),
+                    }),
+                    Err(error) => WorkerEvent::Result(WorkerResult::AddFailed(error.to_string())),
                 }
             }
             PendingAction::Remove(id) => match commands::workspace::revoke_workspace(&store, id) {
-                Ok(workspace) => WorkerResult::Removed {
+                Ok(workspace) => WorkerEvent::Result(WorkerResult::Removed {
                     service_error: commands::shared::refresh_running_service(&store)
                         .err()
                         .map(|error| error.to_string()),
                     workspace,
-                },
-                Err(error) => WorkerResult::RemoveFailed(error.to_string()),
+                }),
+                Err(error) => WorkerEvent::Result(WorkerResult::RemoveFailed(error.to_string())),
             },
             PendingAction::OpenSessions(id) => match load_sessions(&store, id) {
-                Ok((workspace, sessions)) => WorkerResult::Sessions {
+                Ok((workspace, sessions)) => WorkerEvent::Result(WorkerResult::Sessions {
                     workspace,
                     sessions,
-                },
-                Err(error) => WorkerResult::SessionsFailed(error.to_string()),
+                }),
+                Err(error) => WorkerEvent::Result(WorkerResult::SessionsFailed(error.to_string())),
             },
+            PendingAction::RefreshDevices => load_devices_event(&store),
+            PendingAction::Approve(id) => device_operation_event(&store, id, true),
+            PendingAction::Deny(id) => device_operation_event(&store, id, false),
+            PendingAction::RevokeDevice(id) => revoke_device_event(&store, &id),
+            PendingAction::Pair { remote } => {
+                let Some(cancel) = worker_cancel else {
+                    return_sender(
+                        &sender,
+                        WorkerEvent::Result(WorkerResult::Pairing(
+                            device_ops::PairingOutcome::Error(
+                                device_ops::PairingFailure::ServiceUnavailable,
+                            ),
+                        )),
+                    );
+                    return;
+                };
+                let Some(command_rx) = pairing_command_rx else {
+                    return_sender(
+                        &sender,
+                        WorkerEvent::Result(WorkerResult::Pairing(
+                            device_ops::PairingOutcome::Error(
+                                device_ops::PairingFailure::ServiceUnavailable,
+                            ),
+                        )),
+                    );
+                    return;
+                };
+                let mut session = match device_ops::PairingSession::start(&store, remote) {
+                    Ok(session) => session,
+                    Err(error) => {
+                        return_sender(
+                            &sender,
+                            WorkerEvent::Result(WorkerResult::Pairing(
+                                device_ops::PairingOutcome::Error(error),
+                            )),
+                        );
+                        return;
+                    }
+                };
+                return_sender(
+                    &sender,
+                    WorkerEvent::PairingProgress(device_ops::PairingProgress::Waiting {
+                        offer: device_ops::PairingOffer {
+                            remote,
+                            qr_payload: None,
+                            join_code: None,
+                            expires_at: None,
+                        },
+                    }),
+                );
+                loop {
+                    if let Ok(command) = command_rx.try_recv() {
+                        match command {
+                            device_ops::PairingCommand::Approve(id) => {
+                                return_sender(
+                                    &sender,
+                                    WorkerEvent::PairingProgress(
+                                        device_ops::PairingProgress::Approving,
+                                    ),
+                                );
+                                if let Err(error) = session.approve(id) {
+                                    session.cancel();
+                                    return_sender(
+                                        &sender,
+                                        WorkerEvent::Result(WorkerResult::Pairing(
+                                            device_ops::PairingOutcome::Error(error),
+                                        )),
+                                    );
+                                    return;
+                                }
+                            }
+                            device_ops::PairingCommand::Deny(id) => {
+                                return_sender(
+                                    &sender,
+                                    WorkerEvent::PairingProgress(
+                                        device_ops::PairingProgress::Denying,
+                                    ),
+                                );
+                                let outcome = match session.deny(id) {
+                                    Ok(()) => device_ops::PairingOutcome::Denied,
+                                    Err(error) => {
+                                        session.cancel();
+                                        device_ops::PairingOutcome::Error(error)
+                                    }
+                                };
+                                return_sender(
+                                    &sender,
+                                    WorkerEvent::Result(WorkerResult::Pairing(outcome)),
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    match session.poll(&cancel) {
+                        Ok(Some(device_ops::PairingEvent::Progress(progress))) => {
+                            return_sender(&sender, WorkerEvent::PairingProgress(progress));
+                        }
+                        Ok(Some(device_ops::PairingEvent::Outcome(outcome))) => {
+                            if matches!(outcome, device_ops::PairingOutcome::Error(_)) {
+                                session.cancel();
+                            }
+                            return_sender(
+                                &sender,
+                                WorkerEvent::Result(WorkerResult::Pairing(outcome)),
+                            );
+                            return;
+                        }
+                        Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                        Err(error) => {
+                            session.cancel();
+                            return_sender(
+                                &sender,
+                                WorkerEvent::Result(WorkerResult::Pairing(
+                                    device_ops::PairingOutcome::Error(error),
+                                )),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
         };
-        let _ = sender.send(result);
+        return_sender(&sender, result);
     });
     Worker {
         receiver,
         handle: Some(handle),
         mutation,
+        cancel,
+        pairing_commands,
+    }
+}
+
+fn return_sender(sender: &Sender<WorkerEvent>, event: WorkerEvent) {
+    let _ = sender.send(event);
+}
+
+fn load_devices_event(store: &ConfigStore) -> WorkerEvent {
+    let devices = match device_ops::list_devices(store)
+        .or_else(|_| commands::shared::load_or_ephemeral_config(store).map(|config| config.devices))
+    {
+        Ok(devices) => devices
+            .into_iter()
+            .map(|device| DeviceItem {
+                id: device.id,
+                name: device.name,
+                paired_at: device.paired_at.to_rfc3339(),
+            })
+            .collect(),
+        Err(_) => {
+            return WorkerEvent::Result(WorkerResult::DeviceOperationFailed { action: "refresh" });
+        }
+    };
+    let (pending, pending_error) = match device_ops::list_pending(store) {
+        Ok(pending) => (pending.into_iter().map(Into::into).collect(), false),
+        Err(_) => (Vec::new(), true),
+    };
+    WorkerEvent::Result(WorkerResult::Devices {
+        devices,
+        pending,
+        pending_error,
+    })
+}
+
+fn device_operation_event(store: &ConfigStore, id: Uuid, approve: bool) -> WorkerEvent {
+    let result = if approve {
+        device_ops::approve(store, id)
+    } else {
+        device_ops::deny(store, id)
+    };
+    match result {
+        Ok(_) => operation_success_event(
+            load_devices_event(store),
+            if approve { "approve" } else { "deny" },
+        ),
+        Err(_) => WorkerEvent::Result(WorkerResult::DeviceOperationFailed {
+            action: if approve { "approve" } else { "deny" },
+        }),
+    }
+}
+
+fn revoke_device_event(store: &ConfigStore, id: &str) -> WorkerEvent {
+    match device_ops::revoke(store, id) {
+        Ok(_) => operation_success_event(load_devices_event(store), "revoke"),
+        Err(_) => WorkerEvent::Result(WorkerResult::DeviceOperationFailed { action: "revoke" }),
+    }
+}
+
+fn operation_success_event(event: WorkerEvent, action: &'static str) -> WorkerEvent {
+    match event {
+        WorkerEvent::Result(WorkerResult::Devices {
+            devices,
+            pending,
+            pending_error,
+        }) => WorkerEvent::Result(WorkerResult::DeviceOperationSucceeded {
+            action,
+            devices,
+            pending,
+            pending_error,
+        }),
+        event => event,
     }
 }
 
@@ -915,22 +1650,55 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
     loop {
         app.clear_expired_toast();
         if worker.is_none()
+            && app.route == Route::Devices
+            && app.device_refresh_requested
+            && app.pending_action.is_none()
+        {
+            app.pending_action = Some(PendingAction::RefreshDevices);
+        }
+        if worker.is_none()
             && let Some(action) = app.pending_action.take()
         {
+            let action = match action {
+                PendingAction::Pair { remote: false } => PendingAction::Pair {
+                    remote: store
+                        .load()
+                        .ok()
+                        .is_some_and(|config| config.preferences.active_relay_url().is_some()),
+                },
+                action => action,
+            };
             app.busy = Some(action.label().to_owned());
             let active = spawn_worker(store, action);
             app.mutation_in_flight = active.mutation;
             worker = Some(active);
         }
-        let worker_result = worker.as_ref().map(|active| active.receiver.try_recv());
-        if let Some(result) = worker_result {
+        if app.cancel_requested {
+            if let Some(active) = worker.as_ref() {
+                active.cancel();
+            }
+            app.cancel_requested = false;
+        }
+        if let Some(command) = app.pending_pairing_command.take()
+            && let Some(active) = worker.as_ref()
+        {
+            active.send_pairing_command(command);
+        }
+        if let Some(result) = worker.as_ref().map(|active| active.receiver.try_recv()) {
             match result {
-                Ok(result) => {
+                Ok(WorkerEvent::PairingProgress(progress)) => {
+                    app.apply_worker_event(
+                        WorkerEvent::PairingProgress(progress),
+                        store,
+                        &mut overview,
+                    );
+                }
+                Ok(WorkerEvent::Result(result)) => {
                     let active = worker.take().expect("worker exists while receiving result");
                     let worker_panicked = active.join();
-                    app.apply_worker_result(result, store, &mut overview);
+                    app.apply_worker_event(WorkerEvent::Result(result), store, &mut overview);
                     if worker_panicked && !app.should_quit {
-                        app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                        app.set_toast("Operation stopped unexpectedly", ToastTone::Error);
                     }
                 }
                 Err(TryRecvError::Disconnected) => {
@@ -940,7 +1708,7 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
                     app.mutation_in_flight = false;
                     app.finish_deferred_navigation();
                     if !app.should_quit {
-                        app.set_toast("Workspace operation stopped unexpectedly", ToastTone::Error);
+                        app.set_toast("Operation stopped unexpectedly", ToastTone::Error);
                     }
                 }
                 Err(TryRecvError::Empty) => {}
@@ -994,6 +1762,7 @@ fn render(frame: &mut Frame<'_>, app: &App, overview: &HostOverview) {
 
     match app.route {
         Route::Home => render_home(frame, body, app, overview),
+        Route::Devices => render_devices(frame, body, app, overview),
         Route::Workspaces => render_workspaces(frame, body, app),
         Route::WorkspaceSessions => render_sessions(frame, body, app),
         route => render_child(frame, body, route, overview),
@@ -1305,6 +2074,118 @@ fn render_sessions(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn render_devices(frame: &mut Frame<'_>, area: Rect, app: &App, _overview: &HostOverview) {
+    let [header, list_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .areas(area);
+    render_workspace_header(
+        frame,
+        header,
+        "Devices",
+        &format!("{} paired", app.paired_devices.len()),
+    );
+
+    if app.paired_devices.is_empty() && app.pending_requests.is_empty() {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    "No paired devices or pending requests.",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from("Press P to pair a device."),
+            ])
+            .wrap(Wrap { trim: true }),
+            list_area,
+        );
+        return;
+    }
+
+    let selected_row = app.selected_device_row();
+    let mut items = Vec::new();
+    let mut row_indices = Vec::new();
+    if !app.pending_requests.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "Pending",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for request in &app.pending_requests {
+            row_indices.push((DeviceRowId::Pending(request.id), items.len()));
+            let name_width = usize::from(list_area.width).saturating_sub(28).max(10);
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    truncate_end(
+                        &commands::shared::terminal_label(&request.device_name),
+                        name_width,
+                    ),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!(
+                        "  code {}  waiting approval",
+                        commands::shared::format_confirmation_code(&request.confirmation_code)
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ])));
+        }
+    }
+    if !app.paired_devices.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "Paired",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ))));
+        for device in &app.paired_devices {
+            row_indices.push((DeviceRowId::Paired(device.id.clone()), items.len()));
+            let name_width = usize::from(list_area.width).saturating_sub(18).max(10);
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(
+                    truncate_end(&commands::shared::terminal_label(&device.name), name_width),
+                    Style::default().fg(Color::White),
+                ),
+                Span::styled(
+                    format!("  paired {}", paired_date(&device.paired_at)),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])));
+        }
+    }
+
+    let selected_item = selected_row
+        .and_then(|row| {
+            row_indices
+                .iter()
+                .find(|(candidate, _)| *candidate == row)
+                .map(|(_, index)| *index)
+        })
+        .unwrap_or(0);
+    let capacity = usize::from(list_area.height).max(1);
+    let (start, end) = visible_range(selected_item, items.len(), capacity);
+    let mut state = ListState::default();
+    state.select(Some(selected_item.saturating_sub(start)));
+    frame.render_stateful_widget(
+        List::new(items[start..end].to_vec())
+            .highlight_symbol("❯ ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        list_area,
+        &mut state,
+    );
+}
+
+fn paired_date(value: &str) -> String {
+    value
+        .get(0..10)
+        .map_or_else(|| value.to_owned(), ToOwned::to_owned)
+}
+
 fn compact_session_modified_at(value: &str) -> String {
     let Some((date, time)) = value.split_once('T') else {
         return value.to_owned();
@@ -1358,7 +2239,7 @@ fn truncate_path(path: &std::path::Path, max_chars: usize) -> String {
 
 fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &HostOverview) {
     let detail = match route {
-        Route::Devices => format!("{} paired", overview.devices),
+        Route::Devices => unreachable!("Devices has a dedicated persistent renderer"),
         Route::Settings
         | Route::Status
         | Route::Home
@@ -1382,15 +2263,6 @@ fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &Host
     ]);
 
     let content = match route {
-        Route::Devices => {
-            let [message, detail] = placeholder_message(route);
-            vec![
-                header,
-                Line::from(""),
-                Line::from(message),
-                Line::from(detail),
-            ]
-        }
         Route::Settings => vec![
             header,
             Line::from(""),
@@ -1430,27 +2302,11 @@ fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &Host
                 Style::default().fg(Color::DarkGray),
             ),
         ],
-        Route::Home | Route::Workspaces | Route::WorkspaceSessions => {
+        Route::Devices | Route::Home | Route::Workspaces | Route::WorkspaceSessions => {
             unreachable!("persistent routes are rendered separately")
         }
     };
     frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), area);
-}
-
-fn placeholder_message(route: Route) -> [&'static str; 2] {
-    match route {
-        Route::Devices => [
-            "Device management will be available here after",
-            "the Devices TUI migration.",
-        ],
-        Route::Workspaces => [
-            "Workspace management will be available here after",
-            "the Workspaces TUI migration.",
-        ],
-        Route::Home | Route::WorkspaceSessions | Route::Settings | Route::Status => {
-            unreachable!("only device and workspace routes have placeholder messages")
-        }
-    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, overlay: &Overlay) {
@@ -1458,6 +2314,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, overlay: &Overla
         Overlay::Help => render_help(frame, area, app.route, app.workspaces.len()),
         Overlay::Add(add) => render_add_overlay(frame, area, add),
         Overlay::Remove(remove) => render_remove_overlay(frame, area, remove),
+        Overlay::RevokeDevice(revoke) => render_revoke_device_overlay(frame, area, revoke),
+        Overlay::Pair(pairing) => render_pairing_overlay(frame, area, pairing),
     }
 }
 
@@ -1642,11 +2500,166 @@ fn render_remove_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RemoveOver
     );
 }
 
+fn render_revoke_device_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RevokeDeviceOverlay) {
+    let Some(popup) = centered_popup(area, 68, 10) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    let content = vec![
+        Line::from(Span::styled(
+            format!(
+                "Revoke {}?",
+                commands::shared::terminal_label(&overlay.device_name)
+            ),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "This closes the device's active connections.",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(if overlay.selected == 0 {
+            "❯ Revoke device"
+        } else {
+            "  Revoke device"
+        }),
+        Line::from(if overlay.selected == 1 {
+            "❯ Cancel"
+        } else {
+            "  Cancel"
+        }),
+        Line::from(""),
+        Line::from(Span::styled(
+            "↑↓ choose   Enter confirm   Esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Confirm revocation "),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_pairing_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &PairingOverlay) {
+    let height = match &overlay.phase {
+        PairingPhase::Waiting { remote: true } if overlay.offer.is_some() => 18,
+        PairingPhase::Request(_) => 12,
+        _ => 9,
+    };
+    let Some(popup) = centered_popup(area, 76, height) else {
+        return;
+    };
+    frame.render_widget(Clear, popup);
+    let mut lines = Vec::new();
+    match &overlay.phase {
+        PairingPhase::Starting => lines.push(Line::from("Preparing secure pairing…")),
+        PairingPhase::Waiting { remote } => {
+            lines.push(Line::from(Span::styled(
+                if *remote {
+                    "Scan the QR code or enter the join code on your device."
+                } else {
+                    "Waiting for your device on the local network…"
+                },
+                Style::default().fg(Color::Cyan),
+            )));
+            if let Some(offer) = &overlay.offer {
+                if let Some(payload) = &offer.qr_payload
+                    && popup.width >= 42
+                    && popup.height >= 16
+                    && let Ok(code) = qrcode::QrCode::new(payload.expose().as_bytes())
+                {
+                    let image = code
+                        .render::<qrcode::render::unicode::Dense1x2>()
+                        .quiet_zone(false)
+                        .build();
+                    lines.extend(
+                        image
+                            .lines()
+                            .take(9)
+                            .map(|line| Line::from(line.to_owned())),
+                    );
+                }
+                if let Some(join_code) = &offer.join_code {
+                    lines.push(Line::from(vec![
+                        Span::styled("Join code ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(join_code.expose(), Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            }
+        }
+        PairingPhase::Request(request) => {
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{} wants to pair",
+                    commands::shared::terminal_label(&request.device_name)
+                ),
+                Style::default().fg(Color::Cyan),
+            )));
+            lines.push(Line::from(format!(
+                "Verify code {} on your device.",
+                commands::shared::format_confirmation_code(&request.confirmation_code)
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from("A Approve     D Deny     Esc Cancel"));
+        }
+        PairingPhase::Approving => lines.push(Line::from("Approving pairing…")),
+        PairingPhase::Denying => lines.push(Line::from("Denying pairing…")),
+        PairingPhase::Success { device_name } => lines.push(Line::from(Span::styled(
+            format!("✓ {} paired", commands::shared::terminal_label(device_name)),
+            Style::default().fg(Color::Green),
+        ))),
+        PairingPhase::Denied => lines.push(Line::from("Pairing denied.")),
+        PairingPhase::Cancelled => lines.push(Line::from("Pairing cancelled.")),
+        PairingPhase::Expired => lines.push(Line::from("Pairing offer expired.")),
+        PairingPhase::TimedOut => lines.push(Line::from("Pairing timed out.")),
+        PairingPhase::Error(error) => lines.push(Line::from(Span::styled(
+            error.message(),
+            Style::default().fg(Color::Red),
+        ))),
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        if matches!(
+            &overlay.phase,
+            PairingPhase::Success { .. }
+                | PairingPhase::Denied
+                | PairingPhase::Cancelled
+                | PairingPhase::Expired
+                | PairingPhase::TimedOut
+                | PairingPhase::Error(_)
+        ) {
+            "Enter/Esc close"
+        } else {
+            "Esc cancel"
+        },
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Pair device "),
+            )
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
     if let Some(busy) = &app.busy {
         let busy = if app.deferred_navigation == Some(DeferredNavigation::Quit) {
-            "Finishing workspace operation…"
+            "Finishing operation…"
         } else {
             busy
         };
@@ -1670,7 +2683,15 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let hints = footer_hints(area.width, app.route, app.workspaces.len());
+    let hints = if app.route == Route::Devices {
+        device_footer_hints(
+            area.width,
+            !app.pending_requests.is_empty(),
+            !app.paired_devices.is_empty(),
+        )
+    } else {
+        footer_hints(area.width, app.route, app.workspaces.len())
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("  ", Style::default().fg(Color::DarkGray)),
@@ -1678,6 +2699,20 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])),
         area,
     );
+}
+
+fn device_footer_hints(width: u16, has_pending: bool, has_paired: bool) -> &'static str {
+    match (width < 72, has_pending, has_paired) {
+        (_, false, false) => "P Pair   Esc Back   ? Help",
+        (true, true, false) => "↑↓ Move  P Pair  A Approve  D Deny  Esc  ?",
+        (true, false, true) => "↑↓ Move  P Pair  R Revoke  Esc  ?",
+        (true, true, true) => "↑↓ Move P Pair A Approve D Deny R Revoke Esc ?",
+        (false, true, false) => "↑↓/jk Navigate   P Pair   A Approve   D Deny   Esc Back   ? Help",
+        (false, false, true) => "↑↓/jk Navigate   P Pair   R Revoke   Esc Back   ? Help",
+        (false, true, true) => {
+            "↑↓/jk Navigate   P Pair   A Approve   D Deny   R Revoke   Esc Back   ? Help"
+        }
+    }
 }
 
 fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static str {
@@ -1716,7 +2751,17 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, route: Route, workspace_count:
         )),
         Line::from(""),
     ];
-    let shortcuts = help_shortcuts(route, workspace_count);
+    let device_shortcuts: &[&str] = &[
+        "↑↓ or j/k   navigate devices and requests",
+        "P           start pairing",
+        "A / D       approve or deny request",
+        "R           revoke paired device",
+    ];
+    let shortcuts = if route == Route::Devices {
+        device_shortcuts
+    } else {
+        help_shortcuts(route, workspace_count)
+    };
     help_lines.extend(shortcuts.iter().copied().map(Line::from));
     if !shortcuts.is_empty() {
         help_lines.push(Line::from(""));
@@ -1847,11 +2892,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AddOverlay, App, DeferredNavigation, InteractionMode, MIN_HEIGHT, Overlay, Route,
-        SessionItem, TerminalSize, TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints,
-        help_shortcuts, input_line, interaction_mode, placeholder_message, render,
-        should_launch_tui, truncate_end, truncate_path, version_mismatch_message, visible_range,
+        AddOverlay, App, DeferredNavigation, DeviceItem, InteractionMode, MIN_HEIGHT, Overlay,
+        PairingOverlay, PairingPhase, PendingRequestItem, Route, SessionItem, TerminalSize,
+        TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints, help_shortcuts, input_line,
+        interaction_mode, render, should_launch_tui, truncate_end, truncate_path,
+        version_mismatch_message, visible_range,
     };
+    use crate::app_ops::device as device_ops;
+    use crate::app_ops::device::PairingSecret;
     use crate::home::{AccessOverview, PiOverview, PiSource, ServiceOverview};
     use crate::output::OutputFormat;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -1859,6 +2907,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use tempfile::tempdir;
+    use uuid::Uuid;
 
     const TTY: TtyState = TtyState::Attached;
 
@@ -2020,29 +3069,9 @@ mod tests {
 
     #[test]
     fn placeholder_footers_only_advertise_implemented_actions() {
-        for route in [Route::Devices, Route::Settings] {
-            assert_eq!(footer_hints(80, route, 1), "Esc/q Back   ? Help");
-        }
+        assert_eq!(footer_hints(80, Route::Settings, 1), "Esc/q Back   ? Help");
         assert!(footer_hints(80, Route::Workspaces, 1).contains("A Add"));
         assert!(!footer_hints(80, Route::Workspaces, 0).contains("Sessions"));
-    }
-
-    #[test]
-    fn placeholder_pages_do_not_advertise_selection_actions() {
-        assert_eq!(
-            placeholder_message(Route::Devices),
-            [
-                "Device management will be available here after",
-                "the Devices TUI migration."
-            ]
-        );
-        assert_eq!(
-            placeholder_message(Route::Workspaces),
-            [
-                "Workspace management will be available here after",
-                "the Workspaces TUI migration."
-            ]
-        );
     }
 
     #[test]
@@ -2422,6 +3451,376 @@ mod tests {
             .expect("narrow frame");
         let text = buffer_text(terminal.backend());
         assert!(text.contains("larger terminal"));
+    }
+
+    #[test]
+    fn devices_empty_state_only_advertises_pairing() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        let overview = test_overview(0);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("devices frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("No paired devices or pending requests"));
+        assert!(text.contains("P Pair"));
+        assert!(!text.contains("Approve"));
+        assert!(!text.contains('┌'));
+    }
+
+    #[test]
+    fn devices_render_paired_pending_and_mixed_states() {
+        let paired = DeviceItem {
+            id: "device-1".to_owned(),
+            name: "Zain's iPhone".to_owned(),
+            paired_at: "2026-09-18T00:00:00Z".to_owned(),
+        };
+        let pending = PendingRequestItem {
+            id: Uuid::new_v4(),
+            device_name: "iPhone 17 Pro".to_owned(),
+            confirmation_code: "482931".to_owned(),
+            expires_at: 1_800_000_000,
+        };
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.paired_devices = vec![paired];
+        app.pending_requests = vec![pending.clone()];
+        app.select_index(0);
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("mixed devices frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Pending"));
+        assert!(text.contains("iPhone 17 Pro"));
+        assert!(text.contains("482 931"));
+        assert!(text.contains("Paired"));
+        assert!(text.contains("Zain's iPhone"));
+        assert!(text.contains("A Approve"));
+        assert!(text.contains("D Deny"));
+        assert!(text.contains("R Revoke"));
+    }
+
+    #[test]
+    fn devices_render_paired_only_and_pending_only_states() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.paired_devices.push(DeviceItem {
+            id: "device-1".to_owned(),
+            name: "Paired phone".to_owned(),
+            paired_at: "2026-09-18T00:00:00Z".to_owned(),
+        });
+        app.select_index(0);
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("paired frame");
+        assert!(buffer_text(terminal.backend()).contains("Paired phone"));
+
+        app.paired_devices.clear();
+        app.pending_requests.push(PendingRequestItem {
+            id: Uuid::new_v4(),
+            device_name: "Pending phone".to_owned(),
+            confirmation_code: "654321".to_owned(),
+            expires_at: 0,
+        });
+        app.select_index(0);
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("pending frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Pending phone"));
+        assert!(text.contains("654 321"));
+    }
+
+    #[test]
+    fn device_selection_follows_stable_ids_when_lists_change() {
+        let first = DeviceItem {
+            id: "first".to_owned(),
+            name: "First".to_owned(),
+            paired_at: "2026-09-01T00:00:00Z".to_owned(),
+        };
+        let second = DeviceItem {
+            id: "second".to_owned(),
+            name: "Second".to_owned(),
+            paired_at: "2026-09-02T00:00:00Z".to_owned(),
+        };
+        let request = PendingRequestItem {
+            id: Uuid::new_v4(),
+            device_name: "Pending".to_owned(),
+            confirmation_code: "111222".to_owned(),
+            expires_at: 0,
+        };
+        let request_id = request.id;
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.paired_devices = vec![first, second];
+        app.pending_requests = vec![request];
+        app.select_index(2);
+        assert_eq!(app.selected_device_id.as_deref(), Some("second"));
+        app.apply_devices(
+            vec![
+                DeviceItem {
+                    id: "second".to_owned(),
+                    name: "Second".to_owned(),
+                    paired_at: "2026-09-02T00:00:00Z".to_owned(),
+                },
+                DeviceItem {
+                    id: "first".to_owned(),
+                    name: "First".to_owned(),
+                    paired_at: "2026-09-01T00:00:00Z".to_owned(),
+                },
+            ],
+            vec![],
+        );
+        assert_eq!(app.selected_device_id.as_deref(), Some("second"));
+        assert_eq!(app.selected_request_id, None);
+
+        app.apply_devices(
+            Vec::new(),
+            vec![PendingRequestItem {
+                id: request_id,
+                device_name: "Pending".to_owned(),
+                confirmation_code: "111222".to_owned(),
+                expires_at: 0,
+            }],
+        );
+        assert_eq!(app.selected_request_id, Some(request_id));
+    }
+
+    #[test]
+    fn device_lists_scroll_and_keep_the_last_row_visible() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.paired_devices = (0..24)
+            .map(|index| DeviceItem {
+                id: format!("device-{index}"),
+                name: format!("Device {index}"),
+                paired_at: "2026-09-01T00:00:00Z".to_owned(),
+            })
+            .collect();
+        app.select_index(app.max_selection());
+        let overview = test_overview(app.paired_devices.len());
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("scrolling devices frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Device 23"));
+        assert!(!text.contains("Device 0"));
+    }
+
+    #[test]
+    fn revoke_device_confirmation_defaults_to_cancel_and_keeps_id() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.paired_devices.push(DeviceItem {
+            id: "device-1".to_owned(),
+            name: "iPhone".to_owned(),
+            paired_at: "2026-09-01T00:00:00Z".to_owned(),
+        });
+        app.select_index(0);
+        app.handle_event(&key(KeyCode::Char('r')));
+        let Some(Overlay::RevokeDevice(overlay)) = &app.overlay else {
+            panic!("expected device confirmation");
+        };
+        assert_eq!(overlay.device_id, "device-1");
+        assert_eq!(overlay.selected, 1);
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        assert!(app.pending_action.is_none());
+
+        app.handle_event(&key(KeyCode::Char('r')));
+        app.handle_event(&key(KeyCode::Up));
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(
+            matches!(app.pending_action, Some(super::PendingAction::RevokeDevice(id)) if id == "device-1")
+        );
+    }
+
+    #[test]
+    fn pairing_overlay_renders_waiting_request_success_and_error_without_borders_on_page() {
+        let request = PendingRequestItem {
+            id: Uuid::new_v4(),
+            device_name: "iPhone".to_owned(),
+            confirmation_code: "123456".to_owned(),
+            expires_at: 0,
+        };
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.overlay = Some(Overlay::Pair(PairingOverlay {
+            phase: PairingPhase::Request(request.clone()),
+            offer: None,
+            request: Some(request),
+        }));
+        let overview = test_overview(0);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("pairing request frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("wants to pair"));
+        assert!(text.contains("123 456"));
+        assert!(text.contains("A Approve"));
+        assert!(text.contains('┌'), "pairing is a real modal");
+
+        app.overlay = Some(Overlay::Pair(PairingOverlay {
+            phase: PairingPhase::Error(device_ops::PairingFailure::RelayUnavailable),
+            offer: None,
+            request: None,
+        }));
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("pairing error frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Remote pairing is unavailable"));
+        assert!(!text.contains("secret"));
+    }
+
+    #[test]
+    fn pairing_overlay_renders_terminal_outcomes() {
+        let overview = test_overview(0);
+        let phases = [
+            (
+                PairingPhase::Waiting { remote: false },
+                "Waiting for your device",
+            ),
+            (
+                PairingPhase::Success {
+                    device_name: "iPhone".to_owned(),
+                },
+                "iPhone paired",
+            ),
+            (PairingPhase::Denied, "Pairing denied"),
+            (PairingPhase::Cancelled, "Pairing cancelled"),
+            (PairingPhase::Expired, "Pairing offer expired"),
+            (PairingPhase::TimedOut, "Pairing timed out"),
+            (
+                PairingPhase::Error(device_ops::PairingFailure::ConnectionFailed),
+                "Device connection failed",
+            ),
+        ];
+        for (phase, expected) in phases {
+            let mut app = App::new();
+            app.route = Route::Devices;
+            app.overlay = Some(Overlay::Pair(PairingOverlay {
+                phase,
+                offer: None,
+                request: None,
+            }));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+            terminal
+                .draw(|frame| render(frame, &app, &overview))
+                .expect("pairing outcome frame");
+            assert!(
+                buffer_text(terminal.backend()).contains(expected),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_secret_debug_is_redacted() {
+        let offer = device_ops::PairingOffer {
+            remote: true,
+            qr_payload: Some(PairingSecret::from_test("pix://pair?secret=hidden")),
+            join_code: Some(PairingSecret::from_test("ABCD-EFGH")),
+            expires_at: Some(1),
+        };
+        let debug = format!("{offer:?}");
+        assert!(!debug.contains("hidden"));
+        assert!(!debug.contains("ABCD-EFGH"));
+        assert!(debug.contains("redacted"));
+
+        let request = device_ops::PendingPairing {
+            id: Uuid::new_v4(),
+            device_name: "iPhone".to_owned(),
+            confirmation_code: "123456".to_owned(),
+            expires_at: 1,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("123456"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn device_mutation_defers_back_until_worker_result() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.history.push(Route::Home);
+        app.busy = Some("Revoking device…".to_owned());
+        app.mutation_in_flight = true;
+        app.handle_event(&key(KeyCode::Esc));
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Back));
+        assert!(!app.should_quit);
+        let store = ConfigStore::new("/tmp/pix-tui-device-test-config.json");
+        let mut overview = test_overview(0);
+        app.apply_worker_result(
+            WorkerResult::DeviceOperationFailed { action: "revoke" },
+            &store,
+            &mut overview,
+        );
+        assert_eq!(app.route, Route::Home);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn pairing_ctrl_c_defers_quit_until_worker_completion() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.busy = Some("Pairing…".to_owned());
+        app.mutation_in_flight = true;
+        app.overlay = Some(Overlay::Pair(PairingOverlay {
+            phase: PairingPhase::Waiting { remote: false },
+            offer: None,
+            request: None,
+        }));
+        app.handle_event(&Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Quit));
+        assert!(app.cancel_requested);
+        assert!(!app.should_quit);
+
+        let store = ConfigStore::new("/tmp/pix-tui-pairing-test-config.json");
+        let mut overview = test_overview(0);
+        app.apply_worker_result(
+            WorkerResult::Pairing(device_ops::PairingOutcome::Cancelled),
+            &store,
+            &mut overview,
+        );
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn narrow_devices_keep_required_actions_visible() {
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.pending_requests.push(PendingRequestItem {
+            id: Uuid::new_v4(),
+            device_name: "Phone".to_owned(),
+            confirmation_code: "123456".to_owned(),
+            expires_at: 0,
+        });
+        app.paired_devices.push(DeviceItem {
+            id: "device".to_owned(),
+            name: "iPhone".to_owned(),
+            paired_at: "2026-09-01T00:00:00Z".to_owned(),
+        });
+        app.select_index(0);
+        let overview = test_overview(1);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow devices frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("A Approve"));
+        assert!(text.contains("D Deny"));
+        assert!(text.contains("R Revoke"));
     }
 
     fn test_overview(workspaces: usize) -> super::HostOverview {
