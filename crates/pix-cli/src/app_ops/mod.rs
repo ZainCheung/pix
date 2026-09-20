@@ -5,3 +5,4 @@
 //! and return structured values.
 
 pub(crate) mod device;
+pub(crate) mod settings;

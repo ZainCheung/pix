@@ -2,12 +2,12 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use pix_core::{ConfigStore, HostEnvironment, PiProbe};
 
+use crate::app_ops::settings as settings_ops;
 use crate::output::CommandOutput;
 use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
-use crate::status::HostServiceStatus;
 
 pub(crate) fn configured_pi_version(_store: &ConfigStore, config: &pix_core::HostConfig) -> String {
     PiProbe::new(config.preferences.pi_executable.clone())
@@ -98,65 +98,39 @@ pub(crate) fn pi_command(
             Ok(())
         }
         PiCommand::Set { path } => {
-            let environment = HostEnvironment::resolve_for("pi");
-            let installation = PiProbe::new(Some(path.clone()))
-                .with_environment(environment)
-                .inspect()
-                .with_context(|| format!("probing Pi at {}", path.display()))?;
-            if !installation.is_compatible() {
-                bail!(
-                    "Pi {} is too old. Pix requires Pi {} or newer.",
-                    installation.version,
-                    pix_core::pi::MINIMUM_PI_VERSION
-                );
-            }
-            let transaction = store.transaction()?;
-            let mut config = transaction.load_or_create(default_host_name())?;
-            config.preferences.pi_executable = Some(installation.executable.clone());
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
-            let restart_required = HostServiceStatus::current(store.path()).is_some();
+            let mutation = settings_ops::set_pi(store, &path)?;
             if output.is_json() {
                 return output.success(
                     "pi.set",
                     &serde_json::json!({
                         "source": "configured",
-                        "executable": installation.executable,
-                        "version": installation.version,
-                        "supported": installation.supported,
-                        "service_restart_required": restart_required,
+                        "executable": mutation.executable,
+                        "version": mutation.version,
+                        "supported": mutation.supported,
+                        "service_restart_required": mutation.restart_required,
                     }),
                 );
             }
-            println!("Using {}", installation.executable.display());
-            if restart_required {
+            println!("Using {}", mutation.executable.display());
+            if mutation.restart_required {
                 println!("Restart the host with `pix service restart` to use this executable.");
             }
             Ok(())
         }
         PiCommand::Clear => {
-            let transaction = store.transaction()?;
-            let mut config = transaction.load().context("loading Pix configuration")?;
-            config.preferences.pi_executable = None;
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
-            let restart_required = HostServiceStatus::current(store.path()).is_some();
+            let mutation = settings_ops::clear_pi(store)?;
             if output.is_json() {
                 return output.success(
                     "pi.clear",
                     &serde_json::json!({
                         "source": "path",
                         "executable": null,
-                        "service_restart_required": restart_required,
+                        "service_restart_required": mutation.restart_required,
                     }),
                 );
             }
             println!("Cleared the saved Pi executable.");
-            if restart_required {
+            if mutation.restart_required {
                 println!("Restart the host with `pix service restart` to apply this change.");
             }
             Ok(())
@@ -219,5 +193,5 @@ pub(crate) fn pi_menu(store: &ConfigStore, output: CommandOutput) -> Result<()> 
 }
 
 use crate::PiCommand;
-use crate::commands::shared::{default_host_name, load_or_ephemeral_config};
+use crate::commands::shared::load_or_ephemeral_config;
 use crate::{print_cli_help, usage_error};

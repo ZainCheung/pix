@@ -18,6 +18,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use uuid::Uuid;
 
 use crate::app_ops::device as device_ops;
+use crate::app_ops::settings as settings_ops;
 use crate::commands;
 use crate::home::{AccessMode, ConfigState, HostOverview, ServiceState};
 use crate::output::OutputFormat;
@@ -111,17 +112,6 @@ pub(crate) enum Route {
 }
 
 impl Route {
-    const fn title(self) -> &'static str {
-        match self {
-            Self::Home => "Home",
-            Self::Devices => "Devices",
-            Self::Workspaces => "Workspaces",
-            Self::WorkspaceSessions => "Sessions",
-            Self::Settings => "Settings",
-            Self::Status => "Status",
-        }
-    }
-
     const fn from_home_index(index: usize) -> Option<Self> {
         match index {
             0 => Some(Self::Devices),
@@ -140,6 +130,106 @@ pub(crate) enum Overlay {
     Remove(RemoveOverlay),
     RevokeDevice(RevokeDeviceOverlay),
     Pair(PairingOverlay),
+    Edit(EditOverlay),
+    Confirm(ConfirmOverlay),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EditKind {
+    Relay,
+    Pi,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditOverlay {
+    pub(crate) kind: EditKind,
+    pub(crate) input: TextInput,
+    pub(crate) error: Option<String>,
+}
+
+impl EditOverlay {
+    fn relay(value: Option<&str>) -> Self {
+        let value = sanitize_terminal(value.unwrap_or_default());
+        Self {
+            kind: EditKind::Relay,
+            input: TextInput {
+                cursor: value.len(),
+                value,
+            },
+            error: None,
+        }
+    }
+
+    fn pi(value: Option<&std::path::Path>) -> Self {
+        let value = value
+            .map(|path| sanitize_terminal(&path.display().to_string()))
+            .unwrap_or_default();
+        Self {
+            kind: EditKind::Pi,
+            input: TextInput {
+                cursor: value.len(),
+                value,
+            },
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmAction {
+    ClearRelay,
+    ClearPi,
+    Service(settings_ops::ServiceAction),
+}
+
+impl ConfirmAction {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::ClearRelay => "Clear relay endpoint?",
+            Self::ClearPi => "Use PATH discovery?",
+            Self::Service(settings_ops::ServiceAction::Uninstall) => "Uninstall Pix service?",
+            Self::Service(settings_ops::ServiceAction::Stop) => "Stop Pix service?",
+            Self::Service(_) => "Confirm service action",
+        }
+    }
+
+    const fn action_label(self) -> &'static str {
+        match self {
+            Self::ClearRelay => "Clear relay",
+            Self::ClearPi => "Use PATH",
+            Self::Service(action) => action.label(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfirmOverlay {
+    pub(crate) action: ConfirmAction,
+    /// The destructive action is intentionally not the default.
+    pub(crate) selected: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SettingsAction {
+    RelayEdit,
+    RelayToggle,
+    RelayClear,
+    PiEdit,
+    PiClear,
+    Service(settings_ops::ServiceAction),
+}
+
+impl SettingsAction {
+    const fn base_label(self) -> &'static str {
+        match self {
+            Self::RelayEdit => "Edit relay endpoint",
+            Self::RelayToggle => "Toggle relay",
+            Self::RelayClear => "Clear relay endpoint",
+            Self::PiEdit => "Choose Pi executable",
+            Self::PiClear => "Use PATH discovery",
+            Self::Service(action) => action.label(),
+        }
+    }
 }
 
 fn load_sessions(
@@ -347,10 +437,17 @@ enum PendingAction {
     Remove(Uuid),
     OpenSessions(Uuid),
     RefreshDevices,
+    RefreshOverview,
     Approve(Uuid),
     Deny(Uuid),
     RevokeDevice(String),
     Pair { remote: bool },
+    RelayEdit(String),
+    RelayToggle(bool),
+    RelayClear,
+    PiEdit(PathBuf),
+    PiClear,
+    Service(settings_ops::ServiceAction),
 }
 
 impl PendingAction {
@@ -360,10 +457,17 @@ impl PendingAction {
             Self::Remove(_) => "Removing workspace…",
             Self::OpenSessions(_) => "Loading sessions…",
             Self::RefreshDevices => "Loading devices…",
+            Self::RefreshOverview => "Refreshing status…",
             Self::Approve(_) => "Approving pairing…",
             Self::Deny(_) => "Denying pairing…",
             Self::RevokeDevice(_) => "Revoking device…",
             Self::Pair { .. } => "Pairing…",
+            Self::RelayEdit(_) => "Saving relay endpoint…",
+            Self::RelayToggle(_) => "Updating relay access…",
+            Self::RelayClear => "Clearing relay endpoint…",
+            Self::PiEdit(_) => "Checking and saving Pi…",
+            Self::PiClear => "Clearing saved Pi…",
+            Self::Service(action) => action.busy_label(),
         }
     }
 }
@@ -406,6 +510,16 @@ enum WorkerResult {
         pending_error: bool,
     },
     Pairing(device_ops::PairingOutcome),
+    Overview(Box<HostOverview>),
+    SettingsApplied {
+        action: SettingsAction,
+        overview: Box<HostOverview>,
+        restart_required: bool,
+    },
+    SettingsFailed {
+        action: SettingsAction,
+        error: String,
+    },
 }
 
 #[derive(Debug)]
@@ -482,6 +596,10 @@ pub(crate) struct App {
     pub(crate) selected_request_id: Option<Uuid>,
     pub(crate) active_workspace_id: Option<Uuid>,
     pub(crate) selected_workspace_id: Option<Uuid>,
+    pub(crate) settings_actions: Vec<SettingsAction>,
+    settings_relay_url: Option<String>,
+    settings_relay_enabled: bool,
+    settings_pi_executable: Option<PathBuf>,
     toast_until: Option<Instant>,
     pending_action: Option<PendingAction>,
     busy: Option<String>,
@@ -489,6 +607,7 @@ pub(crate) struct App {
     device_refresh_requested: bool,
     pending_pairing_command: Option<device_ops::PairingCommand>,
     cancel_requested: bool,
+    status_refresh_requested: bool,
 }
 
 impl Default for App {
@@ -517,6 +636,14 @@ impl App {
             selected_request_id: None,
             active_workspace_id: None,
             selected_workspace_id: None,
+            settings_actions: vec![
+                SettingsAction::RelayEdit,
+                SettingsAction::PiEdit,
+                SettingsAction::Service(settings_ops::ServiceAction::Install),
+            ],
+            settings_relay_url: None,
+            settings_relay_enabled: false,
+            settings_pi_executable: None,
             toast_until: None,
             pending_action: None,
             busy: None,
@@ -524,6 +651,7 @@ impl App {
             device_refresh_requested: false,
             pending_pairing_command: None,
             cancel_requested: false,
+            status_refresh_requested: false,
         }
     }
 
@@ -535,6 +663,31 @@ impl App {
         self.terminal_size = size;
     }
 
+    /// Synchronizes the Settings action list with the latest status snapshot.
+    /// The list is state-derived so unavailable platform actions are never
+    /// advertised, while the page remains usable at the 48-column minimum.
+    pub(crate) fn sync_overview(&mut self, overview: &HostOverview) {
+        self.settings_relay_url
+            .clone_from(&overview.access.relay_url);
+        self.settings_relay_enabled = overview.access.relay_enabled;
+        self.settings_pi_executable = overview
+            .pi
+            .executable
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|_| overview.pi.source == crate::home::PiSource::Configured);
+        self.settings_actions = settings_actions_for_overview(overview);
+        if self.route == Route::Settings {
+            self.selected = self.selected.min(self.max_selection());
+        }
+    }
+
+    fn sync_configured_pi(&mut self, store: &ConfigStore) {
+        self.settings_pi_executable = store
+            .load()
+            .ok()
+            .and_then(|config| config.preferences.pi_executable);
+    }
     pub(crate) fn refresh_workspaces(&mut self, store: &ConfigStore) -> anyhow::Result<()> {
         let selected_id = self.selected_workspace_id;
         let config = commands::shared::load_or_ephemeral_config(store)?;
@@ -839,6 +992,10 @@ impl App {
                     }));
                 }
             }
+            KeyCode::Char('r' | 'R') if self.route == Route::Status => {
+                self.status_refresh_requested = true;
+                self.pending_action = Some(PendingAction::RefreshOverview);
+            }
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::Home => self.select_index(0),
@@ -864,7 +1021,8 @@ impl App {
             Route::Workspaces => self.workspaces.len().saturating_sub(1),
             Route::WorkspaceSessions => self.sessions.len().saturating_sub(1),
             Route::Devices => self.device_rows().len().saturating_sub(1),
-            Route::Settings | Route::Status => 0,
+            Route::Settings => self.settings_actions.len().saturating_sub(1),
+            Route::Status => 0,
         }
     }
 
@@ -924,14 +1082,57 @@ impl App {
                     self.begin_pairing();
                 }
             }
-            Route::Settings | Route::Status => {
-                self.set_toast(
-                    format!(
-                        "{} actions are coming in a follow-up issue",
-                        self.route.title()
-                    ),
-                    ToastTone::Info,
+            Route::Settings => self.activate_settings_selection(),
+            Route::Status => {
+                self.set_toast("Status is read-only; press R to refresh", ToastTone::Info);
+            }
+        }
+    }
+
+    fn activate_settings_selection(&mut self) {
+        let Some(action) = self.settings_actions.get(self.selected).copied() else {
+            return;
+        };
+        match action {
+            SettingsAction::RelayEdit => {
+                self.overlay = Some(Overlay::Edit(EditOverlay::relay(
+                    self.settings_relay_url.as_deref(),
+                )));
+            }
+            SettingsAction::RelayToggle => {
+                self.pending_action =
+                    Some(PendingAction::RelayToggle(!self.settings_relay_enabled));
+            }
+            SettingsAction::RelayClear => {
+                self.overlay = Some(Overlay::Confirm(ConfirmOverlay {
+                    action: ConfirmAction::ClearRelay,
+                    selected: 1,
+                }));
+            }
+            SettingsAction::PiEdit => {
+                self.overlay = Some(Overlay::Edit(EditOverlay::pi(
+                    self.settings_pi_executable.as_deref(),
+                )));
+            }
+            SettingsAction::PiClear => {
+                self.overlay = Some(Overlay::Confirm(ConfirmOverlay {
+                    action: ConfirmAction::ClearPi,
+                    selected: 1,
+                }));
+            }
+            SettingsAction::Service(action) => {
+                let confirm = matches!(
+                    action,
+                    settings_ops::ServiceAction::Stop | settings_ops::ServiceAction::Uninstall
                 );
+                if confirm {
+                    self.overlay = Some(Overlay::Confirm(ConfirmOverlay {
+                        action: ConfirmAction::Service(action),
+                        selected: 1,
+                    }));
+                } else {
+                    self.pending_action = Some(PendingAction::Service(action));
+                }
             }
         }
     }
@@ -948,6 +1149,9 @@ impl App {
         self.selected_device_id = None;
         if route == Route::Devices {
             self.device_refresh_requested = true;
+        }
+        if route == Route::Status {
+            self.status_refresh_requested = true;
         }
         self.toast = None;
         self.toast_until = None;
@@ -1015,6 +1219,95 @@ impl App {
                     self.overlay = None;
                 }
             }
+            Some(Overlay::Edit(edit)) => match code {
+                KeyCode::Esc => self.overlay = None,
+                KeyCode::Enter => {
+                    let value = edit.input.value.trim().to_owned();
+                    match edit.kind {
+                        EditKind::Relay => match settings_ops::validate_relay_url(&value) {
+                            Ok(value) => {
+                                edit.error = None;
+                                action = Some(PendingAction::RelayEdit(value));
+                            }
+                            Err(error) => edit.error = Some(error.to_string()),
+                        },
+                        EditKind::Pi => {
+                            if value.is_empty() {
+                                edit.error = Some("Enter a Pi executable path".to_owned());
+                            } else {
+                                edit.error = None;
+                                action = Some(PendingAction::PiEdit(PathBuf::from(value)));
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(character) => {
+                    edit.input.value.insert(edit.input.cursor, character);
+                    edit.input.cursor += character.len_utf8();
+                    edit.error = None;
+                }
+                KeyCode::Backspace => {
+                    if edit.input.cursor > 0 {
+                        let previous = edit.input.value[..edit.input.cursor]
+                            .char_indices()
+                            .next_back()
+                            .map_or(0, |(index, _)| index);
+                        edit.input.value.drain(previous..edit.input.cursor);
+                        edit.input.cursor = previous;
+                        edit.error = None;
+                    }
+                }
+                KeyCode::Delete => {
+                    if edit.input.cursor < edit.input.value.len() {
+                        let next = edit.input.value[edit.input.cursor..]
+                            .char_indices()
+                            .nth(1)
+                            .map_or(edit.input.value.len(), |(index, _)| {
+                                edit.input.cursor + index
+                            });
+                        edit.input.value.drain(edit.input.cursor..next);
+                        edit.error = None;
+                    }
+                }
+                KeyCode::Left => {
+                    edit.input.cursor = edit.input.value[..edit.input.cursor]
+                        .char_indices()
+                        .next_back()
+                        .map_or(0, |(index, _)| index);
+                }
+                KeyCode::Right => {
+                    edit.input.cursor = edit.input.value[edit.input.cursor..]
+                        .char_indices()
+                        .nth(1)
+                        .map_or(edit.input.value.len(), |(index, _)| {
+                            edit.input.cursor + index
+                        });
+                }
+                KeyCode::Home => edit.input.cursor = 0,
+                KeyCode::End => edit.input.cursor = edit.input.value.len(),
+                _ => {}
+            },
+            Some(Overlay::Confirm(confirm)) => match code {
+                KeyCode::Up | KeyCode::Left => {
+                    confirm.selected = confirm.selected.saturating_sub(1);
+                }
+                KeyCode::Down | KeyCode::Right => {
+                    confirm.selected = (confirm.selected + 1).min(1);
+                }
+                KeyCode::Home => confirm.selected = 0,
+                KeyCode::End => confirm.selected = 1,
+                KeyCode::Enter if confirm.selected == 0 => {
+                    action = Some(match confirm.action {
+                        ConfirmAction::ClearRelay => PendingAction::RelayClear,
+                        ConfirmAction::ClearPi => PendingAction::PiClear,
+                        ConfirmAction::Service(service) => PendingAction::Service(service),
+                    });
+                }
+                KeyCode::Esc | KeyCode::Char('q' | 'Q') | KeyCode::Enter => {
+                    self.overlay = None;
+                }
+                _ => {}
+            },
             Some(Overlay::Add(overlay)) => {
                 if let Some(input) = overlay.input.as_mut() {
                     match code {
@@ -1308,6 +1601,58 @@ impl App {
                     }
                 }
             }
+            WorkerResult::Overview(next) => {
+                *overview = *next;
+                self.sync_overview(overview);
+                self.sync_configured_pi(store);
+                self.status_refresh_requested = false;
+            }
+            WorkerResult::SettingsApplied {
+                action,
+                overview: next,
+                restart_required,
+            } => {
+                *overview = *next;
+                self.sync_overview(overview);
+                self.sync_configured_pi(store);
+                self.status_refresh_requested = false;
+                self.overlay = None;
+                let message = match action {
+                    SettingsAction::RelayEdit => "Relay endpoint updated",
+                    SettingsAction::RelayToggle => {
+                        if overview.access.relay_enabled {
+                            "Relay enabled"
+                        } else {
+                            "Relay disabled"
+                        }
+                    }
+                    SettingsAction::RelayClear => "Relay endpoint cleared",
+                    SettingsAction::PiEdit => "Pi executable saved",
+                    SettingsAction::PiClear => "Using PATH discovery for Pi",
+                    SettingsAction::Service(service) => service.label(),
+                };
+                let message = if restart_required {
+                    format!("{message} · restart service to apply")
+                } else {
+                    message.to_owned()
+                };
+                self.set_toast(message, ToastTone::Success);
+            }
+            WorkerResult::SettingsFailed { action, error } => {
+                let edit_error =
+                    matches!(action, SettingsAction::RelayEdit | SettingsAction::PiEdit);
+                if edit_error {
+                    if let Some(Overlay::Edit(edit)) = self.overlay.as_mut() {
+                        edit.error = Some(error.clone());
+                    }
+                } else {
+                    self.overlay = None;
+                }
+                self.set_toast(
+                    format!("{} failed: {error}", action.base_label()),
+                    ToastTone::Error,
+                );
+            }
         }
         self.finish_deferred_navigation();
     }
@@ -1367,6 +1712,47 @@ impl App {
     }
 }
 
+fn settings_actions_for_overview(overview: &HostOverview) -> Vec<SettingsAction> {
+    let mut actions = vec![SettingsAction::RelayEdit];
+    if overview.access.relay_url.is_some() {
+        actions.push(SettingsAction::RelayToggle);
+        actions.push(SettingsAction::RelayClear);
+    }
+    actions.push(SettingsAction::PiEdit);
+    if overview.pi.source == crate::home::PiSource::Configured {
+        actions.push(SettingsAction::PiClear);
+    }
+    let service_actions = match overview.service.state {
+        ServiceState::Running => [
+            Some(SettingsAction::Service(settings_ops::ServiceAction::Stop)),
+            Some(SettingsAction::Service(
+                settings_ops::ServiceAction::Restart,
+            )),
+            Some(SettingsAction::Service(
+                settings_ops::ServiceAction::Uninstall,
+            )),
+        ],
+        ServiceState::Stopped => [
+            Some(SettingsAction::Service(settings_ops::ServiceAction::Start)),
+            Some(SettingsAction::Service(
+                settings_ops::ServiceAction::Restart,
+            )),
+            Some(SettingsAction::Service(
+                settings_ops::ServiceAction::Uninstall,
+            )),
+        ],
+        ServiceState::NotInstalled => [
+            Some(SettingsAction::Service(
+                settings_ops::ServiceAction::Install,
+            )),
+            None,
+            None,
+        ],
+    };
+    actions.extend(service_actions.into_iter().flatten());
+    actions
+}
+
 #[allow(clippy::too_many_lines)]
 fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
     let (sender, receiver) = mpsc::channel();
@@ -1379,6 +1765,12 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
             | PendingAction::Deny(_)
             | PendingAction::RevokeDevice(_)
             | PendingAction::Pair { .. }
+            | PendingAction::RelayEdit(_)
+            | PendingAction::RelayToggle(_)
+            | PendingAction::RelayClear
+            | PendingAction::PiEdit(_)
+            | PendingAction::PiClear
+            | PendingAction::Service(_)
     );
     let (cancel, pairing_commands, pairing_command_rx) =
         if matches!(&action, PendingAction::Pair { .. }) {
@@ -1420,9 +1812,43 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
                 Err(error) => WorkerEvent::Result(WorkerResult::SessionsFailed(error.to_string())),
             },
             PendingAction::RefreshDevices => load_devices_event(&store),
+            PendingAction::RefreshOverview => WorkerEvent::Result(WorkerResult::Overview(
+                Box::new(HostOverview::collect(&store)),
+            )),
             PendingAction::Approve(id) => device_operation_event(&store, id, true),
             PendingAction::Deny(id) => device_operation_event(&store, id, false),
             PendingAction::RevokeDevice(id) => revoke_device_event(&store, &id),
+            PendingAction::RelayEdit(url) => settings_worker_event(
+                &store,
+                SettingsAction::RelayEdit,
+                settings_ops::set_relay(&store, &url).map(|mutation| mutation.restart_required),
+            ),
+            PendingAction::RelayToggle(enabled) => settings_worker_event(
+                &store,
+                SettingsAction::RelayToggle,
+                settings_ops::set_relay_enabled(&store, enabled)
+                    .map(|mutation| mutation.restart_required),
+            ),
+            PendingAction::RelayClear => settings_worker_event(
+                &store,
+                SettingsAction::RelayClear,
+                settings_ops::clear_relay(&store).map(|mutation| mutation.restart_required),
+            ),
+            PendingAction::PiEdit(path) => settings_worker_event(
+                &store,
+                SettingsAction::PiEdit,
+                settings_ops::set_pi(&store, &path).map(|mutation| mutation.restart_required),
+            ),
+            PendingAction::PiClear => settings_worker_event(
+                &store,
+                SettingsAction::PiClear,
+                settings_ops::clear_pi(&store).map(|mutation| mutation.restart_required),
+            ),
+            PendingAction::Service(action) => settings_worker_event(
+                &store,
+                SettingsAction::Service(action),
+                settings_ops::service_action(&store, action).map(|()| false),
+            ),
             PendingAction::Pair { remote } => {
                 let Some(cancel) = worker_cancel else {
                     return_sender(
@@ -1568,6 +1994,24 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
     }
 }
 
+fn settings_worker_event(
+    store: &ConfigStore,
+    action: SettingsAction,
+    result: anyhow::Result<bool>,
+) -> WorkerEvent {
+    match result {
+        Ok(restart_required) => WorkerEvent::Result(WorkerResult::SettingsApplied {
+            action,
+            overview: Box::new(HostOverview::collect(store)),
+            restart_required,
+        }),
+        Err(error) => WorkerEvent::Result(WorkerResult::SettingsFailed {
+            action,
+            error: safe_error(&error.to_string()),
+        }),
+    }
+}
+
 fn return_sender(sender: &Sender<WorkerEvent>, event: WorkerEvent) {
     let _ = sender.send(event);
 }
@@ -1653,9 +2097,12 @@ pub(crate) fn run(overview: &HostOverview, store: &ConfigStore) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverview) -> Result<()> {
     let mut app = App::new();
     let mut overview = overview.clone();
+    app.sync_overview(&overview);
+    app.sync_configured_pi(store);
     let mut worker: Option<Worker> = None;
     if let Err(error) = app.refresh_workspaces(store) {
         app.set_toast(
@@ -1671,6 +2118,13 @@ fn run_loop(guard: &mut TerminalGuard, store: &ConfigStore, overview: &HostOverv
             && app.pending_action.is_none()
         {
             app.pending_action = Some(PendingAction::RefreshDevices);
+        }
+        if worker.is_none()
+            && app.route == Route::Status
+            && app.status_refresh_requested
+            && app.pending_action.is_none()
+        {
+            app.pending_action = Some(PendingAction::RefreshOverview);
         }
         if worker.is_none()
             && let Some(action) = app.pending_action.take()
@@ -1781,7 +2235,8 @@ fn render(frame: &mut Frame<'_>, app: &App, overview: &HostOverview) {
         Route::Devices => render_devices(frame, body, app, overview),
         Route::Workspaces => render_workspaces(frame, body, app),
         Route::WorkspaceSessions => render_sessions(frame, body, app),
-        route => render_child(frame, body, route, overview),
+        Route::Settings => render_settings(frame, body, app, overview),
+        Route::Status => render_status(frame, body, app, overview),
     }
     render_feedback(frame, feedback, app);
     render_footer(frame, footer, app);
@@ -2234,6 +2689,39 @@ fn truncate_end(value: &str, max_chars: usize) -> String {
     result
 }
 
+fn sanitize_terminal(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| {
+            !character.is_control()
+                && !matches!(
+                    *character,
+                    '\u{202a}'..='\u{202e}'
+                        | '\u{2066}'..='\u{2069}'
+                        | '\u{200b}'..='\u{200f}'
+                )
+        })
+        .collect()
+}
+
+fn safe_terminal_value(value: &str, max_chars: usize) -> String {
+    let value = sanitize_terminal(value);
+    if value.is_empty() {
+        "—".to_owned()
+    } else {
+        truncate_end(&value, max_chars.max(1))
+    }
+}
+
+fn safe_error(value: &str) -> String {
+    let value = sanitize_terminal(value);
+    if value.is_empty() {
+        "operation failed".to_owned()
+    } else {
+        truncate_end(&value, 240)
+    }
+}
+
 fn truncate_path(path: &std::path::Path, max_chars: usize) -> String {
     let display = commands::shared::terminal_label(&commands::shared::display_workspace_path(path));
     if display.chars().count() <= max_chars {
@@ -2253,76 +2741,295 @@ fn truncate_path(path: &std::path::Path, max_chars: usize) -> String {
     format!("…{suffix}")
 }
 
-fn render_child(frame: &mut Frame<'_>, area: Rect, route: Route, overview: &HostOverview) {
-    let detail = match route {
-        Route::Devices => unreachable!("Devices has a dedicated persistent renderer"),
-        Route::Settings
-        | Route::Status
-        | Route::Home
-        | Route::Workspaces
-        | Route::WorkspaceSessions => String::new(),
+#[allow(clippy::too_many_lines)]
+fn render_settings(frame: &mut Frame<'_>, area: Rect, app: &App, overview: &HostOverview) {
+    let [header, body] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .areas(area);
+    render_workspace_header(frame, header, "Settings", "Relay · Pi · Service");
+    let (list_area, error_area) = if overview.config_error.is_some() {
+        let [error_area, list_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .areas(body);
+        (list_area, Some(error_area))
+    } else {
+        (body, None)
     };
-    let header = Line::from(vec![
-        Span::styled(
-            "pix",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" › ", Style::default().fg(Color::DarkGray)),
-        Span::styled(route.title(), Style::default().fg(Color::White)),
-        if detail.is_empty() {
-            Span::raw("")
-        } else {
-            Span::styled(format!("  {detail}"), Style::default().fg(Color::DarkGray))
-        },
-    ]);
-
-    let content = match route {
-        Route::Settings => vec![
-            header,
-            Line::from(""),
-            status_line("Relay", relay_summary(overview), relay_style(overview)),
-            status_line(
-                "Pi",
-                pi_summary(overview),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Line::from("Settings controls will be added without changing explicit CLI commands."),
-        ],
-        Route::Status => vec![
-            header,
-            Line::from(""),
-            status_line(
-                "Config",
-                match overview.config_state {
-                    ConfigState::Ready => "ready",
-                    ConfigState::Missing => "not configured",
-                    ConfigState::Invalid => "needs attention",
+    if let (Some(error_area), Some(error)) = (error_area, overview.config_error.as_deref()) {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("  error  ", Style::default().fg(Color::Red)),
+                Span::styled(
+                    safe_terminal_value(
+                        error,
+                        usize::from(error_area.width).saturating_sub(10).max(1),
+                    ),
+                    Style::default().fg(Color::Red),
+                ),
+            ])),
+            error_area,
+        );
+    }
+    let settings_actions = settings_actions_for_overview(overview);
+    let items = settings_actions
+        .iter()
+        .map(|action| {
+            let detail = match action {
+                SettingsAction::RelayEdit => overview.access.relay_url.as_deref().map_or(
+                    "not configured".to_owned(),
+                    |url| {
+                        format!(
+                            "{} · {}",
+                            safe_terminal_value(
+                                &crate::commands::relay::display_relay_url(url),
+                                80,
+                            ),
+                            if overview.access.relay_enabled {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            }
+                        )
+                    },
+                ),
+                SettingsAction::RelayToggle => {
+                    if overview.access.relay_enabled {
+                        "Disable remote relay access".to_owned()
+                    } else {
+                        "Enable remote relay access".to_owned()
+                    }
+                }
+                SettingsAction::RelayClear => "Remove the saved endpoint".to_owned(),
+                SettingsAction::PiEdit => {
+                    format_pi_detail(overview, app.settings_pi_executable.as_deref())
+                }
+                SettingsAction::PiClear => "Return to PATH discovery".to_owned(),
+                SettingsAction::Service(action) => match action {
+                    settings_ops::ServiceAction::Install => {
+                        "Install and start the user service".to_owned()
+                    }
+                    settings_ops::ServiceAction::Start => {
+                        "Start the installed user service".to_owned()
+                    }
+                    settings_ops::ServiceAction::Stop => {
+                        "Stop the host without uninstalling".to_owned()
+                    }
+                    settings_ops::ServiceAction::Restart => {
+                        "Restart and reload configuration".to_owned()
+                    }
+                    settings_ops::ServiceAction::Uninstall => "Remove the user service".to_owned(),
                 },
-                Style::default().fg(Color::DarkGray),
+            };
+            let label = action.base_label();
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{label:<24}"), Style::default().fg(Color::White)),
+                Span::styled(
+                    truncate_end(
+                        &detail,
+                        usize::from(list_area.width).saturating_sub(27).max(8),
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect::<Vec<_>>();
+    let capacity = usize::from(list_area.height).max(1);
+    let (start, end) = visible_range(app.selected, items.len(), capacity);
+    let mut state = ListState::default();
+    state.select(Some(app.selected.saturating_sub(start)));
+    frame.render_stateful_widget(
+        List::new(items[start..end].to_vec())
+            .highlight_symbol("❯ ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
-            status_line(
-                "Host",
-                overview.host.as_deref().unwrap_or("not configured"),
-                Style::default(),
-            ),
-            status_line(
-                "Service",
-                service_summary(overview),
-                service_style(overview),
-            ),
-            status_line(
-                "Config path",
-                &overview.config_path,
-                Style::default().fg(Color::DarkGray),
-            ),
-        ],
-        Route::Devices | Route::Home | Route::Workspaces | Route::WorkspaceSessions => {
-            unreachable!("persistent routes are rendered separately")
-        }
+        list_area,
+        &mut state,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_status(frame: &mut Frame<'_>, area: Rect, _app: &App, overview: &HostOverview) {
+    let [header, content] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(2), Constraint::Min(1)])
+        .areas(area);
+    render_workspace_header(frame, header, "Status", "read-only overview");
+    let value_width = usize::from(content.width).saturating_sub(14).max(8);
+    let config = match overview.config_state {
+        ConfigState::Ready => "ready",
+        ConfigState::Missing => "not configured",
+        ConfigState::Invalid => "invalid",
     };
-    frame.render_widget(Paragraph::new(content).wrap(Wrap { trim: true }), area);
+    let pi_source = match overview.pi.source {
+        crate::home::PiSource::Configured => "configured",
+        crate::home::PiSource::Path => "PATH discovery",
+        crate::home::PiSource::Unknown => "unknown",
+    };
+    let pi_value = format!(
+        "{pi_source} · {} · {}",
+        safe_terminal_value(
+            overview
+                .pi
+                .version
+                .as_deref()
+                .unwrap_or("version unavailable"),
+            40,
+        ),
+        pi_compatibility_label(overview)
+    );
+    let pi_path = safe_terminal_value(
+        overview.pi.executable.as_deref().unwrap_or("not detected"),
+        value_width,
+    );
+    let service_value = format_service_detail(overview);
+    let relay_value = overview.access.relay_url.as_deref().map_or_else(
+        || "local network only".to_owned(),
+        |url| {
+            format!(
+                "{} · {}",
+                safe_terminal_value(&crate::commands::relay::display_relay_url(url), 80),
+                if overview.access.relay_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            )
+        },
+    );
+    let mut lines = vec![
+        status_line(
+            "Config",
+            config,
+            Style::default().fg(if overview.config_state == ConfigState::Invalid {
+                Color::Red
+            } else {
+                Color::White
+            }),
+        ),
+        status_line(
+            "Host",
+            safe_terminal_value(
+                overview.host.as_deref().unwrap_or("not configured"),
+                value_width,
+            ),
+            Style::default().fg(Color::White),
+        ),
+        status_line(
+            "Pi",
+            truncate_end(&pi_value, value_width),
+            Style::default().fg(Color::DarkGray),
+        ),
+        status_line("Pi path", pi_path, Style::default().fg(Color::DarkGray)),
+        status_line(
+            "Service",
+            truncate_end(&service_value, value_width),
+            service_style(overview),
+        ),
+        status_line(
+            "Relay",
+            truncate_end(&relay_value, value_width),
+            relay_style(overview),
+        ),
+        status_line(
+            "Inventory",
+            format!(
+                "{} paired · {} authorized",
+                overview.devices, overview.workspaces
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+        status_line(
+            "Config path",
+            safe_terminal_value(&overview.config_path, value_width),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    if let Some(error) = &overview.config_error {
+        lines.push(status_line(
+            "Error",
+            safe_terminal_value(error, value_width),
+            Style::default().fg(Color::Red),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), content);
+}
+
+fn format_pi_detail(overview: &HostOverview, configured: Option<&std::path::Path>) -> String {
+    let (source, executable) = configured.map_or_else(
+        || {
+            let source = match overview.pi.source {
+                crate::home::PiSource::Configured => "configured",
+                crate::home::PiSource::Path => "PATH discovery",
+                crate::home::PiSource::Unknown => "unknown",
+            };
+            (
+                source.to_owned(),
+                overview
+                    .pi
+                    .executable
+                    .clone()
+                    .unwrap_or_else(|| "not detected".to_owned()),
+            )
+        },
+        |path| ("configured".to_owned(), path.display().to_string()),
+    );
+    let version = overview
+        .pi
+        .version
+        .as_deref()
+        .unwrap_or("version unavailable");
+    format!(
+        "{source} · {} · {} · {}",
+        safe_terminal_value(version, 40),
+        pi_compatibility_label(overview),
+        safe_terminal_value(&executable, 30)
+    )
+}
+
+fn format_service_detail(overview: &HostOverview) -> String {
+    let state = service_summary(overview);
+    let version = overview
+        .service
+        .pix_version
+        .as_deref()
+        .map_or_else(String::new, |version| {
+            format!(" · Pix {}", safe_terminal_value(version, 40))
+        });
+    let detail = match (overview.service.pid, overview.service.port) {
+        (Some(pid), Some(port)) => format!("pid {pid} · port {port}{version}"),
+        (Some(pid), None) => format!("pid {pid}{version}"),
+        (None, Some(port)) => format!("port {port}{version}"),
+        (None, None) => overview
+            .service
+            .pix_version
+            .as_deref()
+            .map_or_else(String::new, |version| {
+                format!("Pix {}", safe_terminal_value(version, 40))
+            }),
+    };
+    if detail.is_empty() {
+        state
+    } else {
+        format!("{state} · {detail}")
+    }
+}
+
+fn pi_compatibility_label(overview: &HostOverview) -> &'static str {
+    match overview.pi.compatibility {
+        Some(pix_core::PiCompatibilityStatus::Compatible) => "compatible",
+        Some(pix_core::PiCompatibilityStatus::UpdateRequired) => "update required",
+        Some(pix_core::PiCompatibilityStatus::MissingRequiredCapability) => {
+            "RPC capability missing"
+        }
+        Some(pix_core::PiCompatibilityStatus::NotFound) => "not found",
+        Some(pix_core::PiCompatibilityStatus::CannotLaunch) => "could not start",
+        None => "not checked",
+    }
 }
 
 fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, overlay: &Overlay) {
@@ -2332,6 +3039,8 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, overlay: &Overla
         Overlay::Remove(remove) => render_remove_overlay(frame, area, remove),
         Overlay::RevokeDevice(revoke) => render_revoke_device_overlay(frame, area, revoke),
         Overlay::Pair(pairing) => render_pairing_overlay(frame, area, pairing),
+        Overlay::Edit(edit) => render_edit_overlay(frame, area, edit),
+        Overlay::Confirm(confirm) => render_confirm_overlay(frame, area, confirm),
     }
 }
 
@@ -2463,6 +3172,88 @@ fn input_line(input: &TextInput, max_chars: usize) -> Span<'static> {
         format!("{prefix}{before}▌{after}{suffix}"),
         Style::default().fg(Color::White),
     )
+}
+
+fn render_edit_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &EditOverlay) {
+    let (title, prompt, hint) = match overlay.kind {
+        EditKind::Relay => (
+            " Edit relay ",
+            "Relay WebSocket URL (ws:// or wss://)",
+            "Enter save   Esc cancel",
+        ),
+        EditKind::Pi => (
+            " Choose Pi ",
+            "Pi executable path",
+            "Enter check and save   Esc cancel",
+        ),
+    };
+    let height = if overlay.error.is_some() { 9 } else { 8 };
+    let Some(popup) = centered_popup(area, 70, height) else {
+        return;
+    };
+    let mut content = vec![
+        Line::from(Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("› ", Style::default().fg(Color::Cyan)),
+            input_line(&overlay.input, usize::from(popup.width).saturating_sub(6)),
+        ]),
+    ];
+    if let Some(error) = &overlay.error {
+        content.push(Line::from(Span::styled(
+            truncate_end(error, usize::from(popup.width).saturating_sub(4).max(1)),
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        content.push(Line::from(""));
+    }
+    content.push(Line::from(Span::styled(
+        hint,
+        Style::default().fg(Color::DarkGray),
+    )));
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(content)
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: true }),
+        popup,
+    );
+}
+
+fn render_confirm_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &ConfirmOverlay) {
+    let Some(popup) = centered_popup(area, 62, 8) else {
+        return;
+    };
+    let action = overlay.action.action_label();
+    let choices = [action, "Cancel"];
+    let items = choices
+        .iter()
+        .map(|choice| ListItem::new(*choice))
+        .collect::<Vec<_>>();
+    let mut state = ListState::default();
+    state.select(Some(overlay.selected.min(1)));
+    frame.render_widget(Clear, popup);
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", overlay.action.title())),
+            )
+            .highlight_symbol("❯ ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        popup,
+        &mut state,
+    );
 }
 
 fn render_remove_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &RemoveOverlay) {
@@ -2775,7 +3566,9 @@ fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static st
             Route::Workspaces if workspace_count == 0 => "A Add  ↵ Add  Esc  ?",
             Route::Workspaces => "↑↓ Move  ↵ Sessions  A Add  R Remove  Esc  ?",
             Route::WorkspaceSessions => "↑↓/jk Navigate   Esc Back   ? Help",
-            Route::Devices | Route::Settings | Route::Status => "Esc/q Back   ? Help",
+            Route::Devices => "Esc/q Back   ? Help",
+            Route::Settings => "↑↓ Move  ↵ Select  Esc Back  ?",
+            Route::Status => "R Refresh  Esc Back  ? Help",
         }
     } else {
         match route {
@@ -2785,7 +3578,9 @@ fn footer_hints(width: u16, route: Route, workspace_count: usize) -> &'static st
                 "↑↓/jk Navigate   ↵ Sessions   A Add   R Remove   Esc Back   ? Help"
             }
             Route::WorkspaceSessions => "↑↓/jk Navigate   Esc Back   ? Help",
-            Route::Devices | Route::Settings | Route::Status => "Esc/q Back   ? Help",
+            Route::Devices => "Esc/q Back   ? Help",
+            Route::Settings => "↑↓/jk Navigate   ↵ Select   Esc Back   ? Help",
+            Route::Status => "R Refresh   Esc Back   ? Help",
         }
     }
 }
@@ -2864,7 +3659,13 @@ fn help_shortcuts(route: Route, workspace_count: usize) -> &'static [&'static st
             "R           remove workspace",
         ],
         Route::WorkspaceSessions => &["↑↓ or j/k   navigate sessions"],
-        Route::Devices | Route::Settings | Route::Status => &[],
+        Route::Devices => &[],
+        Route::Settings => &[
+            "↑↓ or j/k   navigate settings",
+            "Enter       edit or run the selected action",
+            "Esc / q     go back",
+        ],
+        Route::Status => &["R           refresh status", "Esc / q     go back"],
     }
 }
 
@@ -2888,7 +3689,7 @@ fn version_mismatch_hint(overview: &HostOverview) -> Line<'static> {
 fn status_line(label: &str, value: impl Into<String>, style: Style) -> Line<'static> {
     Line::from(vec![
         Span::styled(
-            format!("  {label:<10}"),
+            format!("  {label:<12}"),
             Style::default().fg(Color::DarkGray),
         ),
         Span::styled(value.into(), style),
@@ -2945,11 +3746,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        AddOverlay, App, DeferredNavigation, DeviceItem, InteractionMode, MIN_HEIGHT, Overlay,
-        PairingOverlay, PairingPhase, PendingRequestItem, Route, SessionItem, TerminalSize,
-        TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints, help_shortcuts, input_line,
-        interaction_mode, pairing_qr_fits, pairing_qr_lines, render, should_launch_tui,
-        truncate_end, truncate_path, version_mismatch_message, visible_range,
+        AddOverlay, App, DeferredNavigation, DeviceItem, EditKind, InteractionMode, MIN_HEIGHT,
+        Overlay, PairingOverlay, PairingPhase, PendingRequestItem, Route, SessionItem,
+        SettingsAction, TerminalSize, TextInput, TtyState, WorkerResult, WorkspaceItem,
+        footer_hints, help_shortcuts, input_line, interaction_mode, pairing_qr_fits,
+        pairing_qr_lines, render, safe_error, safe_terminal_value, sanitize_terminal,
+        should_launch_tui, truncate_end, truncate_path, version_mismatch_message, visible_range,
     };
     use crate::app_ops::device as device_ops;
     use crate::app_ops::device::PairingSecret;
@@ -3121,8 +3923,15 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_footers_only_advertise_implemented_actions() {
-        assert_eq!(footer_hints(80, Route::Settings, 1), "Esc/q Back   ? Help");
+    fn footers_advertise_settings_and_status_actions() {
+        assert_eq!(
+            footer_hints(80, Route::Settings, 1),
+            "↑↓/jk Navigate   ↵ Select   Esc Back   ? Help"
+        );
+        assert_eq!(
+            footer_hints(80, Route::Status, 1),
+            "R Refresh   Esc Back   ? Help"
+        );
         assert!(footer_hints(80, Route::Workspaces, 1).contains("A Add"));
         assert!(!footer_hints(80, Route::Workspaces, 0).contains("Sessions"));
     }
@@ -3133,14 +3942,210 @@ mod tests {
             help_shortcuts(Route::Home, 1),
             &["↑↓ or j/k   navigate", "Enter       open"]
         );
-        for route in [Route::Devices, Route::Settings, Route::Status] {
-            assert!(help_shortcuts(route, 1).is_empty());
+        assert!(help_shortcuts(Route::Devices, 1).is_empty());
+        for route in [Route::Settings, Route::Status] {
+            assert!(!help_shortcuts(route, 1).is_empty());
         }
         assert!(!help_shortcuts(Route::Workspaces, 1).is_empty());
         assert_eq!(
             help_shortcuts(Route::Workspaces, 0),
             &["A or Enter  add workspace"]
         );
+    }
+
+    #[test]
+    fn settings_actions_follow_relay_pi_and_service_state() {
+        let mut app = App::new();
+        let mut overview = test_overview(1);
+        overview.access.relay_url = Some("wss://relay.example".to_owned());
+        overview.access.relay_enabled = true;
+        overview.access.mode = super::AccessMode::Relay;
+        overview.pi.source = PiSource::Configured;
+        overview.pi.executable = Some("/usr/local/bin/pi".to_owned());
+        overview.service.state = super::ServiceState::Running;
+        overview.service.installed = true;
+        app.route = Route::Settings;
+        app.sync_overview(&overview);
+        assert!(app.settings_actions.contains(&SettingsAction::RelayToggle));
+        assert!(app.settings_actions.contains(&SettingsAction::RelayClear));
+        assert!(app.settings_actions.contains(&SettingsAction::PiClear));
+        assert!(app.settings_actions.contains(&SettingsAction::Service(
+            super::settings_ops::ServiceAction::Restart
+        )));
+        assert!(app.settings_actions.contains(&SettingsAction::Service(
+            super::settings_ops::ServiceAction::Uninstall
+        )));
+    }
+
+    #[test]
+    fn settings_render_is_persistent_for_normal_and_error_states() {
+        let mut app = App::new();
+        app.route = Route::Settings;
+        let mut overview = test_overview(2);
+        overview.access.relay_url = Some("wss://relay.example/edge".to_owned());
+        overview.access.relay_enabled = false;
+        overview.access.mode = super::AccessMode::RelayDisabled;
+        overview.pi.source = PiSource::Configured;
+        overview.pi.executable = Some("/opt/pi".to_owned());
+        overview.pi.compatibility = Some(pix_core::PiCompatibilityStatus::UpdateRequired);
+        overview.service.state = super::ServiceState::Stopped;
+        overview.service.installed = true;
+        app.sync_overview(&overview);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("settings frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Settings"));
+        assert!(text.contains("relay.example/edge"));
+        assert!(text.contains("Choose Pi executable"));
+        assert!(text.contains("Start service"));
+        assert!(!text.contains("controls will be added"));
+        assert!(!text.contains('┌'));
+
+        overview.config_state = super::ConfigState::Invalid;
+        overview.config_error = Some("configuration needs attention".to_owned());
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("settings error frame");
+        assert!(buffer_text(terminal.backend()).contains("configuration needs attention"));
+    }
+
+    #[test]
+    fn status_render_contains_pi_service_relay_and_inventory() {
+        let mut app = App::new();
+        app.route = Route::Status;
+        let mut overview = test_overview(3);
+        overview.host = Some("Office host".to_owned());
+        overview.pi.source = PiSource::Configured;
+        overview.pi.executable = Some("/usr/local/bin/pi".to_owned());
+        overview.pi.version = Some("0.90.0".to_owned());
+        overview.pi.compatibility = Some(pix_core::PiCompatibilityStatus::Compatible);
+        overview.service.state = super::ServiceState::Running;
+        overview.service.installed = true;
+        overview.service.pid = Some(42);
+        overview.service.port = Some(43123);
+        overview.service.pix_version = Some("0.1.7".to_owned());
+        overview.devices = 3;
+        overview.access.mode = super::AccessMode::Relay;
+        overview.access.relay_enabled = true;
+        overview.access.relay_url = Some("wss://relay.example".to_owned());
+        app.sync_overview(&overview);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("status frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Status"));
+        assert!(text.contains("Office host"));
+        assert!(text.contains("0.90.0"));
+        assert!(text.contains("pid 42"));
+        assert!(text.contains("relay.example"));
+        assert!(text.contains("3 paired"));
+        assert!(text.contains("R Refresh"));
+        assert!(!text.contains('┌'));
+    }
+
+    #[test]
+    fn settings_edit_validation_and_confirmations_stay_in_overlays() {
+        let mut app = App::new();
+        let mut overview = test_overview(0);
+        overview.access.relay_url = Some("wss://relay.example".to_owned());
+        overview.access.relay_enabled = true;
+        overview.access.mode = super::AccessMode::Relay;
+        app.route = Route::Settings;
+        app.sync_overview(&overview);
+        app.selected = 0;
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Edit(ref edit)) if edit.kind == EditKind::Relay
+        ));
+        if let Some(Overlay::Edit(edit)) = app.overlay.as_mut() {
+            edit.input.value = "https://not-websocket".to_owned();
+            edit.input.cursor = edit.input.value.len();
+        }
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(matches!(app.overlay, Some(Overlay::Edit(ref edit)) if edit.error.is_some()));
+
+        app.overlay = Some(Overlay::Confirm(super::ConfirmOverlay {
+            action: super::ConfirmAction::ClearRelay,
+            selected: 1,
+        }));
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(app.overlay.is_none());
+        assert!(app.pending_action.is_none());
+        app.overlay = Some(Overlay::Confirm(super::ConfirmOverlay {
+            action: super::ConfirmAction::ClearRelay,
+            selected: 0,
+        }));
+        app.handle_event(&key(KeyCode::Enter));
+        assert!(matches!(
+            app.pending_action,
+            Some(super::PendingAction::RelayClear)
+        ));
+    }
+
+    #[test]
+    fn settings_edit_accepts_q_as_input() {
+        let mut app = App::new();
+        let overview = test_overview(0);
+        app.route = Route::Settings;
+        app.sync_overview(&overview);
+        app.handle_event(&key(KeyCode::Enter));
+        app.handle_event(&key(KeyCode::Char('q')));
+        assert!(matches!(
+            app.overlay,
+            Some(Overlay::Edit(ref edit)) if edit.input.value == "q"
+        ));
+    }
+
+    #[test]
+    fn settings_mutation_defers_back_until_worker_completion() {
+        let mut app = App::new();
+        app.route = Route::Settings;
+        app.history.push(Route::Home);
+        app.busy = Some("Saving relay endpoint…".to_owned());
+        app.mutation_in_flight = true;
+        app.handle_event(&key(KeyCode::Char('q')));
+        assert_eq!(app.deferred_navigation, Some(DeferredNavigation::Back));
+        let store = ConfigStore::new("/tmp/pix-tui-settings-test-config.json");
+        let mut overview = test_overview(0);
+        app.apply_worker_result(
+            WorkerResult::SettingsFailed {
+                action: SettingsAction::RelayClear,
+                error: "test failure".to_owned(),
+            },
+            &store,
+            &mut overview,
+        );
+        assert_eq!(app.route, Route::Home);
+        assert!(!app.should_quit);
+        assert!(app.busy.is_none());
+    }
+
+    #[test]
+    fn settings_and_status_narrow_render_keep_actions_visible() {
+        let mut overview = test_overview(0);
+        overview.access.relay_url = Some("wss://relay.example".to_owned());
+        overview.access.relay_enabled = true;
+        overview.access.mode = super::AccessMode::Relay;
+        let mut app = App::new();
+        app.route = Route::Settings;
+        app.sync_overview(&overview);
+        let mut terminal = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow settings frame");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("Select"));
+        assert!(text.contains("Edit relay"));
+
+        app.route = Route::Status;
+        terminal
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow status frame");
+        assert!(buffer_text(terminal.backend()).contains("R Refresh"));
     }
 
     #[test]
@@ -3380,6 +4385,15 @@ mod tests {
         let shortened = truncate_path(&path, 12);
         assert_eq!(shortened.chars().count(), 12);
         assert!(shortened.starts_with('…'));
+    }
+
+    #[test]
+    fn settings_values_strip_terminal_controls_and_bound_errors() {
+        assert_eq!(sanitize_terminal("relay\n\u{202e}url"), "relayurl");
+        assert_eq!(safe_terminal_value("\u{001b}\u{0007}", 20), "—");
+        assert_eq!(safe_terminal_value("abcdefghijkl", 5), "abcd…");
+        assert_eq!(safe_error("\u{001b}\u{0007}"), "operation failed");
+        assert_eq!(safe_error(&"x".repeat(300)).chars().count(), 240);
     }
 
     #[test]
