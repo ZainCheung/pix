@@ -2569,7 +2569,7 @@ fn pairing_qr_lines(offer: &device_ops::PairingOffer) -> Option<Vec<String>> {
     let code = qrcode::QrCode::new(payload.expose().as_bytes()).ok()?;
     Some(
         code.render::<qrcode::render::unicode::Dense1x2>()
-            .quiet_zone(false)
+            .quiet_zone(true)
             .build()
             .lines()
             .map(ToOwned::to_owned)
@@ -2701,7 +2701,9 @@ fn render_pairing_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &PairingOv
                     .borders(Borders::ALL)
                     .title(" Pair device "),
             )
-            .wrap(Wrap { trim: true }),
+            // Preserve the QR renderer's quiet-zone whitespace. Trimming it
+            // makes a complete QR harder for cameras to detect reliably.
+            .wrap(Wrap { trim: false }),
         popup,
     );
 }
@@ -3785,6 +3787,10 @@ mod tests {
         assert!(
             qr_lines.len() > 9,
             "test payload must exercise full QR output"
+        );
+        assert!(
+            qr_lines.first().is_some_and(|line| line.trim().is_empty()),
+            "QR output keeps its quiet zone"
         );
         assert!(!pairing_qr_fits(
             ratatui::layout::Rect {

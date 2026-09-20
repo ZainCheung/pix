@@ -9,9 +9,9 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use pix_core::{ConfigStore, config::DeviceRecord};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::commands::shared::host_service_control_live;
@@ -22,7 +22,7 @@ use crate::{service, service_client};
 /// Pairing offers and channel secrets are deliberately not part of this
 /// value.  The confirmation code is the short value the user must compare
 /// with the phone before approving a request.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PendingPairing {
     pub(crate) id: Uuid,
     pub(crate) device_name: String,
@@ -193,13 +193,19 @@ pub(crate) fn list_pending(store: &ConfigStore) -> Result<Vec<PendingPairing>> {
         "pairing_request_list",
         Duration::from_secs(5),
     )?;
-    serde_json::from_value(
-        event
-            .get("requests")
-            .cloned()
-            .context("Pix host omitted pending pairing requests")?,
-    )
-    .context("decoding pending pairing requests")
+    decode_pending_list(&event)
+}
+
+fn decode_pending_list(event: &serde_json::Value) -> Result<Vec<PendingPairing>> {
+    let requests = event
+        .get("requests")
+        .and_then(serde_json::Value::as_array)
+        .context("Pix host omitted pending pairing requests")?;
+    requests
+        .iter()
+        .map(|value| pending_from_value(value).map_err(|error| anyhow!(error.message())))
+        .collect::<Result<Vec<_>>>()
+        .context("decoding pending pairing requests")
 }
 
 pub(crate) fn approve(store: &ConfigStore, request_id: Uuid) -> Result<PairingRequestAction> {
@@ -409,7 +415,7 @@ impl PairingSession {
                 ))))
             }
             "pairing_requested" => {
-                let request = parse_pending(&value)?;
+                let request = pending_from_value(&value)?;
                 self.request = Some(request.id);
                 self.request_device_name = Some(request.device_name.clone());
                 self.expires_at = (request.expires_at > 0).then_some(request.expires_at);
@@ -561,8 +567,9 @@ pub(crate) fn remote_pairing_offer_rpc(store: &ConfigStore) -> Result<PairingOff
     })
 }
 
-#[cfg(unix)]
-fn parse_pending(value: &serde_json::Value) -> std::result::Result<PendingPairing, PairingFailure> {
+fn pending_from_value(
+    value: &serde_json::Value,
+) -> std::result::Result<PendingPairing, PairingFailure> {
     let id = value
         .get("id")
         .and_then(serde_json::Value::as_str)
@@ -607,9 +614,9 @@ fn unix_now() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
-    use super::{PairingFailure, parse_pending};
+    use super::{PairingFailure, decode_pending_list, pending_from_value};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -622,7 +629,7 @@ mod tests {
             "confirmation_code": "012345",
             "expires_at": 1_900_000_000_u64,
         });
-        let pending = parse_pending(&valid).expect("valid pending event");
+        let pending = pending_from_value(&valid).expect("valid pending event");
         assert_eq!(pending.id, id);
         assert_eq!(pending.confirmation_code, "012345");
 
@@ -651,7 +658,25 @@ mod tests {
                 "expires_at": 0_u64,
             }),
         ] {
-            assert_eq!(parse_pending(&invalid), Err(PairingFailure::InvalidEvent));
+            assert_eq!(
+                pending_from_value(&invalid),
+                Err(PairingFailure::InvalidEvent)
+            );
         }
+    }
+
+    #[test]
+    fn pending_list_rejects_malformed_requests_before_the_devices_page() {
+        let id = Uuid::new_v4();
+        let event = json!({
+            "requests": [{
+                "id": id,
+                "device_name": "Phone",
+                "confirmation_code": "",
+                "expires_at": 0_u64,
+            }],
+        });
+        let error = decode_pending_list(&event).expect_err("malformed request must fail closed");
+        assert!(format!("{error:#}").contains("invalid event"));
     }
 }
