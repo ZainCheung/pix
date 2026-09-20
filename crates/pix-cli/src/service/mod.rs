@@ -294,16 +294,35 @@ fn emit_mutation(output: CommandOutput, command: &str, store: &ConfigStore) -> R
 /// Installs and starts the service for setup. The returned path is only used
 /// for setup UI; the actual daemon is managed by the platform service manager.
 pub fn install_for_setup(store: &ConfigStore) -> Result<PathBuf> {
+    install_quiet(store)
+}
+
+/// Installs and starts the managed service without writing human output.
+///
+/// This is the terminal-free operation used by both setup and the TUI. The
+/// default mirrors `pix service install`: it starts the service immediately
+/// and keeps the existing service-owner safety check.
+pub fn install_quiet(store: &ConfigStore) -> Result<PathBuf> {
     let unit_path = install_service(store, false, false, false)?;
     wait_until_ready(store)?;
     Ok(unit_path)
 }
 
+/// Starts an already installed service without writing human output.
+pub fn start_quiet(store: &ConfigStore) -> Result<()> {
+    start_with_announce(store, false)
+}
+
+/// Uninstalls the managed service without writing human output.
+pub fn uninstall_quiet(store: &ConfigStore) -> Result<()> {
+    platform_uninstall(store, false)?;
+    remove_service_owner(store)
+}
+
 /// Removes the service unit. Setup uses this when the user asked for no
 /// background service but pairing needed a temporary host.
 pub fn uninstall_for_setup(store: &ConfigStore) -> Result<()> {
-    platform_uninstall(store, false)?;
-    remove_service_owner(store)
+    uninstall_quiet(store)
 }
 
 fn start_with_announce(store: &ConfigStore, announce: bool) -> Result<()> {

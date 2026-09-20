@@ -1,11 +1,11 @@
 //! Relay endpoint configuration.
 
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
 use pix_core::ConfigStore;
 
+use crate::app_ops::settings as settings_ops;
 use crate::output::CommandOutput;
 use crate::setup_ui::{MenuItem, MenuResult, SetupUi, UiTone};
-use crate::status::HostServiceStatus;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn relay_command(
@@ -66,56 +66,44 @@ pub(crate) fn relay_command(
             Ok(())
         }
         RelayCommand::Set { url } => {
-            let url = validate_relay_url(&url)?;
-            let transaction = store.transaction()?;
-            let mut config = transaction.load_or_create(default_host_name())?;
-            config.preferences.relay_url = Some(url.clone());
-            config.preferences.relay_enabled = true;
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
-            let restart_required = HostServiceStatus::current(store.path()).is_some();
+            let mutation = settings_ops::set_relay(store, &url)?;
             if output.is_json() {
-                return output.success("relay.set", &relay_json(&config, restart_required));
+                return output.success(
+                    "relay.set",
+                    &relay_json(&mutation.config, mutation.restart_required),
+                );
             }
-            println!("relay: {url} (enabled)");
-            if restart_required {
+            println!(
+                "relay: {} (enabled)",
+                mutation
+                    .config
+                    .preferences
+                    .relay_url
+                    .as_deref()
+                    .unwrap_or("not configured")
+            );
+            if mutation.restart_required {
                 println!("  Restart the host with `pix service restart` to apply this change.");
             }
             Ok(())
         }
         RelayCommand::Clear => {
-            let transaction = store.transaction()?;
-            let mut config = transaction.load().context("loading Pix configuration")?;
-            config.preferences.relay_url = None;
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
-            let restart_required = HostServiceStatus::current(store.path()).is_some();
+            let mutation = settings_ops::clear_relay(store)?;
             if output.is_json() {
-                return output.success("relay.clear", &relay_json(&config, restart_required));
+                return output.success(
+                    "relay.clear",
+                    &relay_json(&mutation.config, mutation.restart_required),
+                );
             }
             println!("relay: not configured");
-            if restart_required {
+            if mutation.restart_required {
                 println!("  Restart the host with `pix service restart` to apply this change.");
             }
             Ok(())
         }
         RelayCommand::Enable | RelayCommand::Disable => {
             let enable = matches!(command, RelayCommand::Enable);
-            let transaction = store.transaction()?;
-            let mut config = transaction.load().context("loading Pix configuration")?;
-            if enable && config.preferences.relay_url.is_none() {
-                bail!("relay is not configured; run `pix relay set <url>` first");
-            }
-            config.preferences.relay_enabled = enable;
-            transaction
-                .save(&config)
-                .context("saving Pix configuration")?;
-            drop(transaction);
-            let restart_required = HostServiceStatus::current(store.path()).is_some();
+            let mutation = settings_ops::set_relay_enabled(store, enable)?;
             if output.is_json() {
                 return output.success(
                     if enable {
@@ -123,15 +111,15 @@ pub(crate) fn relay_command(
                     } else {
                         "relay.disable"
                     },
-                    &relay_json(&config, restart_required),
+                    &relay_json(&mutation.config, mutation.restart_required),
                 );
             }
-            match (&config.preferences.relay_url, enable) {
+            match (&mutation.config.preferences.relay_url, enable) {
                 (Some(url), true) => println!("relay: {url} (enabled)"),
                 (Some(url), false) => println!("relay: {url} (disabled)"),
                 (None, _) => println!("relay: not configured"),
             }
-            if restart_required {
+            if mutation.restart_required {
                 println!("  Restart the host with `pix service restart` to apply this change.");
             }
             Ok(())
@@ -208,11 +196,7 @@ pub(crate) fn relay_menu(store: &ConfigStore, output: CommandOutput) -> Result<(
 }
 
 pub(crate) fn validate_relay_url(url: &str) -> Result<String> {
-    let value = url.trim();
-    pix_core::validate_relay_url(value).context(
-        "relay URL must be a valid ws:// or wss:// endpoint without credentials or a fragment",
-    )?;
-    Ok(value.to_owned())
+    settings_ops::validate_relay_url(url)
 }
 
 pub(crate) fn display_relay_url(url: &str) -> String {
@@ -223,5 +207,5 @@ pub(crate) fn display_relay_url(url: &str) -> String {
 }
 
 use crate::RelayCommand;
-use crate::commands::shared::{default_host_name, load_or_ephemeral_config};
+use crate::commands::shared::load_or_ephemeral_config;
 use crate::{print_cli_help, usage_error};
