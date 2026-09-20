@@ -2,6 +2,7 @@
 //! bridge, remote pairing offers, and the local control RPC responder.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -752,6 +753,27 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
                         }
                     }
                 }
+                Some("pair-cancel") => {
+                    // Pairing offers are ephemeral service state.  Cancelling
+                    // them must not touch durable device trust or emit the
+                    // encoded offer to a generic error/log path.
+                    if let Some(manager) = &relay {
+                        manager.cancel_remote_pairing();
+                    }
+                    if let Some(pending) = pending_remote_pairing.take()
+                        && let Some(responder) = pending.responder
+                    {
+                        let _ = responder.success(&serde_json::json!({
+                            "type": "pairing_cancelled",
+                        }));
+                    } else {
+                        respond_rpc_success(
+                            &mut rpc_responder,
+                            serde_json::json!({"type": "pairing_cancelled"}),
+                            &log,
+                        );
+                    }
+                }
                 Some("pending") => {
                     for request in service.pending_requests() {
                         emit_event(
@@ -1032,7 +1054,7 @@ pub(crate) fn percent_encode(value: &str) -> String {
     encoded
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ServeEvent {
     Ready {
@@ -1126,6 +1148,15 @@ pub(crate) enum ServeEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         local_request_id: Option<uuid::Uuid>,
     },
+}
+
+impl fmt::Debug for ServeEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Use the payload-free diagnostic view rather than the derived enum
+        // formatter. A remote pairing event contains an encoded channel
+        // secret that must never enter Debug output.
+        write!(formatter, "{}", loggable_event(self))
+    }
 }
 
 #[derive(Debug, Serialize)]

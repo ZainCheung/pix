@@ -141,11 +141,25 @@ impl RelayAgent {
         })
     }
 
-    fn shutdown(&mut self) {
+    fn request_shutdown(&self) {
         self.stop.store(true, Ordering::Release);
+    }
+
+    fn shutdown(&mut self) {
+        self.request_shutdown();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+
+    /// Requests the supervisor to stop immediately, then joins it away from
+    /// the caller. A relay/TLS read can take several seconds to unwind, so
+    /// pairing cancellation must not block the host command loop.
+    fn retire(mut self) {
+        self.request_shutdown();
+        let _ = thread::Builder::new()
+            .name("pix-relay-retire".to_owned())
+            .spawn(move || self.shutdown());
     }
 }
 
@@ -704,18 +718,30 @@ impl RelayManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .replace(agent);
         if let Some(previous) = previous {
-            // Shutdown joins the supervisor thread, which may be blocked in
-            // a TLS connect for many seconds; never stall the caller (the
-            // host command loop) on that.
-            let _ = thread::Builder::new()
-                .name("pix-relay-retire".to_owned())
-                .spawn(move || drop(previous));
+            previous.retire();
         }
         Ok(RemotePairingOffer {
             channel_secret,
             join_code,
             expires_in: ttl,
         })
+    }
+
+    /// Stops the active remote pairing channel, if any.
+    ///
+    /// The stop flag is set before returning so an old QR/join secret cannot
+    /// keep a relay supervisor alive while the host reports cancellation.
+    /// Joining happens on a small retirement thread because a TLS connect or
+    /// read can take longer than the host command loop should block.
+    pub fn cancel_remote_pairing(&self) {
+        let pairing = self
+            .pairing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pairing) = pairing {
+            pairing.retire();
+        }
     }
 
     /// Stops every standing and pairing channel.

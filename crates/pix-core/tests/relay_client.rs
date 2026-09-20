@@ -708,6 +708,54 @@ fn relay_agent_reconnects_with_backoff_after_relay_outage() {
     relay_thread.join().expect("mock relay thread");
 }
 
+#[test]
+fn cancelling_remote_pairing_stops_the_old_channel() {
+    let relay = MockRelay::start();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind local bridge");
+    let local_port = listener.local_addr().expect("bridge address").port();
+    let (events_tx, events) = mpsc::channel();
+    let manager = RelayManager::new(relay.url.clone(), local_port, events_tx);
+    let offer = manager
+        .start_remote_pairing(Duration::from_secs(120))
+        .expect("start remote pairing channel");
+    wait_for_relay_event(
+        &events,
+        |event| matches!(event, RelayServiceEvent::ChannelWaiting { label } if label == "pairing"),
+    );
+
+    let mut phone = RelayPhone::join(&relay.url, &offer.channel_secret);
+    phone.wait_for_peer();
+    manager.cancel_remote_pairing();
+    wait_for_relay_event(
+        &events,
+        |event| matches!(event, RelayServiceEvent::ChannelStopped { label } if label == "pairing"),
+    );
+
+    // The old secret may still be syntactically valid, but its host side is
+    // gone. An already-connected client must observe the channel closing.
+    let deadline = Instant::now() + TEST_TIMEOUT;
+    let mut peer_left = false;
+    while Instant::now() < deadline {
+        match phone.socket.read() {
+            Ok(Message::Text(text)) if text.as_str().contains("peer_left") => {
+                peer_left = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
+            Err(error) => panic!("old pairing channel failed unexpectedly: {error}"),
+        }
+    }
+    assert!(peer_left, "cancelled pairing channel kept its peer alive");
+    phone.close();
+    manager.shutdown();
+}
+
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())

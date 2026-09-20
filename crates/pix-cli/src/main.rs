@@ -10,6 +10,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 use pix_core::ConfigStore;
 
+mod app_ops;
 mod commands;
 mod diagnostics;
 mod home;
@@ -443,6 +444,20 @@ mod tests {
         assert!(rendered.contains("[redacted]"));
         assert!(!rendered.contains("top-secret"));
         assert!(!rendered.contains("ABCD-EFGH"));
+    }
+
+    #[test]
+    fn debug_events_redact_remote_pairing_material() {
+        let event = ServeEvent::RemotePairingReady {
+            qr_payload: "pix://pair?secret=top-secret".to_owned(),
+            join_code: "ABCD-EFGH".to_owned(),
+            expires_at: 123,
+            local_request_id: None,
+        };
+        let rendered = format!("{event:?}");
+        assert!(!rendered.contains("top-secret"));
+        assert!(!rendered.contains("ABCD-EFGH"));
+        assert!(rendered.contains("redacted"));
     }
 
     #[test]
