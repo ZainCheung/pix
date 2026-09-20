@@ -757,6 +757,9 @@ pub(crate) fn serve(store: &ConfigStore, json_events: bool, service_mode: bool) 
                     // Pairing offers are ephemeral service state.  Cancelling
                     // them must not touch durable device trust or emit the
                     // encoded offer to a generic error/log path.
+                    if let Some(manager) = &relay {
+                        manager.cancel_remote_pairing();
+                    }
                     if let Some(pending) = pending_remote_pairing.take()
                         && let Some(responder) = pending.responder
                     {

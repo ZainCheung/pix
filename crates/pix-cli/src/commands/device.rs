@@ -298,7 +298,7 @@ pub(crate) fn headless_pair_offer(
         return Ok(());
     }
 
-    let offer = crate::app_ops::device::remote_pairing_offer(store)?;
+    let offer = crate::app_ops::device::remote_pairing_offer_rpc(store)?;
     let qr_payload = offer
         .qr_payload
         .as_ref()

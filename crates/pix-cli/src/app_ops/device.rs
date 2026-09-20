@@ -142,8 +142,6 @@ pub(crate) enum PairingFailure {
     InvalidEvent,
     RelayUnavailable,
     ConnectionFailed,
-    TimedOut,
-    Expired,
 }
 
 impl PairingFailure {
@@ -153,8 +151,6 @@ impl PairingFailure {
             Self::InvalidEvent => "Pairing service returned an invalid event",
             Self::RelayUnavailable => "Remote pairing is unavailable",
             Self::ConnectionFailed => "Device connection failed",
-            Self::TimedOut => "Pairing timed out",
-            Self::Expired => "Pairing offer expired",
         }
     }
 }
@@ -317,7 +313,6 @@ pub(crate) struct PairingSession {
     expires_at: Option<u64>,
     request: Option<Uuid>,
     request_device_name: Option<String>,
-    approved_device: Option<String>,
 }
 
 #[cfg(unix)]
@@ -345,7 +340,6 @@ impl PairingSession {
             expires_at: None,
             request: None,
             request_device_name: None,
-            approved_device: None,
         })
     }
 
@@ -402,8 +396,9 @@ impl PairingSession {
                 let expires_at = value
                     .get("expires_at")
                     .and_then(serde_json::Value::as_u64)
+                    .filter(|expires_at| *expires_at > 0)
                     .ok_or(PairingFailure::InvalidEvent)?;
-                self.expires_at = (expires_at > 0).then_some(expires_at);
+                self.expires_at = Some(expires_at);
                 Ok(Some(PairingEvent::Progress(PairingProgress::OfferReady(
                     PairingOffer {
                         remote: true,
@@ -422,29 +417,9 @@ impl PairingSession {
                     request,
                 ))))
             }
-            "connection_established" => {
-                let name = value
-                    .get("device_name")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("device")
-                    .to_owned();
-                if self
-                    .approved_device
-                    .as_deref()
-                    .is_some_and(|expected| expected == name)
-                {
-                    Ok(Some(PairingEvent::Outcome(PairingOutcome::Success {
-                        device_name: name,
-                    })))
-                } else {
-                    Ok(None)
-                }
-            }
-            "connection_failed" if self.request.is_some() || self.approved_device.is_some() => {
-                Ok(Some(PairingEvent::Outcome(PairingOutcome::Error(
-                    PairingFailure::ConnectionFailed,
-                ))))
-            }
+            "connection_failed" if self.request.is_some() => Ok(Some(PairingEvent::Outcome(
+                PairingOutcome::Error(PairingFailure::ConnectionFailed),
+            ))),
             "relay_channel" => {
                 let failed = value.get("label").and_then(serde_json::Value::as_str)
                     == Some("pairing")
@@ -467,21 +442,29 @@ impl PairingSession {
         }
     }
 
-    pub(crate) fn approve(&mut self, request_id: Uuid) -> std::result::Result<(), PairingFailure> {
+    pub(crate) fn approve(
+        &mut self,
+        request_id: Uuid,
+    ) -> std::result::Result<String, PairingFailure> {
         if self.request != Some(request_id) {
             return Err(PairingFailure::InvalidEvent);
         }
-        service::send_command(&self.store, &format!("approve {request_id}"))
+        let device_name = self
+            .request_device_name
+            .clone()
+            .ok_or(PairingFailure::InvalidEvent)?;
+        crate::app_ops::device::approve(&self.store, request_id)
             .map_err(|_| PairingFailure::ServiceUnavailable)?;
-        self.approved_device = self.request_device_name.clone();
-        Ok(())
+        self.request = None;
+        self.request_device_name = None;
+        Ok(device_name)
     }
 
     pub(crate) fn deny(&mut self, request_id: Uuid) -> std::result::Result<(), PairingFailure> {
         if self.request != Some(request_id) {
             return Err(PairingFailure::InvalidEvent);
         }
-        service::send_command(&self.store, &format!("reject {request_id}"))
+        crate::app_ops::device::deny(&self.store, request_id)
             .map_err(|_| PairingFailure::ServiceUnavailable)?;
         self.request = None;
         self.request_device_name = None;
@@ -496,10 +479,9 @@ impl PairingSession {
 
     fn cancel_pending(&mut self) {
         if let Some(request) = self.request.take() {
-            let _ = service::send_command(&self.store, &format!("reject {request}"));
+            let _ = crate::app_ops::device::deny(&self.store, request);
         }
         self.request_device_name = None;
-        self.approved_device = None;
         if self.remote {
             let _ = service::send_command(&self.store, "pair-cancel");
         }
@@ -525,7 +507,10 @@ impl PairingSession {
         Err(PairingFailure::ServiceUnavailable)
     }
 
-    pub(crate) fn approve(&mut self, _request_id: Uuid) -> std::result::Result<(), PairingFailure> {
+    pub(crate) fn approve(
+        &mut self,
+        _request_id: Uuid,
+    ) -> std::result::Result<String, PairingFailure> {
         Err(PairingFailure::ServiceUnavailable)
     }
 
@@ -542,39 +527,38 @@ pub(crate) enum PairingEvent {
     Outcome(PairingOutcome),
 }
 
-/// Starts a remote offer and waits only until the dedicated offer payload is
-/// ready.  The caller owns presentation of the returned secret (the explicit
-/// JSON CLI is one such intentional presentation surface).
-#[cfg(unix)]
-pub(crate) fn remote_pairing_offer(store: &ConfigStore) -> Result<PairingOffer> {
-    let cancel = AtomicBool::new(false);
-    let mut session =
-        PairingSession::start(store, true).map_err(|error| anyhow::anyhow!(error.message()))?;
-    loop {
-        match session
-            .poll(&cancel)
-            .map_err(|error| anyhow::anyhow!(error.message()))?
-        {
-            Some(PairingEvent::Progress(PairingProgress::OfferReady(offer))) => return Ok(offer),
-            Some(PairingEvent::Outcome(PairingOutcome::Error(error))) => {
-                return Err(anyhow::anyhow!(error.message()));
-            }
-            Some(PairingEvent::Outcome(PairingOutcome::Expired)) => {
-                return Err(anyhow::anyhow!(PairingFailure::Expired.message()));
-            }
-            Some(PairingEvent::Outcome(PairingOutcome::TimedOut)) => {
-                return Err(anyhow::anyhow!(PairingFailure::TimedOut.message()));
-            }
-            Some(PairingEvent::Outcome(_) | PairingEvent::Progress(_)) | None => {}
-        }
-    }
-}
-
-#[cfg(not(unix))]
-pub(crate) fn remote_pairing_offer(_store: &ConfigStore) -> Result<PairingOffer> {
-    Err(anyhow::anyhow!(
-        "interactive pairing is currently supported on Unix hosts"
-    ))
+/// Requests the explicit CLI remote offer through the versioned Host control
+/// path. The TUI uses [`PairingSession`] for its event-driven lifecycle, but
+/// headless commands retain replay/conflict and timeout semantics from the
+/// existing `pairing.remote_offer` RPC.
+pub(crate) fn remote_pairing_offer_rpc(store: &ConfigStore) -> Result<PairingOffer> {
+    let event = service_client::request_event(
+        store,
+        "pair-remote",
+        "remote_pairing_ready",
+        Duration::from_secs(10),
+    )?;
+    let qr_payload = event
+        .get("qr_payload")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| PairingSecret::new(value.to_owned()))
+        .context("Pix host returned an invalid remote pairing QR payload")?;
+    let join_code = event
+        .get("join_code")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| PairingSecret::new(value.to_owned()))
+        .context("Pix host returned an invalid remote pairing join code")?;
+    let expires_at = event
+        .get("expires_at")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|expires_at| *expires_at > 0)
+        .context("Pix host returned an invalid remote pairing expiry")?;
+    Ok(PairingOffer {
+        remote: true,
+        qr_payload: Some(qr_payload),
+        join_code: Some(join_code),
+        expires_at: Some(expires_at),
+    })
 }
 
 #[cfg(unix)]
@@ -592,12 +576,14 @@ fn parse_pending(value: &serde_json::Value) -> std::result::Result<PendingPairin
     let confirmation_code = value
         .get("confirmation_code")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
+        .filter(|value| value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or(PairingFailure::InvalidEvent)?
         .to_owned();
     let expires_at = value
         .get("expires_at")
         .and_then(serde_json::Value::as_u64)
-        .unwrap_or_default();
+        .filter(|expires_at| *expires_at > 0)
+        .ok_or(PairingFailure::InvalidEvent)?;
     Ok(PendingPairing {
         id,
         device_name,
@@ -619,4 +605,53 @@ fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{PairingFailure, parse_pending};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn pending_event_requires_a_canonical_confirmation_code_and_expiry() {
+        let id = Uuid::new_v4();
+        let valid = json!({
+            "id": id,
+            "device_name": "Phone",
+            "confirmation_code": "012345",
+            "expires_at": 1_900_000_000_u64,
+        });
+        let pending = parse_pending(&valid).expect("valid pending event");
+        assert_eq!(pending.id, id);
+        assert_eq!(pending.confirmation_code, "012345");
+
+        for invalid in [
+            json!({
+                "id": id,
+                "device_name": "Phone",
+                "expires_at": 1_900_000_000_u64,
+            }),
+            json!({
+                "id": id,
+                "device_name": "Phone",
+                "confirmation_code": "",
+                "expires_at": 1_900_000_000_u64,
+            }),
+            json!({
+                "id": id,
+                "device_name": "Phone",
+                "confirmation_code": "12-3456",
+                "expires_at": 1_900_000_000_u64,
+            }),
+            json!({
+                "id": id,
+                "device_name": "Phone",
+                "confirmation_code": "123456",
+                "expires_at": 0_u64,
+            }),
+        ] {
+            assert_eq!(parse_pending(&invalid), Err(PairingFailure::InvalidEvent));
+        }
+    }
 }

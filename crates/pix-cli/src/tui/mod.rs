@@ -1479,16 +1479,26 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
                                         device_ops::PairingProgress::Approving,
                                     ),
                                 );
-                                if let Err(error) = session.approve(id) {
-                                    session.cancel();
-                                    return_sender(
-                                        &sender,
-                                        WorkerEvent::Result(WorkerResult::Pairing(
-                                            device_ops::PairingOutcome::Error(error),
-                                        )),
-                                    );
-                                    return;
-                                }
+                                let device_name = match session.approve(id) {
+                                    Ok(device_name) => device_name,
+                                    Err(error) => {
+                                        session.cancel();
+                                        return_sender(
+                                            &sender,
+                                            WorkerEvent::Result(WorkerResult::Pairing(
+                                                device_ops::PairingOutcome::Error(error),
+                                            )),
+                                        );
+                                        return;
+                                    }
+                                };
+                                return_sender(
+                                    &sender,
+                                    WorkerEvent::Result(WorkerResult::Pairing(
+                                        device_ops::PairingOutcome::Success { device_name },
+                                    )),
+                                );
+                                return;
                             }
                             device_ops::PairingCommand::Deny(id) => {
                                 return_sender(
@@ -1498,7 +1508,13 @@ fn spawn_worker(store: &ConfigStore, action: PendingAction) -> Worker {
                                     ),
                                 );
                                 let outcome = match session.deny(id) {
-                                    Ok(()) => device_ops::PairingOutcome::Denied,
+                                    Ok(()) => {
+                                        // A denied remote request has no
+                                        // reason to keep its temporary relay
+                                        // channel alive until TTL expiry.
+                                        session.cancel();
+                                        device_ops::PairingOutcome::Denied
+                                    }
                                     Err(error) => {
                                         session.cancel();
                                         device_ops::PairingOutcome::Error(error)
@@ -2548,10 +2564,46 @@ fn render_revoke_device_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Rev
     );
 }
 
+fn pairing_qr_lines(offer: &device_ops::PairingOffer) -> Option<Vec<String>> {
+    let payload = offer.qr_payload.as_ref()?;
+    let code = qrcode::QrCode::new(payload.expose().as_bytes()).ok()?;
+    Some(
+        code.render::<qrcode::render::unicode::Dense1x2>()
+            .quiet_zone(false)
+            .build()
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect(),
+    )
+}
+
+fn pairing_qr_fits(area: Rect, lines: &[String]) -> bool {
+    let popup_width = 76.min(area.width.saturating_sub(2));
+    let inner_width = usize::from(popup_width.saturating_sub(2));
+    let qr_width = lines
+        .iter()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let popup_height = u16::try_from(lines.len().saturating_add(6)).unwrap_or(u16::MAX);
+    qr_width <= inner_width && popup_height <= area.height.saturating_sub(2)
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_pairing_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &PairingOverlay) {
+    let qr_lines = match &overlay.phase {
+        PairingPhase::Waiting { remote: true } => overlay.offer.as_ref().and_then(pairing_qr_lines),
+        _ => None,
+    };
+    let show_qr = qr_lines
+        .as_deref()
+        .is_some_and(|lines| pairing_qr_fits(area, lines));
     let height = match &overlay.phase {
-        PairingPhase::Waiting { remote: true } if overlay.offer.is_some() => 18,
+        PairingPhase::Waiting { remote: true } if show_qr => qr_lines
+            .as_ref()
+            .and_then(|lines| u16::try_from(lines.len().saturating_add(6)).ok())
+            .unwrap_or(18),
+        PairingPhase::Waiting { remote: true } if overlay.offer.is_some() => 10,
         PairingPhase::Request(_) => 12,
         _ => 9,
     };
@@ -2572,21 +2624,20 @@ fn render_pairing_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &PairingOv
                 Style::default().fg(Color::Cyan),
             )));
             if let Some(offer) = &overlay.offer {
-                if let Some(payload) = &offer.qr_payload
-                    && popup.width >= 42
-                    && popup.height >= 16
-                    && let Ok(code) = qrcode::QrCode::new(payload.expose().as_bytes())
-                {
-                    let image = code
-                        .render::<qrcode::render::unicode::Dense1x2>()
-                        .quiet_zone(false)
-                        .build();
+                if show_qr {
                     lines.extend(
-                        image
-                            .lines()
-                            .take(9)
-                            .map(|line| Line::from(line.to_owned())),
+                        qr_lines
+                            .as_deref()
+                            .unwrap_or_default()
+                            .iter()
+                            .cloned()
+                            .map(Line::from),
                     );
+                } else if offer.qr_payload.is_some() {
+                    lines.push(Line::from(Span::styled(
+                        "QR needs a larger terminal; use the join code.",
+                        Style::default().fg(Color::Yellow),
+                    )));
                 }
                 if let Some(join_code) = &offer.join_code {
                     lines.push(Line::from(vec![
@@ -2895,8 +2946,8 @@ mod tests {
         AddOverlay, App, DeferredNavigation, DeviceItem, InteractionMode, MIN_HEIGHT, Overlay,
         PairingOverlay, PairingPhase, PendingRequestItem, Route, SessionItem, TerminalSize,
         TextInput, TtyState, WorkerResult, WorkspaceItem, footer_hints, help_shortcuts, input_line,
-        interaction_mode, render, should_launch_tui, truncate_end, truncate_path,
-        version_mismatch_message, visible_range,
+        interaction_mode, pairing_qr_fits, pairing_qr_lines, render, should_launch_tui,
+        truncate_end, truncate_path, version_mismatch_message, visible_range,
     };
     use crate::app_ops::device as device_ops;
     use crate::app_ops::device::PairingSecret;
@@ -3720,6 +3771,62 @@ mod tests {
                 "{expected}"
             );
         }
+    }
+
+    #[test]
+    fn pairing_qr_is_whole_or_replaced_with_join_code_guidance() {
+        let offer = device_ops::PairingOffer {
+            remote: true,
+            qr_payload: Some(PairingSecret::from_test("pix://pair?secret=hidden")),
+            join_code: Some(PairingSecret::from_test("ABCD-EFGH")),
+            expires_at: Some(1_900_000_000),
+        };
+        let qr_lines = pairing_qr_lines(&offer).expect("QR renders");
+        assert!(
+            qr_lines.len() > 9,
+            "test payload must exercise full QR output"
+        );
+        assert!(!pairing_qr_fits(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 48,
+                height: 19,
+            },
+            &qr_lines
+        ));
+        assert!(pairing_qr_fits(
+            ratatui::layout::Rect {
+                x: 0,
+                y: 0,
+                width: 120,
+                height: 60,
+            },
+            &qr_lines
+        ));
+
+        let mut app = App::new();
+        app.route = Route::Devices;
+        app.overlay = Some(Overlay::Pair(PairingOverlay {
+            phase: PairingPhase::Waiting { remote: true },
+            offer: Some(offer.clone()),
+            request: None,
+        }));
+        let overview = test_overview(0);
+        let mut narrow = Terminal::new(TestBackend::new(48, 19)).expect("terminal");
+        narrow
+            .draw(|frame| render(frame, &app, &overview))
+            .expect("narrow pairing frame");
+        let narrow_text = buffer_text(narrow.backend());
+        assert!(narrow_text.contains("QR needs a larger terminal"));
+        assert!(narrow_text.contains("ABCD-EFGH"));
+
+        let mut wide = Terminal::new(TestBackend::new(120, 60)).expect("terminal");
+        wide.draw(|frame| render(frame, &app, &overview))
+            .expect("wide pairing frame");
+        let wide_text = buffer_text(wide.backend());
+        assert!(!wide_text.contains("QR needs a larger terminal"));
+        assert!(wide_text.contains("ABCD-EFGH"));
     }
 
     #[test]
